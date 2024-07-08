@@ -19,10 +19,22 @@ public class HelloWorldTest extends CobolTestBase {
 
 	@Test
 	public void test() throws Exception {
-		final File inputFile = new File("src/test/resources/io/proleap/cobol/asg/HelloWorld.cbl");
+		final File inputFile = new File("src/test/resources/io/proleap/cobol/asg/Fib.cbl");
 		final Program program = new CobolParserRunnerImpl().analyzeFile(inputFile, CobolSourceFormatEnum.TANDEM);
 
-		final CompilationUnit compilationUnit = program.getCompilationUnit("HelloWorld");
+		final CompilationUnit compilationUnit = program.getCompilationUnit("Fib");
+		final ProgramUnit programUnit = compilationUnit.getProgramUnit();
+		final DataDivision dataDivision = programUnit.getDataDivision();
+		final WorkingStorageSection workingStorageSection = dataDivision.getWorkingStorageSection();
+		assertEquals(3, workingStorageSection.getDataDescriptionEntries().size());
+	}
+
+	@Test
+	public void test_DPKUT041() throws Exception {
+		final File inputFile = new File("src/test/resources/io/proleap/cobol/asg/DPKUT041.cbl");
+		final Program program = new CobolParserRunnerImpl().analyzeFile(inputFile, CobolSourceFormatEnum.FIXED);
+
+		final CompilationUnit compilationUnit = program.getCompilationUnit("DPKUT041");
 		final ProgramUnit programUnit = compilationUnit.getProgramUnit();
 		final DataDivision dataDivision = programUnit.getDataDivision();
 		final WorkingStorageSection workingStorageSection = dataDivision.getWorkingStorageSection();
