@@ -1,0 +1,1517 @@
+       IDENTIFICATION DIVISION.                                                 
+       PROGRAM-ID.              MLKUT366.                                       
+       AUTHOR.                  RONNA MCDONALD.                                 
+       INSTALLATION.            KOHLS DEPARTMENT STORES.                        
+       DATE-WRITTEN.            12/02/2021.                                     
+       DATE-COMPILED.                                                           
+      ******************************************************************        
+      *                                                                *        
+      *  ALLOCATE UNKNOWN BRANDS FOR 'BVEDIT' AUDIT RECORDS FOR        *        
+      *  AP TRAN CODE TYPE '0D' AND '0F' THAT HAVE UNKNOWN BRAND       *        
+      *                                                                *        
+      *  THIS PROGRAM WAS CLONED AFTER MLKUT361, HOWEVER THIS          *        
+      *  PROGRAM WILL BE USED TO CREATE SEPARATE AUDIT RECORDS         *        
+      *  LABELED BVLIC2 AND UKLIC2(FOR REVERSALS OF THE BVLIC2         *        
+      *  FOR DATA INTEGRITY - IN OTHER WORDS THESE SHOULD NET OUT TO 0)*        
+      *  TO JUST SHOW THE BRAND ALLOCATION FOR LICENSE                 *        
+      *  FEE ACTIVITY THAT DID NOT GET RESOLVED IN THE BVEDIT STEP     *        
+      *                                                                *        
+      *  THE REASON WHY THIS IS BEING DONE IS BECAUSE THE BVLIC LEVEL  *        
+      *  INCLUDES '0N' RECORDS.  THE LOGIC TO FILL IN THE AP TRAN CDE  *        
+      *  USES THE BVEDIT LEVEL RECORDS, BUT THERE CAN BE MORE THAN     *        
+      *  ONE AP TRAN CODE AND NO GUARANTEE AT GETTING THE CORRECT      *        
+      *  AP TRAN CODE.                                                 *        
+      *                                                                *        
+      *  THE IDEA HERE IS THAT DATA WAREHOUSE AND KDP WILL BE ABLE TO  *        
+      *  QUERY THE AUDIT TABLE 'BVEDIT' AND 'BVLIC2' WHERE THE BRAND   *        
+      *  IS NOT UNKNOWN ('2230') AND THE AP TRAN CODE IS '0D' OR 'OF'  *        
+      *  IN ORDER TO GET THE BRANDS FOR THE LICENSE FEE VENDORS.       *        
+      *                                                                *        
+      *  BELOW IS A LIST OF IMPORTANT THINGS THAT MUST BE SET UP IN    *        
+      *  ORDER FOR THE LICENSE FEE PROCESSING TO WORK AS EXPECTED      *        
+      *                                                                *        
+      *  1.  THE MLT_VND_ALLOC TABLE WITH TYPE 3 RECORDS MUST HAVE THE *        
+      *      APPROPRIATE LICENSE FEE VENDORS WITH THE ASSOCIATED       *        
+      *      BRANDS IN ORDER FOR THE ALLOCATION TO WORK                *        
+      *                                                                *        
+      *  2.  THESE LICENSE FEE VENDORS CANNOT BE USED FOR ANY AP TRAN  *        
+      *      TYPE CODES OTHER THAT '0D' AND 'OF' FOR LICENSE FEES, OR  *        
+      *      '0N' FOR NYO LICENSE                                      *        
+      *                                                                *        
+      *  3.  THE '0N' TYPES MIGHT GET RESOLVED IN THE BVEDIT           *        
+      *      PROCESSING, HOWEVER IF THOSE DO NOT, THEY WILL GET        *        
+      *      RESOLVED IN THE 'BVLIC' PROCESSING, AND THESE             *        
+      *      WILL GET MUDDLED IN WITH THE '0D' AND '0F' IN MLK916 JOB  *        
+      *                                                                *        
+      *  4.  IF THE 'OD' AND 'OF' TRANSACTIONS GET BRAND RESOLVED IN   *        
+      *      THE 'BVEDIT' STEP, THEN THOSE ARE VENDORS THAT ARE ALSO   *        
+      *      MERCHANDISING VENDORS.                                    *        
+      *                                                                *        
+      *  5.  IF ANY TRANSACTION COMES INTO ML WHERE THE AP TRAN CODE   *        
+      *      IS NOT '0D' OR '0F' AND IT IS NOT ALREADY SET UP AS A     *        
+      *      FREIGHT VENDOR, IT WILL DEFAULT TO A FREIGHT VENDOR.  FOR *        
+      *      THIS REASON, WE MUST MANUALLY ADD IN THE LICENSE FEE      *        
+      *      VENDOR AND THE ASSOCIATED BRANDS IN THE MLT_VND_ALLOC     *        
+      *      TABLE BEFORE ANY TRANSACTIONS FLOW THROUGH ML.            *        
+      *                                                                *        
+      *  THIS PROGRAM IS LIKE MLKUT341, EXCEPT IT REPLACES THE                  
+      *  DATA FROM MLT_MNLY_SUM WITH THE BVEDIT TRANSACTIONS FOR                
+      *  AP TRAN CODE TYPES '0D' AND '0F'                                       
+      *                                                                         
+      *  THE INTENT OF THIS PROGRAM IS TO CREATE AUDIT RECORDS WITH THE         
+      *  LABLE BVLIC2 THAT CAN BE INSERTED INTO THE MLT_PADJ_TRN_DTL            
+      *  AND NOTHING SHOULD BE UPDATED IN ANY OTHER ML TABLE                    
+      *                                                                         
+      *  THE SAME PERCENTAGES CALCULATED FROM THE RECEIPTS IS USED              
+      *  AS INPUT IN THE PROGRAM AS WELL.                                       
+      *                                                                         
+      *  A FILE CONTAINING THE VENDORS TO BE RE-ALLOCATED IS READ. FOR *        
+      *  EACH VENDOR, THE DEPARTMENTS AND DKEYS ARE SELECTED FROM THE  *        
+      *  BRAND RELATIONSHIP TABLE. FOR EACH DEPT SUBCL, BRAND, VENDOR  *        
+      *  COMBINATION, OF THE '0D' OR '0F' RECORD A REVERSAL WILL BE    *        
+      *  CREATED WITH A LABEL RVLIC2 AND WRITTEN TO THE AUDIT FILE.    *        
+      *  THE REVERSAL WILL HAVE 2230 FOR THE BRAND                     *        
+      *  THEN TRANSACTIONS ARE CREATED TO DISTRIBUTE THE PRORATION     *        
+      *  OF THE BRANDS BASED ON THE PRORATION NUMBERS CREATED IN       *        
+      *  THE MLK916 JOB.                                               *        
+      *  THE BRAND VENDORS USED FOR THE LICENSE FEE DISTRIBUTION       *        
+      *  ARE LOADED INTO AN INTERNAL TABLE (SIMILAR TO MLKUT361        *        
+      *  PROGRAM THAT THIS WAS CLONED AFTER)                           *        
+      *                                                                *        
+      *  NOTE:  PROGRAM MLKUP056 IS USED TO UPDATE THE AUDIT TABLES    *        
+      *         THE PROCESSING DATE CAN BE OVERRIDEN AND IS            *        
+      *         OVERRIDEN IN THAT PROGRAM IN JOBS MLK056 AND MLK049    *        
+      *         BUT THIS PROCESS IS READING IN THE RECORDS FROM MLK056 *        
+      *         AND THE PROCESSING DATE NEEDS TO MATCH THAT SO         *        
+      *         THIS PROCESS KNOWS WHAT TO PULL                        *        
+      *                                                                *        
+      ******************** HISTORY OF CHANGES **************************        
+      * CHG ID/                                                        *        
+      * WR/PROJ  DATE        DESCRIPTION OF CHANGES                    *        
+      * -------  ----------  ----------------------------------------  *        
+      *          2021-12-02  CREATION                                  *        
+      *                      R MCDONALD                                *        
+RONNAX* RONNAX   2021-07-14  FIXED BVLIC2 AND UNLIC2 '0F' AP TRAN      *        
+RONNAX* CHG0272214           CODE AUDIT RECORDS.                                
+RONNAX*                                                                *        
+RONNAX*                      THE SIGN ON THE AMOUNT FIELD FOR '0F'              
+RONNAX*                      BVLIC2 AND UKLIC2 RECORDS WAS NOT CORRECT *        
+RONNAX*                                                                *        
+RONNAX*                      THE '0F' COME TO ML AS CREDITS AND        *        
+RONNAX*                      THE '0D' AS DEBITS.                       *        
+RONNAX*                                                                *        
+RONNAX*                      THE BVLIC2 AND UKLIC2 AUDIT RECORDS:      *        
+RONNAX*                      FOR THE '0F' AP TRAN CODE, THE AMOUNT IS  *        
+RONNAX*                      NEGATIVE FOR THE '01' DR CR CODE AND      *        
+RONNAX*                      THE AMOUNT IS POSITIVE FOR THE '02'       *        
+RONNAX*                      DR CR CODE.                               *        
+RONNAX*                                                                *        
+RONNAX*                      FOR THE '0D' AP TRAN CODE, THE AMOUNT IS  *        
+RONNAX*                      POSITIVE FOR THE '01' DR CR CODE AND      *        
+RONNAX*                      THE AMOUNT IS NEGATIVE FOR THE '02' DR CR *        
+RONNAX*                      CODE.  NOTE:  THE '0D' WERE OK AND THIS   *        
+RONNAX*                      FIX WAS FOR THE '0F' AP TRAN CODE AUDIT   *        
+RONNAX*                      RECORDS THAT COME OUT OF THIS PROCESS     *        
+RONNAX*                                                                *        
+RONNAX*                      UNDERSTAND THAT THE 'BVEDIT' AUDIT RECORDS*        
+RONNAX*                      THE SIGN OF THE AMOUNT IS IDENTIFIED BY   *        
+RONNAX*                      THE DR CR CODE, WHERE 01 IS A POSITIVE    *        
+RONNAX*                      AND 02 OR 08 IS A NEGATIVE.  FOR ALL OTHER*        
+RONNAX*                      RECORDS, THE SIGN IS REFLECTED IN THE     *        
+RONNAX*                      AMOUNT AND THE DR CR CODE 01 IS AN ADD    *        
+RONNAX*                      TO THE BUCKET AND A 02 IS A SUBTRACT      *        
+RONNAX*                      FROM A BUCKET.                            *        
+RONNAX*                                                                *        
+RONNAX*                      R MCDONALD                                *        
+      ******************************************************************        
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+       CONFIGURATION SECTION.                                                   
+       INPUT-OUTPUT SECTION.                                                    
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT FSCL-DATE-FILE                                                
+               ASSIGN TO INP01.                                                 
+                                                                                
+           SELECT PRCG-DATE-FILE                                                
+               ASSIGN TO INP02.                                                 
+                                                                                
+           SELECT LICENSE-FEES-FILE                                             
+               ASSIGN TO INP03.                                                 
+                                                                                
+           SELECT VENDOR-FILE                                                   
+               ASSIGN TO INP04.                                                 
+                                                                                
+           SELECT LIC-DIST-NOTFND-FILE                                          
+               ASSIGN TO OUT01.                                                 
+                                                                                
+           SELECT DTL-AUDIT-PADJ-FILE                                           
+               ASSIGN TO OUT02.                                                 
+                                                                                
+       DATA DIVISION.                                                           
+       FILE SECTION.                                                            
+                                                                                
+       FD  FSCL-DATE-FILE                                                       
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  FSCL-DATE-REC                   PIC X(80).                           
+                                                                                
+       FD  PRCG-DATE-FILE                                                       
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  PRCG-DATE-REC                   PIC X(80).                           
+                                                                                
+       FD  LICENSE-FEES-FILE                                                    
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  LICENSE-FEES-REC                PIC X(180).                          
+                                                                                
+       FD  VENDOR-FILE                                                          
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  VENDOR-REC                      PIC X(80).                           
+                                                                                
+       FD  LIC-DIST-NOTFND-FILE                                                 
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  LIC-DIST-NOTFND-REC             PIC X(80).                           
+                                                                                
+       FD  DTL-AUDIT-PADJ-FILE                                                  
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  DTL-AUDIT-PADJ-RECORD                PIC X(200).                     
+                                                                                
+       EJECT                                                                    
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  FILLER                          PIC X(40)       VALUE                
+           '*** WORKING STORAGE AREA BEGIN ***'.                                
+                                                                                
+      *****************************************************************         
+      *    CONTROL CARD                                                         
+      *    THERE ARE TWO CONTROL CARDS, ONE IS FOR THE                          
+      *    PROCESSING DATE AND THE OTHER FOR THE OPEN FISCAL                    
+      *    WEEKEND DATE.                                                        
+      *    ONE IS MLCC015 (THE OPEN FISCAL WEEK END DATE) AND THE               
+      *    OTHER IS MLCC081 (THIS IS THE PROCESSING DATE USED                   
+      *    IN MLK056, USED FOR THE BVEDIT PROCESSING DATE                       
+      *    FIELD.                                                               
+      *    IF EITHER OF THESE WOULD NEED TO BE OVERRIDEN IN PROCLIBE            
+      *    DO NOT OVERRIDE THE PRODUCTION CONTROL CARD, BUT USE A               
+      *    TEST VERSION OF THE CONTROL CARD WITH THE NEEDED DATES               
+      *****************************************************************         
+027200 01  CC-CONTROL-CARD.                                             02590000
+027300     05  CC-CALENDAR-TYPE                PIC X(02).               02600000
+027400     05  FILLER                          PIC X.                   02610000
+027500     05  CC-PROC-DATE-ISO                PIC X(10).               02620000
+027600     05  CC-PROC-DATE-RDF  REDEFINES                              02630000
+027700         CC-PROC-DATE-ISO.                                        02640000
+027800         10  CC-PROC-CC                  PIC X(02).               02650000
+027900         10  CC-PROC-YY                  PIC X(02).               02660000
+028000         10  FILLER                      PIC X(01).               02670000
+028100         10  CC-PROC-MM                  PIC X(02).               02680000
+028200         10  FILLER                      PIC X(01).               02690000
+028300         10  CC-PROC-DD                  PIC X(02).               02700000
+028400     05  FILLER                          PIC X.                   02710000
+028500     05  CC-PROCESSING-MODE              PIC X(04).               02720000
+028600         88  CC-PROCESSING-MODE-VALID    VALUE 'ML'  'INV' 'BOTH'.02730000
+028700         88  CC-PROCESSING-MODE-ML       VALUE 'ML'  'BOTH'.      02740000
+028800         88  CC-PROCESSING-MODE-ML-ONLY  VALUE 'ML'.              02750000
+028900         88  CC-PROCESSING-MODE-INV      VALUE 'INV' 'BOTH'.      02760000
+029000         88  CC-PROCESSING-MODE-INV-ONLY VALUE 'INV'.             02770000
+029100     05  FILLER                          PIC X.                   02780000
+029200     05  CC-CHECK-INV-DATES-SW           PIC X.                   02790000
+029300         88  CC-CHECK-INV-DATES-SW-VALID VALUE 'Y' 'N'.           02800000
+029400         88  CC-CHECK-INV-DATES          VALUE 'Y'.               02810000
+029500         88  CC-DONT-CHECK-INV-DATES     VALUE 'N'.               02820000
+029600     05  FILLER                          PIC X(60).               02830000
+029700                                                                  02840000
+       01  CC-PRCG-DATE-CARD.                                                   
+           05  CC-PRCG-DTE               PIC  X(10).                            
+           05  FILLER                    PIC  X(70).                            
+                                                                                
+       01  FILLER                          PIC X(40)       VALUE                
+           '*** PROGRAMMING CONSTANT BEGIN ***'.                                
+                                                                                
+       01  PC-PROGRAM-CONSTANTS-AREA.                                           
+           05  PC-UNKNOWN-BRAND            PIC  S9(4) COMP VALUE +2230.         
+           05  PC-LIC-DIST-NOTFND-HEADER   PIC X(80)       VALUE                
+           'LICENSE FEE DIST PCT NOT FOUND                            '.        
+           05  PC-DIST-NOTFND-HEADER       PIC X(80)       VALUE                
+           'DEPT    VENDOR  NAME                  PADJ RTL         PADJ         
+      -    'NET COST    MKDN RTL'.                                              
+           05 PC-UNKNOWN                   PIC X(08)   VALUE '????????'.        
+           05 PC-BVEDIT                    PIC X(08)   VALUE 'BVEDIT'.          
+           05 PC-DPKUT500                  PIC X(08)   VALUE 'DPKUT500'.        
+                                                                                
+       01  FILLER                          PIC X(40)       VALUE                
+           '*** PROGRAMMING SWITCHES BEGIN ***'.                                
+                                                                                
+       01  PE-PROGRAM-ERROR-MESSAGES.                                           
+           05  PE-MSG-01                   PIC X(50) VALUE                      
+                'ERROR WHILE VALIDATING CONTROL DATE'.                          
+                                                                                
+       01  PS-SWITCHES-AREA.                                                    
+           05  PS-END-OF-PRCG-DTE-FILE     PIC X           VALUE 'N'.           
+               88  END-OF-PRCG-DATES                       VALUE 'Y'.           
+           05  PS-LICENSE-FEES             PIC X           VALUE 'N'.           
+               88  PS-LICENSE-FEES-EOF                     VALUE 'Y'.           
+           05  PS-LF-FOUND-SW              PIC X           VALUE 'N'.           
+               88  PS-LF-FOUND                             VALUE 'Y'.           
+               88  PS-LF-NOT-FOUND                         VALUE 'N'.           
+           05  PS-END-OF-DEPT-CSR          PIC X           VALUE 'N'.           
+               88  NOT-END-OF-DEPT-CSR                     VALUE 'N'.           
+               88  END-OF-DEPT-CSR                         VALUE 'Y'.           
+           05  PS-EO-PADJ-BVEDIT-UNKN-LIC-CSR PIC X        VALUE 'N'.           
+               88  NEO-PADJ-BVEDIT-UNKN-LIC-CSR            VALUE 'N'.           
+               88  EO-PADJ-BVEDIT-UNKN-LIC-CSR             VALUE 'Y'.           
+           05  PS-END-OF-VENDORS           PIC X           VALUE 'N'.           
+               88  NOT-END-OF-VENDORS                      VALUE 'N'.           
+               88  END-OF-VENDORS                          VALUE 'Y'.           
+           05  PS-MNLY-AMTS-NOT-ZERO       PIC X           VALUE 'N'.           
+               88  MNLY-AMTS-NOT-ZERO                      VALUE 'N'.           
+               88  MNLY-AMTS-ZERO                          VALUE 'Y'.           
+051600     05  DATE-ERROR-SW               PIC X           VALUE 'N'.   05180000
+051700         88  NO-DATE-ERROR                           VALUE 'N'.   05190000
+051800         88  DATE-ERROR                              VALUE 'Y'.   05200000
+                                                                                
+       01  FILLER                          PIC X(40)       VALUE                
+           '*** REPORT REQUEST CONTROL REC ***'.                                
+                                                                                
+       01  FILLER                          PIC X(40)       VALUE                
+           '*** PROGRAMMING VARIABLE BEGIN ***'.                                
+                                                                                
+       01  PV-PROGRAM-VARIABLES-AREA.                                           
+           05  PV-PREV-VENDOR-ID           PIC 9(09)       VALUE ZEROES.        
+           05  PV-DEPT-NBR-9               PIC 9(03)       VALUE ZEROES.        
+           05  PV-DEPT-NBR REDEFINES PV-DEPT-NBR-9                              
+                                           PIC X(03).                           
+           05  PV-MAJ-CL-NBR-9             PIC 9(02)       VALUE ZEROES.        
+           05  PV-MAJ-CL-NBR REDEFINES PV-MAJ-CL-NBR-9                          
+                                           PIC X(02).                           
+           05  PV-PERCENT                  PIC 9(03)V9(2)  VALUE ZEROES.        
+           05  PV-PERCENT-SIGNED           PIC S9(03)V9(2) VALUE ZEROES.        
+           05  PV-LICENSE-FEES-LOADED      PIC S9(11)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-VENDORS-READ             PIC S9(11)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-VENDORS-PROCESSED        PIC S9(11)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-VENDORS-DUPLICATES       PIC S9(11)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-FETCHED                  PIC S9(11)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-TOT-FETCHED              PIC S9(13)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-FETCHED             PIC S9(11)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-TOT-TRANS-WRITTEN        PIC S9(13)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-REVERSALS-WRITTEN        PIC S9(11)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-REALLOCATIONS-WRITTEN    PIC S9(13)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-TOT-TSL-NOTFND-WRITTEN   PIC S9(11)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-TOT-LIC-NOTFND-WRITTEN   PIC S9(11)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-TOT-PADJ-AUDIT-WRITTEN   PIC S9(11)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-TOT-PCHG-AUDIT-WRITTEN   PIC S9(11)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PCT                      PIC S9(03)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-LARGEST-PCT-POS          PIC S9(03)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-LARGEST-PCT-NEG          PIC S9(03)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-RTL-AMT             PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-FRGT-COST-AMT       PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-DISC-COST-AMT       PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-RTV-COST-AMT        PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-RTV-RTL-AMT         PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-DA-COST-AMT         PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-DA-RTL-AMT          PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-NET-COST-AMT        PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-OTH-COST-AMT        PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-OTH-RTL-AMT         PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-RTL-AMT-REM         PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-FRGT-COST-AMT-REM   PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-DISC-COST-AMT-REM   PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-RTV-COST-AMT-REM    PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-RTV-RTL-AMT-REM     PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-DA-COST-AMT-REM     PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-DA-RTL-AMT-REM      PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-NET-COST-AMT-REM    PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-OTH-COST-AMT-REM    PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-PADJ-OTH-RTL-AMT-REM     PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-PLU-RTL-AMT         PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-PROMO-RTL-AMT       PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-RGST-RTL-AMT        PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-GLDST-RTL-AMT       PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-UMTCH-RTL-AMT       PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-BYR-RTL-AMT         PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-STR-RTL-AMT         PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-PRPT-RTL-AMT        PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-OTH-RTL-AMT         PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-RTL-AMT             PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-DR-ALW-RTL-AMT           PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-RTV-RTL-AMT              PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-TOT-PADJ-RTL-AMT         PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-TOT-PADJ-NET-COST-AMT    PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-TOT-MKDN-RTL-AMT         PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-PLU-RTL-AMT-REM     PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-PROMO-RTL-AMT-REM   PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-RGST-RTL-AMT-REM    PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-GLDST-RTL-AMT-REM   PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-UMTCH-RTL-AMT-REM   PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-BYR-RTL-AMT-REM     PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-STR-RTL-AMT-REM     PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-PRPT-RTL-AMT-REM    PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-OTH-RTL-AMT-REM     PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-MKDN-RTL-AMT-REM         PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-DR-ALW-RTL-AMT-REM       PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-RTV-RTL-AMT-REM          PIC S9(11)V9(2) VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-DISPLAY-AMT              PIC ----------9.99.                  
+           05  PV-OPER-ATTEMPTED           PIC X(25)       VALUE SPACES.        
+           05  PV-PARAGRAPH-NAME           PIC X(30)       VALUE SPACES.        
+           05  PV-SQLCODE                  PIC -999        VALUE ZEROES.        
+           05  PV-PROCESSING-DATE          PIC X(10)       VALUE SPACES.        
+           05  PV-PROCESSING-DATE-RDF REDEFINES PV-PROCESSING-DATE.             
+               10  PV-PROCESSING-CC        PIC X(02).                           
+               10  PV-PROCESSING-YY        PIC X(02).                           
+               10  PV-PROC-DSH1            PIC X(01).                           
+               10  PV-PROCESSING-MM        PIC X(02).                           
+               10  PV-PROC-DSH2            PIC X(01).                           
+               10  PV-PROCESSING-DD        PIC X(02).                           
+           05  PV-TODAYS-DATE.                                                  
+               10  PV-TODAYS-DATE-YY       PIC 9(02)       VALUE ZEROES.        
+               10  PV-TODAYS-DATE-MM       PIC 9(02)       VALUE ZEROES.        
+               10  PV-TODAYS-DATE-DD       PIC 9(02)       VALUE ZEROES.        
+           05  PV-TODAYS-TIME.                                                  
+               10  PV-TODAYS-TIME-HR       PIC 9(02)       VALUE ZEROES.        
+               10  PV-TODAYS-TIME-MIN      PIC 9(02)       VALUE ZEROES.        
+               10  PV-TODAYS-TIME-SEC      PIC 9(02)       VALUE ZEROES.        
+               10  FILLER                  PIC 9(02)       VALUE ZEROES.        
+           05  PV-DB2-DATE-EXISTS        PIC   X(1) VALUE SPACES.               
+           05  PV-LARGEST-LBL-SEQ-POS      PIC S9(04) COMP VALUE +0.            
+           05  PV-LARGEST-ENT-ID-POS       PIC S9(09) COMP VALUE +0.            
+           05  PV-LARGEST-DKEY-POS         PIC S9(09) COMP VALUE +0.            
+           05  PV-LARGEST-LBL-SEQ-NEG      PIC S9(04) COMP VALUE +0.            
+           05  PV-LARGEST-ENT-ID-NEG       PIC S9(09) COMP VALUE +0.            
+           05  PV-LARGEST-DKEY-NEG         PIC S9(09) COMP VALUE +0.            
+W34517     05  PV-PRORATE-IND              PIC X(01)  VALUE SPACES.             
+W34517         88 PV-PRORATE-REVERSAL                 VALUE 'R'.                
+W34517         88 PV-PRORATE-ALLOCATE                 VALUE 'A'.                
+           05  PV-ISO-DTE                  PIC X(10).                           
+RONNA      05  PV-LBL-SEQ-CONVERSION       PIC S9(6)  VALUE +0.                 
+                                                                                
+       01  MLRD-LICENSE-FEES-REC.                                               
+           05  MLRD-LF-DIST-TYPE           PIC 9(01) VALUE ZEROS.               
+           05  FILLER                      PIC X(01).                           
+           05  MLRD-LF-DEPT-NBR            PIC 9(03) VALUE ZEROS.               
+           05  FILLER                      PIC X(01).                           
+           05  MLRD-LF-GROUP-ID            PIC 9(04) VALUE ZEROS.               
+           05  FILLER                      PIC X(01).                           
+           05  MLRD-LF-LABEL-SEQ           PIC 9(10) VALUE ZEROS.               
+           05  FILLER                      PIC X(01).                           
+           05  MLRD-LF-ENT-ID              PIC 9(10) VALUE ZEROS.               
+           05  FILLER                      PIC X(01).                           
+           05  MLRD-LF-MKDN-BYR-RTL-PCT    PIC X(08).                           
+           05  FILLER                      PIC X(01).                           
+           05  MLRD-LF-RCPT-GRO-COST-PCT   PIC X(08).                           
+           05  FILLER                      PIC X(01).                           
+           05  MLRD-LF-DIST-PCT            PIC X(08).                           
+           05  FILLER                      PIC X(01).                           
+           05  MLRD-LF-DKEY                PIC 9(10) VALUE ZEROS.               
+           05  FILLER                      PIC X(01).                           
+           05  MLRD-LF-DEPT-LAST           PIC X(01) VALUE SPACE.               
+                                                                                
+       01  PT-LICENSE-FEES-TABLE.                                               
+           05  PT-LF-INDX-MAX              PIC S9(05)      VALUE +3000.         
+           05  PT-LICENSE-FEES OCCURS 3000 TIMES                                
+                                           INDEXED BY PT-LF-INDX                
+                                                      PT-LF-INDX-BEG            
+                                                      PT-LF-INDX-TOT.           
+               10  PT-LF-GROUP-ID          PIC  9(04)        VALUE  0.          
+               10  PT-LF-DEPT-NBR          PIC S9(04) COMP-3 VALUE +0.          
+               10  PT-LF-LABEL-SEQ         PIC S9(04) COMP   VALUE +0.          
+               10  PT-LF-ENT-ID            PIC S9(09) COMP   VALUE +0.          
+               10  PT-LF-DIST-PCT          PIC S9(03)V9(2)                      
+                                                      COMP-3 VALUE +0.          
+               10  PT-LF-DKEY              PIC S9(09) COMP   VALUE +0.          
+               10  PT-LF-DEPT-LAST         PIC X(01)        VALUE SPACE.        
+                                                                                
+       01  FILLER                          PIC X(40)       VALUE                
+           '*** SQL WORK AREA BEGIN ***'.                                       
+                                                                                
+      *****************************************************************         
+      *  SQL ABEND ROUTINE WORKING STORAGE                                      
+      *****************************************************************         
+      *01  DP004-DB2-ERROR-FIELDS.                                              
+           COPY DPWS004.                                                        
+                                                                                
+       01  ABEND-CODE                      PIC S9(04)      VALUE ZEROES         
+                               COMP SYNC.                                       
+           88  ABEND-4003                                  VALUE +4003.         
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+069700***************************************************************** 07020000
+069800*  WORK AREA PASSED IN CALL TO DPKUT500                          *07030000
+069900***************************************************************** 07040000
+070000     COPY DPWS500.                                                07050000
+070100                                                                  07060000
+      *---------------------------------------------------------------*         
+      *    MLT_PADJ_TRN_DTL - ML'S PADJ AUDIT TABLE                   *         
+      *---------------------------------------------------------------*         
+           EXEC SQL                                                             
+               INCLUDE MLT00039                                                 
+           END-EXEC.                                                            
+                                                                                
+      *---------------------------------------------------------------*         
+      *    MLV_BRND_VND TABLE                                         *         
+      *---------------------------------------------------------------*         
+           EXEC SQL                                                             
+               INCLUDE MLV00000                                                 
+           END-EXEC.                                                            
+                                                                                
+      *---------------------------------------------------------------*         
+      *    DATE ATTRIBUTE TABLE                                       *         
+      *---------------------------------------------------------------*         
+           EXEC SQL                                                             
+               INCLUDE TDTATTR                                                  
+           END-EXEC.                                                            
+                                                                                
+      *---------------------------------------------------------------*         
+      *    DB2 XMT_VND (GET VENDOR NAME)                              *         
+      *---------------------------------------------------------------*         
+           EXEC SQL                                                             
+               INCLUDE XMT00000                                                 
+           END-EXEC.                                                            
+                                                                                
+      *---------------------------------------------------------------*         
+      *    ML TRANS, SALVALGE, LICENSE FEES NOT FOUND COPYBOOK        *         
+      *---------------------------------------------------------------*         
+           COPY MLRD084.                                                        
+                                                                                
+      *---------------------------------------------------------------*         
+      *    DETAIL AUDIT RECORD LAYOUT                                 *         
+      *---------------------------------------------------------------*         
+           COPY MLRD090.                                                        
+      *---------------------------------------------------------------*         
+      *    EXPENSE VENDOR RECORD LAYOUT                               *         
+      *---------------------------------------------------------------*         
+           COPY MLRD363.                                                        
+      *---------------------------------------------------------------*         
+      *    DEPT_CSR CURSOR                                            *         
+      *---------------------------------------------------------------*         
+                                                                                
+           EXEC SQL   DECLARE DEPT_CSR CURSOR FOR                               
+               SELECT ML_LO_MDSE_LVL_ID                                         
+                     ,DEPT_NBR                                                  
+                     ,LBL_SEQ_NBR                                               
+                     ,ENT_ID                                                    
+                     ,EFF_BEG_DTE                                               
+                     ,EFF_END_DTE                                               
+               FROM  MLV_BRND_VND                                               
+               WHERE ENT_ID      = :MLV00000-ENT-ID                             
+                 AND LBL_SEQ_NBR = :PC-UNKNOWN-BRAND                            
+W34517          WITH UR                                                         
+           END-EXEC.                                                            
+                                                                                
+      *---------------------------------------------------------------*         
+      *    PADJ_BVEDIT_UNKN_LIC_CSR CURSOR                            *         
+      *---------------------------------------------------------------*         
+                                                                                
+           EXEC SQL   DECLARE PADJ_BVEDIT_UNKN_LIC_CSR CURSOR FOR               
+               SELECT                                                           
+                DEPT_NBR                                                        
+               ,MAJ_CL_NBR                                                      
+               ,SUB_CL_NBR                                                      
+               ,LOC_NBR                                                         
+               ,ML_LO_MDSE_LVL_ID                                               
+               ,ORIG_ENT_ID                                                     
+               ,ORIG_LBL_SEQ_NBR                                                
+               ,DMY_SKU_IND                                                     
+               ,FINCL_PRC_GP_CDE                                                
+               ,SRC_SYS_ID                                                      
+               ,TRN_TYP_CDE                                                     
+               ,AP_TRN_CDE                                                      
+               ,DRCR_CDE                                                        
+               ,ENT_ID                                                          
+               ,LBL_SEQ_NBR                                                     
+               ,PADJ_GRO_COST_AMT                                               
+               ,PADJ_NET_COST_AMT                                               
+               ,PADJ_RTL_AMT                                                    
+               ,PADJ_DISC_COST_AMT                                              
+               FROM MLT_PADJ_TRN_DTL                                            
+               WHERE FSCL_WK_END_DTE = :CC-PROC-DATE-ISO                        
+               AND PRCG_DTE          = :CC-PRCG-DTE                             
+               AND DEPT_NBR          = :MLT00039-DEPT-NBR                       
+               AND ML_LO_MDSE_LVL_ID = :MLT00039-ML-LO-MDSE-LVL-ID              
+               AND FINCL_PRC_GP_CDE  = :PC-BVEDIT                               
+               AND AP_TRN_CDE        IN ('0D','0F')                             
+               AND LBL_SEQ_NBR       = :PC-UNKNOWN-BRAND                        
+               WITH UR                                                          
+                                                                                
+           END-EXEC.                                                            
+                                                                                
+       01  FILLER                          PIC X(40)       VALUE                
+           '*** WORKING STORAGE END ***'.                                       
+                                                                                
+       EJECT                                                                    
+       PROCEDURE DIVISION.                                                      
+                                                                                
+       A100-MAIN-MODULE.                                                        
+      ******************************************************************        
+      *  MAIN PROCESSING.                                                       
+      ******************************************************************        
+           PERFORM B100-HOUSEKEEPING.                                           
+                                                                                
+           PERFORM Z100-READ-VENDOR.                                            
+           PERFORM B200-PROCESS-VENDORS                                         
+               UNTIL END-OF-VENDORS.                                            
+                                                                                
+           PERFORM B900-FINALIZE.                                               
+                                                                                
+           STOP RUN.                                                            
+                                                                                
+      ******************************************************************        
+      * GET THE SYSTEM DATE AND TIME. OPEN FILES. READ CONTROL CARD.            
+      * LOAD INTERNAL TABLES.                                                   
+      ******************************************************************        
+       B100-HOUSEKEEPING.                                                       
+084700                                                                  08530000
+           OPEN INPUT  FSCL-DATE-FILE                                           
+                       PRCG-DATE-FILE                                           
+                       LICENSE-FEES-FILE                                        
+                       VENDOR-FILE.                                             
+           OPEN OUTPUT LIC-DIST-NOTFND-FILE                                     
+                       DTL-AUDIT-PADJ-FILE.                                     
+                                                                                
+084800     PERFORM B110-PROCESS-DTE-CNTL-FILES.                                 
+                                                                                
+           PERFORM Z120-READ-LICENSE-FEES                                       
+           PERFORM B120-LOAD-LICENSE-FEES                                       
+             VARYING PT-LF-INDX FROM 1 BY 1                                     
+               UNTIL PS-LICENSE-FEES-EOF                                        
+                  OR PT-LF-INDX > PT-LF-INDX-MAX.                               
+           IF PT-LF-INDX > PT-LF-INDX-MAX                                       
+               DISPLAY ' **** NUMBER OF LICENSE FEES EXCEEDED'                  
+               DISPLAY ' **** CHECK INTERNAL WORKING STORAGE TABLE'             
+               DISPLAY ' **** DEFINED SIZE: ' PT-LF-INDX-MAX                    
+               PERFORM Z999-ABEND                                               
+           END-IF.                                                              
+           SET PT-LF-INDX-TOT TO PT-LF-INDX.                                    
+                                                                                
+           MOVE CC-PROC-DATE-ISO           TO DTATTR-KY-DTE.                    
+           PERFORM B130-GET-MN-END-DTE.                                         
+                                                                                
+086900 B110-PROCESS-DTE-CNTL-FILES.                                     08750000
+087000                                                                  08760000
+      *    PROCESS REQUEST CONTROL CARD AND/OR GET REQUEST DATES                
+           PERFORM Z500-PROCESS-FSCL-CNTL-FILES.                                
+091900                                                                  09250000
+091900                                                                  09250000
+      *    PROCESS REQUEST CONTROL CARD AND/OR GET REQUEST DATES                
+           PERFORM Z510-READ-PRCG-DATE-CNTL-FILE.                               
+091900                                                                  09250000
+092700                                                                  09330000
+092900                                                                  09350000
+      ******************************************************************        
+      *    LOAD LICENSE FEES INTERNAL TABLE                                     
+      ******************************************************************        
+       B120-LOAD-LICENSE-FEES.                                                  
+                                                                                
+           MOVE MLRD-LF-DEPT-NBR                                                
+             TO PT-LF-DEPT-NBR          (PT-LF-INDX).                           
+           MOVE MLRD-LF-GROUP-ID                                                
+             TO PT-LF-GROUP-ID          (PT-LF-INDX).                           
+           MOVE MLRD-LF-LABEL-SEQ                                               
+RONNA        TO PV-LBL-SEQ-CONVERSION.                                          
+RONNA      MOVE PV-LBL-SEQ-CONVERSION                                           
+             TO PT-LF-LABEL-SEQ         (PT-LF-INDX).                           
+           MOVE MLRD-LF-ENT-ID                                                  
+             TO PT-LF-ENT-ID            (PT-LF-INDX).                           
+           MOVE MLRD-LF-DIST-PCT          (3:3)                                 
+             TO PV-PERCENT (1:3)                                                
+           MOVE MLRD-LF-DIST-PCT          (7:2)                                 
+             TO PV-PERCENT (4:2)                                                
+           IF MLRD-LF-DIST-PCT          (1:1) = '-'                             
+               COMPUTE PV-PERCENT-SIGNED = PV-PERCENT * -1                      
+               MOVE PV-PERCENT-SIGNED                                           
+                 TO PT-LF-DIST-PCT          (PT-LF-INDX)                        
+           ELSE                                                                 
+               MOVE PV-PERCENT                                                  
+                 TO PT-LF-DIST-PCT          (PT-LF-INDX)                        
+           END-IF                                                               
+           MOVE MLRD-LF-DEPT-LAST                                               
+             TO PT-LF-DEPT-LAST         (PT-LF-INDX).                           
+           MOVE MLRD-LF-DKEY (2:9)                                              
+             TO PT-LF-DKEY              (PT-LF-INDX).                           
+           ADD 1 TO PV-LICENSE-FEES-LOADED.                                     
+                                                                                
+           PERFORM Z120-READ-LICENSE-FEES.                                      
+                                                                                
+W34517******************************************************************        
+W34517*  GET THE MONTH END FISCAL DATE FOR A DATE                               
+W34517******************************************************************        
+W34517 B130-GET-MN-END-DTE.                                                     
+W34517                                                                          
+W34517     EXEC SQL                                                             
+W34517         SELECT                                                           
+W34517                 FSCL_MN_NBR                                              
+W34517                ,FSCL_WK_NBR                                              
+W34517                ,PFM_END_DTE                                              
+W34517                ,PFW_END_DTE                                              
+W34517                ,FSCL_MN_BEG_DTE                                          
+W34517                ,FSCL_MN_END_DTE                                          
+W34517                ,FSCL_WK_END_DTE                                          
+W34517                ,SEA_END_DTE                                              
+W34517           INTO                                                           
+W34517                 :DTATTR-FSCL-MN-NBR                                      
+W34517                ,:DTATTR-FSCL-WK-NBR                                      
+W34517                ,:DTATTR-PFM-END-DTE                                      
+W34517                ,:DTATTR-PFW-END-DTE                                      
+W34517                ,:DTATTR-FSCL-MN-BEG-DTE                                  
+W34517                ,:DTATTR-FSCL-MN-END-DTE                                  
+W34517                ,:DTATTR-FSCL-WK-END-DTE                                  
+W34517                ,:DTATTR-SEA-END-DTE                                      
+W34517           FROM                                                           
+W34517                 TDTATTR                                                  
+W34517           WHERE                                                          
+W34517                 KY_DTE = :DTATTR-KY-DTE                                  
+W34517         WITH UR                                                          
+W34517     END-EXEC.                                                            
+W34517                                                                          
+W34517     EVALUATE SQLCODE                                                     
+W34517         WHEN +0                                                          
+W34517             CONTINUE                                                     
+W34517         WHEN +100                                                        
+W34517             DISPLAY ' FISCAL DATE: ' DTATTR-KY-DTE                       
+W34517             MOVE 'SELECT TDTATTR'       TO PV-OPER-ATTEMPTED             
+W34517             MOVE 'B130-GET-MN-END-DTE ' TO PV-PARAGRAPH-NAME             
+W34517             PERFORM Z950-SQL-ABEND                                       
+W34517         WHEN OTHER                                                       
+W34517             DISPLAY ' FISCAL DATE: ' DTATTR-KY-DTE                       
+W34517             MOVE 'SELECT TDTATTR'       TO PV-OPER-ATTEMPTED             
+W34517             MOVE 'B130-GET-MN-END-DTE ' TO PV-PARAGRAPH-NAME             
+W34517             PERFORM Z950-SQL-ABEND                                       
+W34517     END-EVALUATE.                                                        
+W34517                                                                          
+W34517     DISPLAY ' '.                                                         
+W34517     DISPLAY 'FISCAL BEG DATE: ' DTATTR-FSCL-MN-BEG-DTE                   
+W34517     DISPLAY 'FISCAL END DATE: ' DTATTR-FSCL-MN-END-DTE                   
+W34517     DISPLAY ' '.                                                         
+W34517                                                                          
+      ******************************************************************        
+      *    PROCESS VENDORS                                                      
+      ******************************************************************        
+       B200-PROCESS-VENDORS.                                                    
+W37965     IF ML363-ENT-ID NOT = PV-PREV-VENDOR-ID                              
+W37965         MOVE ML363-ENT-ID TO MLV00000-ENT-ID                             
+               PERFORM Z170-OPEN-DEPT-CSR                                       
+               MOVE ZEROES         TO PV-FETCHED                                
+                                                                                
+               PERFORM Z180-FETCH-DEPT-CSR                                      
+                                                                                
+               IF END-OF-DEPT-CSR                                               
+                   DISPLAY                                                      
+                       'VENDOR, UNKNOWN BRAND NOT FOUND ON MLV_BRND_VND'        
+                   DISPLAY 'VENDOR: ' MLV00000-ENT-ID                           
+                   DISPLAY 'BRAND : ' PC-UNKNOWN-BRAND                          
+               END-IF                                                           
+                                                                                
+               PERFORM B300-PROCESS-DEPT-CSR                                    
+                   UNTIL END-OF-DEPT-CSR                                        
+                                                                                
+               DISPLAY ' FETCHED  ' PV-FETCHED                                  
+                       ' ROWS FOR VENDOR    ' MLV00000-ENT-ID                   
+                                                                                
+               PERFORM Z190-CLOSE-DEPT-CSR                                      
+               ADD 1 TO PV-VENDORS-PROCESSED                                    
+           ELSE                                                                 
+               ADD 1 TO PV-VENDORS-DUPLICATES                                   
+           END-IF.                                                              
+                                                                                
+W37965     MOVE ML363-ENT-ID TO PV-PREV-VENDOR-ID.                              
+           PERFORM Z100-READ-VENDOR.                                            
+                                                                                
+      ******************************************************************        
+      *    PROCESS DEPARTMENTS                                                  
+      ******************************************************************        
+       B300-PROCESS-DEPT-CSR.                                                   
+           SET PS-LF-NOT-FOUND TO TRUE.                                         
+                                                                                
+W37965     IF ML363-EXP-TYP = 3                                                 
+               SET PT-LF-INDX TO 1                                              
+               SEARCH PT-LICENSE-FEES                                           
+                VARYING PT-LF-INDX                                              
+                  WHEN PT-LF-DEPT-NBR (PT-LF-INDX) =                            
+                       MLV00000-DEPT-NBR AND                                    
+W34517                 PT-LF-GROUP-ID (PT-LF-INDX) =                            
+W37965                 ML363-GRP-ID                                             
+                    MOVE PT-LF-DEPT-NBR (PT-LF-INDX)                            
+                      TO PV-DEPT-NBR                                            
+                    SET PT-LF-INDX-BEG TO PT-LF-INDX                            
+                    SET PS-LF-FOUND    TO TRUE                                  
+               END-SEARCH                                                       
+           ELSE                                                                 
+RONNA *      THE INPUT FILE SHOULD NOT HAVE ANYTHING BUT TYPE 3                 
+               DISPLAY ' **** INPUT FILE SHOULD ONLY HAVE    '                  
+               DISPLAY ' **** TYPE 3 FOR LICENSE FEE '                          
+               DISPLAY ' **** SOMETHING IS WRONG WITH THE INPUT FILE'           
+               DISPLAY ' **** OR THE MLT_VND_ALLOC TABLE HAS BAD DATA'          
+               PERFORM Z999-ABEND                                               
+           END-IF.                                                              
+                                                                                
+W34517*    IF PS-FS-FOUND OR PS-LF-FOUND                                        
+W34517*        PERFORM B310-PROCESS-PADJ-SUMS                                   
+W34517*    ELSE                                                                 
+W37965*        IF ML363-EXP-TYP = 1 OR 2                                        
+W34517*            DISPLAY 'FREIGHT/SALVAGE ALLOCATION NOT FOUND FOR: '         
+W34517*        ELSE                                                             
+W34517*            DISPLAY 'LICENSE FEES ALLOCATION NOT FOUND FOR: '            
+W34517*        END-IF                                                           
+W34517*        DISPLAY 'DEPT_NBR         : ' MLV00000-DEPT-NBR                  
+W34517*        DISPLAY 'LBL_SEQ_NBR      : ' MLV00000-LBL-SEQ-NBR               
+W34517*        DISPLAY 'ENT_ID           : ' MLV00000-ENT-ID                    
+W34517*        DISPLAY 'ML_LO_MDSE_LVL_ID: ' MLV00000-ML-LO-MDSE-LVL-ID         
+W34517*    END-IF.                                                              
+W34517     PERFORM B310-PROCESS-PADJ-SUMS.                                      
+                                                                                
+           PERFORM Z180-FETCH-DEPT-CSR.                                         
+                                                                                
+      ******************************************************************        
+      *    PROCESS PURCHASE ADJUSTMENT BVEDIT                                   
+      ******************************************************************        
+       B310-PROCESS-PADJ-SUMS.                                                  
+           INITIALIZE DCLMLT00039.                                              
+                                                                                
+           MOVE MLV00000-DEPT-NBR        TO MLT00039-DEPT-NBR.                  
+           MOVE MLV00000-ML-LO-MDSE-LVL-ID                                      
+                                         TO MLT00039-ML-LO-MDSE-LVL-ID.         
+           SET MNLY-AMTS-NOT-ZERO TO TRUE.                                      
+           PERFORM Z200-OPEN-PADJ-BVEDT-UNKN-CSR.                               
+           PERFORM Z210-FETCH-PADJ-BVEDT-UNKN-CSR.                              
+           IF NEO-PADJ-BVEDIT-UNKN-LIC-CSR                                      
+               IF PS-LF-FOUND                                                   
+                   PERFORM B320-REVERSE-REALLOCATE                              
+                     UNTIL EO-PADJ-BVEDIT-UNKN-LIC-CSR                          
+               ELSE                                                             
+                   IF MLT00039-PADJ-RTL-AMT  NOT = ZEROES OR                    
+                      MLT00039-PADJ-NET-COST-AMT NOT = ZEROES OR                
+                      MLT00039-PADJ-RTL-AMT  NOT = ZEROES                       
+                       PERFORM Z330-WRITE-LIC-DIST-NOTFND                       
+                   END-IF                                                       
+                   DISPLAY 'LICENSE FEES ALLOCATION NOT FOUND FOR: '            
+               END-IF                                                           
+               DISPLAY 'DEPT_NBR         : ' MLV00000-DEPT-NBR                  
+               DISPLAY 'ENT_ID           : ' MLV00000-ENT-ID                    
+               DISPLAY 'LBL_SEQ_NBR      : ' MLV00000-LBL-SEQ-NBR               
+               DISPLAY 'GROUP ID         : ' ML363-GRP-ID                       
+               DISPLAY                                                          
+                   'ML_LO_MDSE_LVL_ID: ' MLV00000-ML-LO-MDSE-LVL-ID             
+           END-IF.                                                              
+                                                                                
+           PERFORM Z220-CLOSE-PADJ-BVEDT-UNKN-CSR.                              
+                                                                                
+      ******************************************************************        
+      *    CREATE A REVERSAL AUDIT TRANSACTION FOR THE BVEDIT RECORD            
+      *    THEN                                                                 
+      *    RE-ALLOCATION TRANSACTIONS FOR THE '0D' AND '0F' BVEDIT              
+      *    FOR THE BRANDS                                                       
+      ******************************************************************        
+       B320-REVERSE-REALLOCATE.                                                 
+                                                                                
+      * ONLY REVERSE AND RE-ALLOCATE WHEN DOLLARS ARE PRESENT                   
+           IF MNLY-AMTS-NOT-ZERO                                                
+               PERFORM B330-REVERSE-REALLOCATE                                  
+           END-IF.                                                              
+                                                                                
+           PERFORM Z210-FETCH-PADJ-BVEDT-UNKN-CSR.                              
+                                                                                
+      ******************************************************************        
+      *    CREATE UNKNOWN BRAND REVERSAL TRANSACTION. JUST FOR THE              
+      *    '0D' AND '0F' TRANSACTIONS.  THE BRAND WILL GET ALLOCATED            
+      *    AFTER THE AUDIT REVERSAL IS CREATED.                                 
+      ******************************************************************        
+       B330-REVERSE-REALLOCATE.                                                 
+RONNA *                                                                         
+RONNA *    SET VARIABLES FOR THE REALLOCATION OF BVEDIT                         
+RONNA *    '0D' AND '0F' TRANSACTIONS                                           
+RONNA *                                                                         
+           MOVE ZEROES                     TO PV-LARGEST-PCT-POS                
+                                              PV-LARGEST-LBL-SEQ-POS            
+                                              PV-LARGEST-ENT-ID-POS             
+                                              PV-LARGEST-DKEY-POS               
+                                              PV-LARGEST-PCT-NEG                
+                                              PV-LARGEST-LBL-SEQ-NEG            
+                                              PV-LARGEST-ENT-ID-NEG             
+                                              PV-LARGEST-DKEY-NEG.              
+           SET PV-PRORATE-ALLOCATE         TO TRUE.                             
+W34517                                                                          
+RONNA *    EXECUTE PARAGRAPH THAT WILL START THE BRAND ALLOCATION               
+           PERFORM B500-LICENSE-FEES-ALLOC.                                     
+                                                                                
+      ******************************************************************        
+      *    RE-ALLOCATE PURCHASE ADJUSTMENTS FOR LICENSE FEES                    
+      *                                                                         
+      ******************************************************************        
+       B500-LICENSE-FEES-ALLOC.                                                 
+           MOVE MLT00039-PADJ-NET-COST-AMT                                      
+             TO PV-PADJ-NET-COST-AMT                                            
+                PV-PADJ-NET-COST-AMT-REM                                        
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+             VARYING PT-LF-INDX FROM PT-LF-INDX-BEG BY 1                        
+             UNTIL PT-LF-DEPT-LAST (PT-LF-INDX) = 'Y'                           
+                OR PT-LF-INDX >= PT-LF-INDX-TOT                                 
+               MOVE ZERO TO PV-PCT                                              
+               MOVE PT-LF-DIST-PCT (PT-LF-INDX)                                 
+                 TO PV-PCT                                                      
+                                                                                
+               COMPUTE MLT00039-PADJ-NET-COST-AMT ROUNDED =                     
+                      (PV-PADJ-NET-COST-AMT     *                               
+                       PV-PCT) / 100                                            
+               COMPUTE PV-PADJ-NET-COST-AMT-REM =                               
+                       PV-PADJ-NET-COST-AMT-REM -                               
+                       MLT00039-PADJ-NET-COST-AMT                               
+                                                                                
+W34517         MOVE PT-LF-LABEL-SEQ (PT-LF-INDX)                                
+W34517           TO MLT00039-LBL-SEQ-NBR                                        
+W34517         MOVE PT-LF-ENT-ID    (PT-LF-INDX)                                
+W34517           TO MLT00039-ENT-ID                                             
+               MOVE PT-LF-DKEY (PT-LF-INDX)                                     
+                 TO MLT00039-ML-LO-MDSE-LVL-ID                                  
+W34517         IF PV-PCT >= ZERO                                                
+W34517             IF PV-PCT > PV-LARGEST-PCT-POS                               
+W34517                 MOVE PV-PCT TO PV-LARGEST-PCT-POS                        
+W34517                 MOVE PT-LF-LABEL-SEQ (PT-LF-INDX)                        
+W34517                   TO PV-LARGEST-LBL-SEQ-POS                              
+W34517                 MOVE PT-LF-ENT-ID (PT-LF-INDX)                           
+W34517                   TO PV-LARGEST-ENT-ID-POS                               
+W34517                 MOVE PT-LF-DKEY (PT-LF-INDX)                             
+W34517                   TO PV-LARGEST-DKEY-POS                                 
+W34517             END-IF                                                       
+W34517         ELSE                                                             
+W34517             IF PV-PCT < PV-LARGEST-PCT-NEG                               
+W34517                 MOVE PV-PCT TO PV-LARGEST-PCT-NEG                        
+W34517                 MOVE PT-LF-LABEL-SEQ (PT-LF-INDX)                        
+W34517                   TO PV-LARGEST-LBL-SEQ-NEG                              
+W34517                 MOVE PT-LF-ENT-ID (PT-LF-INDX)                           
+W34517                   TO PV-LARGEST-ENT-ID-NEG                               
+W34517                 MOVE PT-LF-DKEY (PT-LF-INDX)                             
+W34517                   TO PV-LARGEST-DKEY-NEG                                 
+W34517             END-IF                                                       
+W34517         END-IF                                                           
+      *     WRITE RE-ALLOCATION TRANSACTION                                     
+RONNA *     AND THEN WRITE THE REVERSAL TRANSACTION TO MATCH                    
+RONNA *     THIS IS DONE ONLY IF THE PERCENT IS NOT ZERO                        
+               IF PV-PCT NOT = 0                                                
+                  PERFORM Z600-WRITE-AUDIT-DTL                                  
+                  ADD 1 TO PV-REALLOCATIONS-WRITTEN                             
+RONNA *                                                                         
+RONNA *           CREATE A REVERSAL TRANSACTION FOR A BRAND ALLOCATION          
+RONNA *           IN THE PERFORMANCE LOOP                                       
+                  COMPUTE MLT00039-PADJ-NET-COST-AMT     =                      
+                          MLT00039-PADJ-NET-COST-AMT  * -1                      
+                                                                                
+RONNA             SET PV-PRORATE-REVERSAL         TO TRUE                       
+RONNA *                                                                         
+RONNA *           WRITE REVERSAL TRANSACTION                                    
+RONNA             PERFORM Z600-WRITE-AUDIT-DTL                                  
+RONNA             ADD 1 TO PV-REVERSALS-WRITTEN                                 
+RONNA *                                                                         
+RONNA *           REVERSE THE VARIABLE SO THE ORIGINAL VALUE CAN BE             
+RONNA *           USED FOR THE NEXT REALLOCATION                                
+RONNA *           AND SET THE INDICATOR FOR THE PRORATION ALLOCATION            
+                  COMPUTE MLT00039-PADJ-NET-COST-AMT     =                      
+                          MLT00039-PADJ-NET-COST-AMT  * -1                      
+                  SET PV-PRORATE-ALLOCATE         TO TRUE                       
+                                                                                
+               END-IF                                                           
+           END-PERFORM.                                                         
+                                                                                
+           MOVE PV-PADJ-NET-COST-AMT-REM                                        
+             TO MLT00039-PADJ-NET-COST-AMT                                      
+                                                                                
+W34517     IF PV-PADJ-NET-COST-AMT-REM >= ZERO                                  
+W34517         IF PV-LARGEST-DKEY-POS NOT = ZERO                                
+W34517             MOVE PV-LARGEST-LBL-SEQ-POS                                  
+W34517               TO MLT00039-LBL-SEQ-NBR                                    
+W34517             MOVE PV-LARGEST-ENT-ID-POS                                   
+W34517               TO MLT00039-ENT-ID                                         
+W34517             MOVE PV-LARGEST-DKEY-POS                                     
+W34517               TO MLT00039-ML-LO-MDSE-LVL-ID                              
+W34517         END-IF                                                           
+W34517     ELSE                                                                 
+W34517         IF PV-LARGEST-DKEY-NEG NOT = ZERO                                
+W34517             MOVE PV-LARGEST-LBL-SEQ-NEG                                  
+W34517               TO MLT00039-LBL-SEQ-NBR                                    
+W34517             MOVE PV-LARGEST-ENT-ID-NEG                                   
+W34517               TO MLT00039-ENT-ID                                         
+W34517             MOVE PV-LARGEST-DKEY-NEG                                     
+W34517               TO MLT00039-ML-LO-MDSE-LVL-ID                              
+W34517         END-IF                                                           
+W34517     END-IF.                                                              
+      * WRITE RE-ALLOCATION REMAINDER TRANSACTION                               
+      * WHEN THERE IS A REMAINING AMOUNT                                        
+RONNA * AND ALSO CREATE A REVERSAL TRANSACTION                                  
+           IF PV-PADJ-NET-COST-AMT-REM NOT ZERO                                 
+              PERFORM Z600-WRITE-AUDIT-DTL                                      
+              ADD 1 TO PV-REALLOCATIONS-WRITTEN                                 
+RONNA *                                                                         
+RONNA *       CREATE A REVERSAL TRANSACTION FOR A BRAND ALLOCATION              
+RONNA *       IN THE PERFORMANCE LOOP                                           
+              COMPUTE MLT00039-PADJ-NET-COST-AMT     =                          
+                      MLT00039-PADJ-NET-COST-AMT  * -1                          
+                                                                                
+RONNA         SET PV-PRORATE-REVERSAL         TO TRUE                           
+RONNA *                                                                         
+RONNA *       WRITE REVERSAL TRANSACTION                                        
+RONNA         PERFORM Z600-WRITE-AUDIT-DTL                                      
+RONNA         ADD 1 TO PV-REVERSALS-WRITTEN                                     
+RONNA *                                                                         
+RONNA *       REVERSE THE VARIABLE SO THE ORIGINAL VALUE CAN BE                 
+RONNA *       USED FOR THE NEXT REALLOCATION                                    
+RONNA *       AND SET THE INDICATOR FOR THE PRORATION ALLOCATION                
+              COMPUTE MLT00039-PADJ-NET-COST-AMT     =                          
+                      MLT00039-PADJ-NET-COST-AMT  * -1                          
+              SET PV-PRORATE-ALLOCATE         TO TRUE                           
+                                                                                
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *    FINALIZE AND CLOSE OUT FILES                                         
+      ******************************************************************        
+       B900-FINALIZE.                                                           
+                                                                                
+           DISPLAY ' **** TOTAL LICENSE FEES LOADED    : '                      
+                          PV-LICENSE-FEES-LOADED                                
+           DISPLAY ' **** TOTAL VENDORS READ           : '                      
+                          PV-VENDORS-READ                                       
+           DISPLAY ' **** TOTAL VENDORS PROCESSED      : '                      
+                          PV-VENDORS-PROCESSED                                  
+           DISPLAY ' **** TOTAL VENDORS DUPLICATES     : '                      
+                          PV-VENDORS-DUPLICATES                                 
+           DISPLAY ' **** TOTAL FETCHED                : '                      
+                          PV-TOT-FETCHED                                        
+           DISPLAY ' **** TOTAL PADJ FETCHED           : '                      
+                          PV-PADJ-FETCHED                                       
+           DISPLAY ' **** TOTAL REVERSALS WRITTEN      : '                      
+                          PV-REVERSALS-WRITTEN                                  
+           DISPLAY ' **** TOTAL RE-ALLOCATIONS WRITTEN : '                      
+                          PV-REALLOCATIONS-WRITTEN                              
+           DISPLAY ' **** TOTAL TRANSACTIONS WRITTEN   : '                      
+                          PV-TOT-TRANS-WRITTEN                                  
+W34517     DISPLAY ' **** TOTAL TSL NOT FOUND WRITTEN  : '                      
+W34517                    PV-TOT-TSL-NOTFND-WRITTEN                             
+W34517     DISPLAY ' **** TOTAL LIC NOT FOUND WRITTEN  : '                      
+W34517                    PV-TOT-LIC-NOTFND-WRITTEN                             
+W37965     DISPLAY ' **** TOTAL PADJ AUDIT WRITTEN     : '                      
+W37965                    PV-TOT-PADJ-AUDIT-WRITTEN                             
+W37965     DISPLAY ' **** TOTAL PGHG AUDIT WRITTEN     : '                      
+W37965                    PV-TOT-PCHG-AUDIT-WRITTEN                             
+                                                                                
+           CLOSE   FSCL-DATE-FILE                                               
+                   PRCG-DATE-FILE                                               
+                   LICENSE-FEES-FILE                                            
+                   VENDOR-FILE                                                  
+W34517             LIC-DIST-NOTFND-FILE                                         
+W37965             DTL-AUDIT-PADJ-FILE.                                         
+                                                                                
+      ******************************************************************        
+      *    READ VENDOR FILE                                                     
+      ******************************************************************        
+       Z100-READ-VENDOR.                                                        
+           READ VENDOR-FILE                                                     
+W37965         INTO ML363-VNDR-REC                                              
+               AT END SET END-OF-VENDORS TO TRUE.                               
+                                                                                
+           IF NOT END-OF-VENDORS                                                
+               ADD 1 TO PV-VENDORS-READ                                         
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * READ LICENSE FEES                                                       
+      ******************************************************************        
+       Z120-READ-LICENSE-FEES.                                                  
+                                                                                
+           READ LICENSE-FEES-FILE INTO MLRD-LICENSE-FEES-REC                    
+               AT END                                                           
+                  SET PS-LICENSE-FEES-EOF TO TRUE.                              
+                                                                                
+      ******************************************************************        
+      *    OPEN DEPARTMENT CURSOR                                               
+      *    - GET DEPARTMENTS FOR VENDOR AND UNKNOWN BRAND                       
+      ******************************************************************        
+       Z170-OPEN-DEPT-CSR.                                                      
+                                                                                
+           EXEC SQL                                                             
+               OPEN DEPT_CSR                                                    
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = +0                                                      
+               SET NOT-END-OF-DEPT-CSR TO TRUE                                  
+           ELSE                                                                 
+               DISPLAY 'ENT_ID     : ' MLV00000-ENT-ID                          
+               DISPLAY 'LBL_SEQ_NBR: ' PC-UNKNOWN-BRAND                         
+               MOVE SQLCODE            TO PV-SQLCODE                            
+               DISPLAY 'SQLCODE    : ' PV-SQLCODE                               
+               MOVE 'OPEN DEPT_CSR   ' TO PV-OPER-ATTEMPTED                     
+               PERFORM Z950-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *    FETCH THE NEXT ROW FROM THE DEPT_CSR CURSOR                          
+      ******************************************************************        
+       Z180-FETCH-DEPT-CSR.                                                     
+           EXEC SQL                                                             
+             FETCH DEPT_CSR                                                     
+              INTO  :MLV00000-ML-LO-MDSE-LVL-ID                                 
+                   ,:MLV00000-DEPT-NBR                                          
+                   ,:MLV00000-LBL-SEQ-NBR                                       
+                   ,:MLV00000-ENT-ID                                            
+                   ,:MLV00000-EFF-BEG-DTE                                       
+                   ,:MLV00000-EFF-END-DTE                                       
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE SQLCODE                                                     
+               WHEN +0                                                          
+                   ADD +1                  TO PV-FETCHED                        
+                                              PV-TOT-FETCHED                    
+RONNA *            DISPLAY 'LVD ID     :' MLV00000-ML-LO-MDSE-LVL-ID            
+P18333*            DISPLAY 'DEPT NO    :' MLV00000-DEPT-NBR                     
+P18333*            DISPLAY 'LBL SEQ    :' MLV00000-LBL-SEQ-NBR                  
+RONNA *            DISPLAY 'ENT ID     :' MLV00000-ENT-ID                       
+P18333*            DISPLAY 'BIGN DATE  :' MLV00000-EFF-BEG-DTE                  
+P18333*            DISPLAY 'END DATE   :' MLV00000-EFF-END-DTE                  
+               WHEN +100                                                        
+                   SET END-OF-DEPT-CSR TO TRUE                                  
+               WHEN OTHER                                                       
+                   MOVE 'FETCH DEPT_CSR' TO    PV-OPER-ATTEMPTED                
+                   PERFORM Z950-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *    CLOSE THE DEPT_CSR                                                   
+      ******************************************************************        
+       Z190-CLOSE-DEPT-CSR.                                                     
+                                                                                
+           EXEC SQL                                                             
+                CLOSE DEPT_CSR                                                  
+           END-EXEC                                                             
+           IF SQLCODE NOT = +0                                                  
+               MOVE 'CLOSE DEPT_CSR    ' TO PV-OPER-ATTEMPTED                   
+               PERFORM Z950-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *    OPEN PURCHASE ADJUSTMENT SUMS CURSOR                                 
+      ******************************************************************        
+       Z200-OPEN-PADJ-BVEDT-UNKN-CSR.                                           
+           EXEC SQL                                                             
+               OPEN PADJ_BVEDIT_UNKN_LIC_CSR                                    
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = +0                                                      
+               SET NEO-PADJ-BVEDIT-UNKN-LIC-CSR TO TRUE                         
+           ELSE                                                                 
+               DISPLAY '*** DEPT_NBR          ' MLT00039-DEPT-NBR               
+               DISPLAY '*** ML_LO_MDSE_LVL_ID '                                 
+                                              MLT00039-ML-LO-MDSE-LVL-ID        
+               MOVE 'OPEN PADJ_BVEDIT_UNKN_LIC_CSR '                            
+                                         TO PV-OPER-ATTEMPTED                   
+               PERFORM Z950-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *    FETCH THE NEXT ROW FROM THE PADJ_BVEDIT_UNKN_LIC_CSR CURSOR          
+      ******************************************************************        
+       Z210-FETCH-PADJ-BVEDT-UNKN-CSR.                                          
+           EXEC SQL                                                             
+             FETCH PADJ_BVEDIT_UNKN_LIC_CSR                                     
+               INTO  :MLT00039-DEPT-NBR                                         
+                    ,:MLT00039-MAJ-CL-NBR                                       
+                    ,:MLT00039-SUB-CL-NBR                                       
+                    ,:MLT00039-LOC-NBR                                          
+                    ,:MLT00039-ML-LO-MDSE-LVL-ID                                
+                    ,:MLT00039-ORIG-ENT-ID                                      
+                    ,:MLT00039-ORIG-LBL-SEQ-NBR                                 
+                    ,:MLT00039-DMY-SKU-IND                                      
+                    ,:MLT00039-FINCL-PRC-GP-CDE                                 
+                    ,:MLT00039-SRC-SYS-ID                                       
+                    ,:MLT00039-TRN-TYP-CDE                                      
+                    ,:MLT00039-AP-TRN-CDE                                       
+                    ,:MLT00039-DRCR-CDE                                         
+                    ,:MLT00039-ENT-ID                                           
+                    ,:MLT00039-LBL-SEQ-NBR                                      
+                    ,:MLT00039-PADJ-GRO-COST-AMT                                
+                    ,:MLT00039-PADJ-NET-COST-AMT                                
+                    ,:MLT00039-PADJ-RTL-AMT                                     
+                    ,:MLT00039-PADJ-DISC-COST-AMT                               
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE SQLCODE                                                     
+               WHEN +0                                                          
+                   ADD +1                  TO PV-PADJ-FETCHED                   
+W34517             IF MLT00039-PADJ-GRO-COST-AMT  = ZERO AND                    
+W34517                MLT00039-PADJ-NET-COST-AMT  = ZERO AND                    
+W34517                MLT00039-PADJ-RTL-AMT       = ZERO AND                    
+W34517                MLT00039-PADJ-DISC-COST-AMT = ZERO                        
+W34517                 SET MNLY-AMTS-ZERO     TO TRUE                           
+W34517             ELSE                                                         
+W34517                 SET MNLY-AMTS-NOT-ZERO TO TRUE                           
+W34517             END-IF                                                       
+               WHEN +100                                                        
+RONNA *            DISPLAY 'END OF PADJ-BVEDIT-UNKN-LIC-CSR'                    
+                   SET EO-PADJ-BVEDIT-UNKN-LIC-CSR TO TRUE                      
+               WHEN OTHER                                                       
+                   MOVE 'FETCH PADJ_BVEDIT_UNKN_LIC_CSR '                       
+                                             TO    PV-OPER-ATTEMPTED            
+                   PERFORM Z950-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *    CLOSE THE PADJ_BVEDIT_UNKN_LIC_CSR                                   
+      ******************************************************************        
+       Z220-CLOSE-PADJ-BVEDT-UNKN-CSR.                                          
+           EXEC SQL                                                             
+                CLOSE PADJ_BVEDIT_UNKN_LIC_CSR                                  
+           END-EXEC                                                             
+           IF SQLCODE NOT = +0                                                  
+               MOVE 'CLOSE PADJ_BVEDIT_UNKN_LIC_CSR '                           
+                                         TO PV-OPER-ATTEMPTED                   
+               PERFORM Z950-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+244800 Z230-SPECIAL-DATE-CALL.                                          24570000
+244900                                                                  24580000
+245000     INITIALIZE DPG51                                             24590000
+245100                DPG52                                             24600000
+245200                DPG53                                             24610000
+245300                DPG54                                             24620000
+245400                DPG55                                             24630000
+245500                DPG56.                                            24640099
+245600                                                                  24650000
+245700     SET DPG51-DO-NOT-INCR-DECR-DATE                              24660000
+245800                                TO TRUE.                          24670099
+245900                                                                  24680000
+246000     MOVE PV-ISO-DTE            TO DPG52-LK-DATE-INPUT.           24690099
+246100                                                                  24700000
+246200     PERFORM Z240-CALL-DATE-ROUTINE.                              24710000
+246300                                                                  24720000
+246400 Z240-CALL-DATE-ROUTINE.                                          24730000
+246500                                                                  24740000
+246600     MOVE CC-CALENDAR-TYPE      TO DPG51-CALENDAR-TYPE            24750000
+246700     SET  DPG52-LK-DTE-ISO-FMT  TO TRUE                           24760000
+246800                                                                  24770000
+246900     CALL PC-DPKUT500                                             24780000
+247000         USING DPG51 DPG52 DPG53 DPG54 DPG55 DPG56                24790000
+247100                                                                  24800000
+247200     IF (DPG54-DATE-INVALID OR                                    24810000
+247300         DPG54-SEVERE-ERROR)                                      24820000
+247400         SET DATE-ERROR     TO TRUE                               24830000
+247500         DISPLAY 'DPKUT500 Z250 ERROR = ' DPG54-ERROR-MESSAGE     24840000
+247600     END-IF.                                                      24850000
+247700     EJECT                                                        24860000
+247800                                                                  24870000
+      ******************************************************************        
+      * WRITE AUDIT TRANSACTION                                                 
+      ******************************************************************        
+       Z310-WRITE-TRANSACTION.                                                  
+                                                                                
+           PERFORM Z600-WRITE-AUDIT-DTL.                                        
+                                                                                
+W34517******************************************************************        
+W34517* WRITE LICENSE FEE DIST PCT NOT FOUND RECORD (MLRD084 FORMAT)            
+W34517******************************************************************        
+W34517 Z330-WRITE-LIC-DIST-NOTFND.                                              
+W34517                                                                          
+W34517     IF PV-TOT-LIC-NOTFND-WRITTEN = ZERO                                  
+W34517         MOVE SPACES TO ML084-HEADER                                      
+W34157         MOVE PC-LIC-DIST-NOTFND-HEADER TO ML084-HEADER                   
+W34517         WRITE LIC-DIST-NOTFND-REC FROM ML084-DIST-PCT-NOTFND             
+W34157         MOVE PC-DIST-NOTFND-HEADER TO ML084-HEADER                       
+W34517         WRITE LIC-DIST-NOTFND-REC FROM ML084-DIST-PCT-NOTFND             
+W34517     END-IF                                                               
+W34517                                                                          
+W34517     MOVE SPACES TO ML084-HEADER.                                         
+W34517     INITIALIZE ML084-DIST-PCT-NOTFND.                                    
+W34517     MOVE MLV00000-DEPT-NBR            TO ML084-DEPT-NBR.                 
+W34517     MOVE MLV00000-ENT-ID              TO ML084-ENT-ID.                   
+W34517     MOVE MLV00000-ENT-ID              TO ML084-ENT-ID                    
+W34517                                          XMT00000-ENT-ID.                
+W34517     PERFORM Z400-GET-VENDOR-NAME.                                        
+W34517     MOVE XMT00000-PRIM-VND-NM         TO ML084-ENT-NAME.                 
+W34517     MOVE MLT00039-PADJ-RTL-AMT        TO ML084-PADJ-RTL-AMT.             
+W34517     MOVE MLT00039-PADJ-NET-COST-AMT   TO ML084-PADJ-NET-COST-AMT.        
+RONNA *    MOVE PV-TOT-MKDN-RTL-AMT          TO ML084-MKDN-RTL-AMT.             
+W34517     WRITE LIC-DIST-NOTFND-REC FROM ML084-DIST-PCT-NOTFND.                
+W34517     ADD 1 TO PV-TOT-LIC-NOTFND-WRITTEN.                                  
+W34517                                                                          
+W34517******************************************************************        
+W34517*  GET THE VENDOR NAME FROM XMT_VND                                       
+W34517******************************************************************        
+W34517 Z400-GET-VENDOR-NAME.                                                    
+W34517                                                                          
+W34517     EXEC SQL                                                             
+W34517        SELECT   PRIM_VND_NM                                              
+W34517          INTO  :XMT00000-PRIM-VND-NM                                     
+W34517          FROM   XMT_VND                                                  
+W34517         WHERE   ENT_ID = :XMT00000-ENT-ID                                
+W34517        WITH UR                                                           
+W34517     END-EXEC.                                                            
+W34517                                                                          
+W34517     IF SQLCODE = +0                                                      
+W34517         INSPECT XMT00000-PRIM-VND-NM                                     
+W34517                                REPLACING ALL ',' BY ' '                  
+W34517     ELSE                                                                 
+W34517         IF SQLCODE = +100                                                
+W34517             MOVE PC-UNKNOWN         TO XMT00000-PRIM-VND-NM              
+W34517     ELSE                                                                 
+W34517         DISPLAY ' ENT-ID: ' XMT00000-ENT-ID                              
+W34517         MOVE 'SELECT XMT_VND     '  TO PV-OPER-ATTEMPTED                 
+W34517         MOVE 'Z400-GET-VENDOR-NAME' TO PV-PARAGRAPH-NAME                 
+W34517         PERFORM Z950-SQL-ABEND                                           
+W34517     END-IF.                                                              
+W34517                                                                          
+                                                                                
+W34517******************************************************************        
+      *    PROCESS DATE CONTROL CARDS FOR FSCAL AND PROCESSING DATES            
+W34517******************************************************************        
+       Z500-PROCESS-FSCL-CNTL-FILES.                                            
+091900                                                                  09250000
+      *    PROCESS FISCAL DATE CONTROL CARD                                     
+087100     MOVE 'Z500-PROCESS-FSCL-CNTL-FILES ' TO PV-PARAGRAPH-NAME.   08770000
+087200                                                                  08780000
+087300     READ FSCL-DATE-FILE INTO CC-CONTROL-CARD                     08790000
+087400         AT END                                                   08800000
+087500             DISPLAY '** PROGRAM ABEND **'                        08810000
+087600             DISPLAY 'MLKUT366  - FSCL CONTROL DATE EMPTY'        08820000
+087700             MOVE +4003              TO ABEND-CODE                08830000
+087800             PERFORM Z999-ABEND.                                  08840000
+087900                                                                  08850000
+088000     DISPLAY '** MLKUT366 CONTROL CARD:' FSCL-DATE-REC.           08860000
+088100                                                                  08870000
+088200     MOVE CC-PROC-DATE-ISO TO PV-ISO-DTE.                         08880000
+088300                                                                  08890000
+088400     PERFORM Z230-SPECIAL-DATE-CALL.                              08900000
+088500                                                                  08910000
+088600     IF  DATE-ERROR                                               08920000
+088700         DISPLAY '** PROGRAM ABEND **'                            08930000
+088800         DISPLAY 'MLKUT366  - INVALID CONTROL DATE CARD: '        08940000
+088900             CC-PROC-DATE-ISO                                     08950000
+089000         MOVE +4003              TO ABEND-CODE                    08960000
+089100         PERFORM Z999-ABEND.                                      08970000
+089200                                                                  08980000
+089300     IF  NOT CC-PROCESSING-MODE-VALID                             08990000
+089400         DISPLAY '** ABEND **'                                    09000000
+089500         DISPLAY '** PROGRAM MLKUT366 **'                         09010000
+089600         DISPLAY '** PARAGRAPH ' PV-PARAGRAPH-NAME                09020000
+089700         IF CC-PROCESSING-MODE = SPACE                            09030000
+089800             DISPLAY '** PROCESSING MODE ON CONTROL CARD IS BLANK'09040000
+089900         ELSE                                                     09050000
+090000             DISPLAY '** INVALID PROCESSING MODE ON CONTROL CARD:'09060000
+090100                      CC-PROCESSING-MODE                          09070000
+090200         END-IF                                                   09080000
+090300         MOVE +4003 TO ABEND-CODE                                 09090000
+090400         PERFORM Z999-ABEND.                                      09100000
+090500                                                                  09110000
+090600     IF  NOT CC-CHECK-INV-DATES-SW-VALID                          09120000
+090700         DISPLAY '** ABEND **'                                    09130000
+090800         DISPLAY '** PROGRAM MLKUP020 **'                         09140000
+090900         DISPLAY '** PARAGRAPH ' PV-PARAGRAPH-NAME                09150000
+091000         IF CC-CHECK-INV-DATES-SW = SPACE                         09160000
+091100             DISPLAY '** CHECK-INV-DATES-SWITCH ON CONTROL CARD IS09170000
+091200-                    ' BLANK'                                     09180000
+091300         ELSE                                                     09190000
+091400             DISPLAY '** INVALID CHECK-INV-DATES-SWITCH ON CONTROL09200000
+091500-                    ' CARD:' CC-CHECK-INV-DATES-SW               09210000
+091600         END-IF                                                   09220000
+091700         MOVE +4003 TO ABEND-CODE                                 09230000
+091800         PERFORM Z999-ABEND.                                      09240000
+091900                                                                  09250000
+      ******************************************************************        
+      * READ PROCESSING DATE CONTROL CARD                                       
+      ******************************************************************        
+       Z510-READ-PRCG-DATE-CNTL-FILE.                                           
+           READ PRCG-DATE-FILE INTO CC-PRCG-DATE-CARD                           
+               AT END                                                           
+                   MOVE SPACES TO CC-PRCG-DATE-CARD                             
+                   SET END-OF-PRCG-DATES TO TRUE                                
+                   DISPLAY  'PROCESSING DATE CONTROL CARD EMPTY'.               
+                                                                        08850000
+           IF NOT END-OF-PRCG-DATES                                             
+               PERFORM Z520-VALIDATE-CNTL-DATE                                  
+           ELSE                                                                 
+               DISPLAY '** PROGRAM ABEND **'                            08810000
+               DISPLAY 'MLKUT366  - PROCESSING CONTROL DATE EMPTY'      08820000
+               MOVE +4003              TO ABEND-CODE                    08830000
+               PERFORM Z999-ABEND                                       08840000
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      * VALIDATE CONTROL DATE                                                   
+      ******************************************************************        
+       Z520-VALIDATE-CNTL-DATE.                                                 
+                  EXEC SQL                                                      
+                     SELECT 'Y'                                                 
+                       INTO :PV-DB2-DATE-EXISTS                                 
+                       FROM TDTATTR                                             
+                      WHERE KY_DTE = :CC-PRCG-DTE                               
+                  END-EXEC                                                      
+                                                                                
+                  EVALUATE TRUE                                                 
+                      WHEN SQLCODE = 0                                          
+                           CONTINUE                                             
+                      WHEN SQLCODE = 100                                        
+                           DISPLAY 'INVALID PRCG DATE IN CONTROL CARD'          
+                           MOVE SPACES TO CC-PRCG-DTE                           
+                      WHEN OTHER                                                
+                           CONTINUE                                             
+                           MOVE '5001-VALIDATE-CNTL-DATE' TO                    
+                                              PV-PARAGRAPH-NAME                 
+                           MOVE PE-MSG-01 TO PV-OPER-ATTEMPTED                  
+           DISPLAY '**  OPERATION **  = '  PV-OPER-ATTEMPTED                    
+           DISPLAY '**  PARAGRAPH **  = '  PV-PARAGRAPH-NAME                    
+                           PERFORM Z950-SQL-ABEND                               
+                  END-EVALUATE.                                                 
+      *                                                                         
+                                                                                
+W37965******************************************************************        
+W37965*    WRITE AUDIT DETAIL                                                   
+      ******************************************************************        
+       Z600-WRITE-AUDIT-DTL.                                                    
+           INITIALIZE ML090-AUDIT-REC.                                          
+           MOVE CC-PROC-DATE-ISO            TO ML090-FSCL-WK-END-DTE.           
+           MOVE CC-PRCG-DTE                 TO ML090-PRCG-DTE.                  
+W37965     MOVE MLT00039-DEPT-NBR           TO ML090-DEPT-NBR.                  
+W37965     MOVE MLT00039-MAJ-CL-NBR         TO ML090-MAJ-CL-NBR.                
+W37965     MOVE MLT00039-SUB-CL-NBR         TO ML090-SUB-CL-NBR.                
+W37965     MOVE MLT00039-LOC-NBR            TO ML090-LOC-NBR.                   
+W37965     MOVE MLT00039-ML-LO-MDSE-LVL-ID  TO ML090-ML-LO-MDSE-LVL-ID.         
+W37965     MOVE ML363-ENT-ID                TO ML090-ORIG-ENT-ID.               
+W37965     MOVE PC-UNKNOWN-BRAND            TO ML090-ORIG-LBL-SEQ-NBR.          
+           MOVE '9'                         TO ML090-SRC-SYS-ID.                
+W37965     MOVE '015'                       TO ML090-TRN-TYP-CDE.               
+W37965     MOVE MLT00039-AP-TRN-CDE         TO ML090-AP-TRN-CDE.                
+W37965     MOVE MLT00039-ENT-ID             TO ML090-ENT-ID.                    
+W37965     MOVE MLT00039-LBL-SEQ-NBR        TO ML090-LBL-SEQ-NBR.               
+W37965     MOVE ZEROES                      TO ML090-PADJ-GRO-COST-AMT.         
+W37965     MOVE MLT00039-PADJ-NET-COST-AMT  TO ML090-PADJ-NET-COST-AMT.         
+W37965     MOVE ZEROES                      TO ML090-PADJ-RTL-AMT.              
+W37965     MOVE ZEROES                      TO ML090-PADJ-DISC-COST-AMT.        
+W37965     MOVE MLT00039-DMY-SKU-IND        TO ML090-DUMMY-SKU-IND.             
+W37965     EVALUATE TRUE                                                        
+W37965         WHEN PV-PRORATE-REVERSAL                                         
+W37965             MOVE '02'                  TO ML090-DR-CR-CDE                
+                   MOVE 'UKLIC2'              TO ML090-FINCL-PRC-GP-CDE         
+RONNAX                                                                          
+RONNAX*            FOR 0F AP TRAN CODE NEGATE THE DOLLAR FOR THE                
+RONNAX*            REVERSAL OF A CREDIT                                         
+RONNAX             IF MLT00039-AP-TRN-CDE = '0F' THEN                           
+RONNAX                COMPUTE ML090-PADJ-NET-COST-AMT     =                     
+RONNAX                        ML090-PADJ-NET-COST-AMT  * -1                     
+RONNAX             END-IF                                                       
+RONNAX                                                                          
+W37965             SET ML090-PRORATE-REVERSAL TO TRUE                           
+W37965         WHEN PV-PRORATE-ALLOCATE                                         
+W37965             MOVE '01'                  TO ML090-DR-CR-CDE                
+                   MOVE 'BVLIC2'              TO ML090-FINCL-PRC-GP-CDE         
+RONNAX                                                                          
+RONNAX*            FOR 0F AP TRAN CODE NEGATE THE DOLLAR BECAUSE IT             
+RONNAX*            IS A CREDIT                                                  
+RONNAX             IF MLT00039-AP-TRN-CDE = '0F' THEN                           
+RONNAX                COMPUTE ML090-PADJ-NET-COST-AMT     =                     
+RONNAX                        ML090-PADJ-NET-COST-AMT  * -1                     
+RONNAX             END-IF                                                       
+RONNAX                                                                          
+W37965             SET ML090-PRORATE-ALLOCATE TO TRUE                           
+W37965     END-EVALUATE.                                                        
+W37965     WRITE DTL-AUDIT-PADJ-RECORD FROM ML090-AUDIT-REC.                    
+W37965     ADD 1                        TO PV-TOT-PADJ-AUDIT-WRITTEN.           
+                                                                                
+      ******************************************************************        
+      *    SQL ERROR - ABEND                                                    
+      ******************************************************************        
+       Z950-SQL-ABEND.                                                          
+                                                                                
+           MOVE +4013                 TO ABEND-CODE.                            
+           DISPLAY '**  ABEND     **'.                                          
+           DISPLAY '**  PROGRAM   **  =  MLKUT366'.                             
+           DISPLAY '**  OPERATION **  = '  PV-OPER-ATTEMPTED                    
+           DISPLAY '**  PARAGRAPH **  = '  PV-PARAGRAPH-NAME                    
+                                                                                
+      *    THE FOLLOWING COPYBOOK UTILIZES THE DB2 ABEND MODULE                 
+      *    DSNTIAR TO CONVERT SQLCA INTO UNDERSTANDABLE VERBAGE.                
+                                                                                
+           COPY DPPD004.                                                        
+                                                                                
+           PERFORM Z999-ABEND.                                                  
+                                                                                
+      ******************************************************************        
+      *    ABEND CALL                                                           
+      ******************************************************************        
+       Z999-ABEND.                                                              
+                                                                                
+           CALL 'ILBOABN0'  USING ABEND-CODE.                                   
+                                                                                

@@ -1,0 +1,855 @@
+000100******************************************************************        
+000200 IDENTIFICATION DIVISION.                                                 
+000300******************************************************************        
+000400                                                                          
+000500 PROGRAM-ID.    SUKUT176.                                                 
+000600 AUTHOR.        DENISE HAHN                                               
+000700 INSTALLATION.  KOHLS.                                                    
+000800 DATE-WRITTEN   MAY, 2016.                                                
+000900 DATE-COMPILED.                                                           
+001000                                                                          
+001100******************************************************************        
+001200*  THIS PROGRAM CREATES AN EXTRACT FILE OF SHIPPED TRAILERS FOR           
+001300*  BRICK AND MORTAR STORES BASED ON A GIVEN TIME FRAME.                   
+001301*                                                                         
+001302*  TIME FRAME IS DETERMINED BY PRIOR STEP CREATING DATE RANGE.            
+001303*  D-DAILY W-WEEKLY - SUKUT065 CALCULATES FISCAL DATE RANGE.              
+001304*  DATE RANGE INPUT FILE - SURD032 FORMAT                                 
+001305*                                                                         
+001306*  CURSOR WILL BRING BACK OUTBOUND TRIPS SHIPPED FOR THE GIVEN            
+001307*  TIME FRAME.                                                            
+001308*                                                                         
+001309*  FOR EACH OUTBOUND TRIP FROM CURSOR, OPEN ANOTHER CURSOR TO             
+001310*  GET THE CARTONS THAT ARE ATTACHED TO THE TRAILER - THIS IS             
+001311*  BASED ON THE OUTBOUND TRIP ID ON THE OUTBOUND CARTON TABLE             
+001312*  SUT_OTBND_CART                                                         
+001313*                                                                         
+001317*  EXTRACT FILE IS THEN PROCESSED BY SUKUT177 TO GET THE FOLLOWING        
+001318*  FOR EACH TRIP - GET THE TRIP CONTENTS                                  
+001319*      - SML#'S FROM SUT_OTBND_CART (OTBND_TRIP_ID)                       
+001320*      - P2L CARTON - DETERMINE - OPEN/CLOSE TMST                         
+001321*        TIMES CONVERTED TO CENTRAL TIME BASED ON PARM                    
+001322*        TIMEZN - DIFFERENCE BETWEEN DC AND CENTRAL TIME                  
+001323*      - CHECK WHEN THE CARTON WAS ATTACHED TO THE TRAILER                
+001324*      - CHECK IF SCANNED ON OR DIVERTED TO THE TRAILER                   
+001325*      - CHECK IF CARTON WAS PART OF A MASTER CONTAINER                   
+001326*                                                                         
+001327*  SUKUT178 WILL GET THE CARTON CONTENTS AND RECEIVER INFORMATION         
+001328*                                                                         
+001329*  SUKUT179 WILL CALCULATE THE TIMES BETWEEN EACH STATUS                  
+001330*                                                                         
+001331*  INPUT FILE IS IN SURD117 FORMAT                                        
+001332*  OUTPUT FILE IS IN SURD117 FORMAT                                       
+001400******************************************************************        
+001500                                                                          
+001600******************************************************************        
+001700 ENVIRONMENT DIVISION.                                                    
+001800******************************************************************        
+001900                                                                          
+002000 CONFIGURATION SECTION.                                                   
+002100                                                                          
+002200 SOURCE-COMPUTER.        IBM-3090.                                        
+002300 OBJECT-COMPUTER.        IBM-3090.                                        
+002400                                                                          
+002500 INPUT-OUTPUT SECTION.                                                    
+002600                                                                          
+002700 FILE-CONTROL.                                                            
+002800                                                                          
+003300     SELECT INPUT-FILE                                                    
+003400            ASSIGN TO INP01.                                              
+003401                                                                          
+003402     SELECT SELECTION-FILE                                                
+003403            ASSIGN TO INP02.                                              
+003404                                                                          
+003405     SELECT OUTPUT-FILE                                                   
+003406            ASSIGN TO OUT01.                                              
+003410                                                                          
+003500******************************************************************        
+003600 DATA DIVISION.                                                           
+003700******************************************************************        
+003800                                                                          
+003900 FILE SECTION.                                                            
+003910                                                                          
+004000 FD  INPUT-FILE                                                           
+004100     RECORDING MODE IS F                                                  
+004200     LABEL RECORDS ARE STANDARD                                           
+004400     BLOCK CONTAINS 0 RECORDS.                                            
+004600 01  INPUT-RECORD                     PIC X(80).                          
+004700                                                                          
+004710 FD  SELECTION-FILE                                                       
+004720     RECORDING MODE IS F                                                  
+004730     LABEL RECORDS ARE STANDARD                                           
+004740     BLOCK CONTAINS 0 RECORDS.                                            
+004750 01  SELECTION-RECORD                 PIC X(80).                          
+004760                                                                          
+004800 FD  OUTPUT-FILE                                                          
+004900     RECORDING MODE IS F                                                  
+005000     LABEL RECORDS ARE STANDARD                                           
+005100     BLOCK CONTAINS 0 RECORDS.                                            
+005300 01  OUTPUT-RECORD              PIC X(550).                               
+005470                                                                          
+005500                                                                          
+005600******************************************************************        
+005700 WORKING-STORAGE SECTION.                                                 
+005800******************************************************************        
+005801                                                                          
+005810 01  DK-FIELDS.                                                           
+005820     05  DK-OTBND-TRIP-ID                   PIC S9(09)  COMP.             
+005830                                                                          
+005840 01  PROGRAM-VARIABLES.                                                   
+005841     05  PV-PARAGRAPH-NAME                  PIC  X(40).                   
+005842     05  PV-DB2-OPERATION-ATTEMPTED         PIC  X(40).                   
+005843*                                                                         
+005844     05  PV-MESSAGE-1                       PIC  X(100).                  
+005845     05  PV-MESSAGE-2                       PIC  X(100).                  
+005846     05  PV-SQLCODE                         PIC  -999.                    
+005847*                                                                         
+005848     05  PV-WORK-TIMESTAMP.                                               
+005849         10  PV-WORK-TMST-DATE              PIC X(10).                    
+005850         10  PV-WORK-TMST-TIME              PIC X(16).                    
+005851             88 PV-WORK-TIME-BEGIN VALUE '-00.00.00.000000'.              
+005852             88 PV-WORK-TIME-END   VALUE '-23.59.59.999999'.              
+005853*                                                                         
+005854     05  PV-FROM-TIMESTAMP                  PIC  X(26).                   
+005855     05  PV-TO-TIMESTAMP                    PIC  X(26).                   
+005856*                                                                         
+005857     05  PV-OPEN-TIMESTAMP                  PIC  X(26).                   
+005858     05  PV-CLOSE-TIMESTAMP                 PIC  X(26).                   
+005859     05  PV-SHIP-TIMESTAMP                  PIC  X(26).                   
+005862*                                                                         
+005863     05  PV-OPEN-CLOSE-MIN                  PIC S9(09) COMP.              
+005864     05  PV-CLOSE-SHIP-MIN                  PIC S9(09) COMP.              
+005865     05  PV-OPEN-SHIP-MIN                   PIC S9(09) COMP.              
+005866*                                                                         
+005867     05  PV-DISP-OPER                       PIC  Z(04).                   
+005868     05  PV-DISP-STORE                      PIC  Z(04).                   
+005869     05  PV-DISP-TRIP-ID                    PIC  Z(09).                   
+005870*                                                                         
+005890     05  PV-DISPLAY-COUNT                   PIC ZZZ,ZZZ,ZZZ.              
+005891     05  PV-FETCH-COUNT                     PIC 9(09).                    
+005892     05  PV-WRITE-COUNTER                   PIC 9(09).                    
+005893     05  PV-FETCH-COUNT-DISP                PIC 9(09).                    
+005894                                                                          
+005895 01  ABEND-CODE                      PIC S9(04)    VALUE +0               
+005896                                                   COMP SYNC.             
+005897 01  PROGRAM-SWITCHES.                                                    
+005898     05  PS-EOF-CURSOR-SW                   PIC X(01) VALUE 'N'.          
+005899         88  PS-EOF-CURSOR                            VALUE 'Y'.          
+005900         88  PS-EOF-CURSOR-NO                         VALUE 'N'.          
+005901     05  PS-EOF-TRIP-CRTN-SW                PIC X(01) VALUE 'N'.          
+005902         88  PS-EOF-TRIP-CRTN                         VALUE 'Y'.          
+005903         88  PS-EOF-TRIP-CRTN-NO                      VALUE 'N'.          
+005904*                                                                         
+005905*** DMH - 8-23-16 BEGIN                                                   
+005906*                                                                         
+005907     05  PS-CURSOR-SW                       PIC X(03) VALUE '   '.        
+005908         88  PS-RDC-CSR                               VALUE 'RDC'.        
+005909         88  PS-EFC-CSR                               VALUE 'EFC'.        
+005910         88  PS-LFC-CSR                               VALUE 'LFC'.        
+005911*                                                                         
+005912*** DMH - 8-23-16 BEGIN                                                   
+005913*                                                                         
+005914                                                                          
+005915******************************************************************        
+005916* INPUT RECORD LAYOUT - EXTRACT DATE RANGE                                
+005917******************************************************************        
+005920     COPY SURD032.                                                        
+005930*                                                                         
+005931******************************************************************        
+005932* INPUT SELECTION CRITERIA RECORD LAYOUT                                  
+005933* DMH - 8-23-16 ADDED                                                     
+005934******************************************************************        
+005935     COPY SURD134.                                                        
+005936*                                                                         
+005937******************************************************************        
+005938* OUTPUT RECORD LAYOUT                                                    
+005939******************************************************************        
+005940     COPY SURD117.                                                        
+005941*                                                                         
+005942* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         
+005943* TSUOBTR - OUTBOUND TRAILER TRIP TABLE                                   
+005944* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         
+005945     EXEC SQL                                                             
+005946          INCLUDE TSUOBTR                                                 
+005947     END-EXEC.                                                            
+005948                                                                          
+005949* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         
+005950* TSUOBTS - OUTBOUND TRAILER TRIP STATUS TABLE                            
+005951* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         
+005952     EXEC SQL                                                             
+005953          INCLUDE TSUOBTS                                                 
+005954     END-EXEC.                                                            
+005955                                                                          
+005956* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         
+005957* XLT_LOC - LOGISTIC DOMAIN LOCATION DATABASE                             
+005958* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         
+005959     EXEC SQL                                                             
+005960          INCLUDE XLT00010                                                
+005961     END-EXEC.                                                            
+005970                                                                          
+005980* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         
+005990* TKRPRPM - PARAMETER TABLE                                               
+006000* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         
+006100     EXEC SQL                                                             
+006200          INCLUDE TKRPRPM                                                 
+006201     END-EXEC.                                                            
+006202                                                                          
+006210* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         
+006211*                                                                         
+006212* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         
+006213     EXEC SQL                                                             
+006214          INCLUDE SQLCA                                                   
+006215     END-EXEC.                                                            
+006220                                                                          
+006230                                                                          
+006240* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         
+006250*                                                                         
+006260* SHIPPING DOOR CURSOR - FOR BRICK & MORTAR STORES                        
+006270*                                                                         
+006280* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         
+006290     EXEC SQL                                                             
+006291         DECLARE DC-SHIP-TRLR-CSR CURSOR FOR                              
+006292         SELECT A.ORGN_OPER_UNT_ID                                        
+006293              , A.DEST_OPER_UNT_ID                                        
+006294              , A.OTBND_TRIP_ID                                           
+006295              , B.OTBND_STAT_TMST                                         
+006298           FROM TSUOBTR A                                                 
+006299              , TSUOBTS B                                                 
+006300              , XLT_LOC C                                                 
+006301         WHERE A.DEST_OPER_UNT_ID  =  C.LOC_NBR                           
+006302           AND C.LOC_TYP_CDE       = 'DS'                                 
+006310           AND C.E_BUS_IND         = 'N'                                  
+006320           AND A.OTBND_TRIP_ID     =  B.OTBND_TRIP_ID                     
+006330           AND B.TRIP_STAT_CDE     = 'DS'                                 
+006340           AND B.OTBND_STAT_TMST  >= :PV-FROM-TIMESTAMP                   
+006350           AND B.OTBND_STAT_TMST  <= :PV-TO-TIMESTAMP                     
+006351         ORDER BY A.ORGN_OPER_UNT_ID                                      
+006352                , A.DEST_OPER_UNT_ID                                      
+006353                , A.OTBND_TRIP_ID                                         
+006360         WITH UR                                                          
+006395     END-EXEC.                                                            
+006396                                                                          
+006400                                                                          
+006500* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         
+006600*                                                                         
+006700* SHIPPING DOOR CURSOR - FOR KOHLS EFC'S                                  
+006800*                                                                         
+006900* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         
+007000     EXEC SQL                                                             
+007100         DECLARE DC-EFC-SHIP-TRLR-CSR CURSOR FOR                          
+007200         SELECT A.ORGN_OPER_UNT_ID                                        
+007210              , A.DEST_OPER_UNT_ID                                        
+007220              , A.OTBND_TRIP_ID                                           
+007230              , B.OTBND_STAT_TMST                                         
+007240           FROM TSUOBTR A                                                 
+007250              , TSUOBTS B                                                 
+007260              , XLT_LOC C                                                 
+007270         WHERE A.DEST_OPER_UNT_ID  =  C.LOC_NBR                           
+007280           AND C.LOC_TYP_CDE       = 'DS'                                 
+007290           AND C.E_BUS_IND         = 'Y'                                  
+007291           AND A.OTBND_TRIP_ID     =  B.OTBND_TRIP_ID                     
+007292           AND B.TRIP_STAT_CDE     = 'DS'                                 
+007293           AND B.OTBND_STAT_TMST  >= :PV-FROM-TIMESTAMP                   
+007294           AND B.OTBND_STAT_TMST  <= :PV-TO-TIMESTAMP                     
+007295           AND NOT A.DEST_OPER_UNT_ID  IN                                 
+007296               (SELECT D.LOC_ID                                           
+007297                  FROM TKRPRPM D                                          
+007298                 WHERE D.INTFC_SYS_CDE     = 'KHL'                        
+007299                   AND D.SYS_PRC_FUNC_CDE  = 'LFCEFC'                     
+007300                   AND D.FUNC_PRC_STAT_CDE = 'AC'                         
+007301                   AND D.FUNC_BEG_TMST    <=  CURRENT TIMESTAMP           
+007302                   AND D.FUNC_END_TMST    >=  CURRENT TIMESTAMP           
+007303                   AND D.FUNC_TXT          = 'Y'                          
+007304                )                                                         
+007305         ORDER BY A.ORGN_OPER_UNT_ID                                      
+007306                , A.DEST_OPER_UNT_ID                                      
+007307                , A.OTBND_TRIP_ID                                         
+007308         WITH UR                                                          
+007309     END-EXEC.                                                            
+007310                                                                          
+007320                                                                          
+007330* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         
+007340*                                                                         
+007350* SHIPPING DOOR CURSOR - FOR LFC'S LOGISTICS FULFILLMENT CENTERS          
+007360*                                                                         
+007370* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         
+007380     EXEC SQL                                                             
+007390         DECLARE DC-LFC-SHIP-TRLR-CSR CURSOR FOR                          
+007391         SELECT A.ORGN_OPER_UNT_ID                                        
+007392              , A.DEST_OPER_UNT_ID                                        
+007393              , A.OTBND_TRIP_ID                                           
+007394              , B.OTBND_STAT_TMST                                         
+007395           FROM TSUOBTR A                                                 
+007396              , TSUOBTS B                                                 
+007397              , XLT_LOC C                                                 
+007398         WHERE A.DEST_OPER_UNT_ID  =  C.LOC_NBR                           
+007399           AND C.LOC_TYP_CDE       = 'DS'                                 
+007400           AND C.E_BUS_IND         = 'Y'                                  
+007401           AND A.OTBND_TRIP_ID     =  B.OTBND_TRIP_ID                     
+007402           AND B.TRIP_STAT_CDE     = 'DS'                                 
+007403           AND B.OTBND_STAT_TMST  >= :PV-FROM-TIMESTAMP                   
+007404           AND B.OTBND_STAT_TMST  <= :PV-TO-TIMESTAMP                     
+007405           AND A.DEST_OPER_UNT_ID  IN                                     
+007406               (SELECT D.LOC_ID                                           
+007407                  FROM TKRPRPM D                                          
+007408                 WHERE D.INTFC_SYS_CDE     = 'KHL'                        
+007409                   AND D.SYS_PRC_FUNC_CDE  = 'LFCEFC'                     
+007410                   AND D.FUNC_PRC_STAT_CDE = 'AC'                         
+007411                   AND D.FUNC_BEG_TMST    <=  CURRENT TIMESTAMP           
+007412                   AND D.FUNC_END_TMST    >=  CURRENT TIMESTAMP           
+007413                   AND D.FUNC_TXT          = 'Y'                          
+007414                )                                                         
+007415         ORDER BY A.ORGN_OPER_UNT_ID                                      
+007416                , A.DEST_OPER_UNT_ID                                      
+007417                , A.OTBND_TRIP_ID                                         
+007418         WITH UR                                                          
+007419     END-EXEC.                                                            
+007420                                                                          
+007421                                                                          
+007430*-----------------------------------------------------------------        
+007500*  DB2 FORMATTED MESSAGE AREA                                             
+007510*-----------------------------------------------------------------        
+007700     COPY DPWS004.                                                        
+007800                                                                          
+018300                                                                          
+018400                                                                          
+018600 PROCEDURE DIVISION.                                                      
+018801                                                                          
+018810*-----------------------------------------------------------------        
+018820*                                                                         
+018840*-----------------------------------------------------------------        
+018900 0000-PROGRAM-MAINLINE.                                                   
+019400                                                                          
+019500     PERFORM 1000-INITIALIZE.                                             
+019510                                                                          
+019520     DISPLAY '********************************************'.              
+019530     DISPLAY '*                                          *'.              
+019540     DISPLAY '*                                          *'.              
+019600     IF  PS-EOF-CURSOR-NO                                                 
+019700         PERFORM 2000-PROCESS-CURSOR                                      
+019800           UNTIL PS-EOF-CURSOR                                            
+019900     END-IF.                                                              
+019910                                                                          
+020000     PERFORM 9000-EOJ-ROUTINE.                                            
+020113                                                                          
+020120     DISPLAY '*                                          *'.              
+020130     DISPLAY '*                                          *'.              
+020131     DISPLAY '********************************************'.              
+020140                                                                          
+020200     STOP RUN.                                                            
+020300                                                                          
+020310                                                                          
+020320*-----------------------------------------------------------------        
+020330*  DO FIRST TIME PROGRAM INITIALIZATION TASKS.                            
+020340*    -- OPEN INPUT FILE                                                   
+020341*    -- OPEN OUTPUT FILE                                                  
+020350*    -- OPEN CURSOR                                                       
+020360*    -- FETCH CURSOR                                                      
+020361*    -- IF NO TRAILERS SHIPPED - JOB FINISHES - NOTHING TO REPORT         
+020370*-----------------------------------------------------------------        
+020400 1000-INITIALIZE.                                                         
+021100                                                                          
+021500     OPEN INPUT  INPUT-FILE                                               
+021501                 SELECTION-FILE                                           
+021510          OUTPUT OUTPUT-FILE.                                             
+021600                                                                          
+021700     PERFORM 8000-READ-CONTROL-REC.                                       
+021701     PERFORM 8010-SELECTION-REC.                                          
+021710                                                                          
+021711     IF  PS-EOF-CURSOR-NO                                                 
+021712         MOVE SU032-FROM-DATE    TO PV-WORK-TMST-DATE                     
+021713         SET PV-WORK-TIME-BEGIN  TO TRUE                                  
+021714         MOVE  PV-WORK-TIMESTAMP TO PV-FROM-TIMESTAMP                     
+021717         MOVE SU032-TO-DATE      TO PV-WORK-TMST-DATE                     
+021718         SET PV-WORK-TIME-END    TO TRUE                                  
+021719         MOVE  PV-WORK-TIMESTAMP TO PV-TO-TIMESTAMP                       
+021720         DISPLAY ' SUKUT176'                                              
+021721                 ' FROM:' PV-FROM-TIMESTAMP                               
+021722                 ' TO:'   PV-TO-TIMESTAMP                                 
+021723                                                                          
+021800         PERFORM 7000-OPEN-CURSOR                                         
+021900         PERFORM 7005-FETCH-CURSOR                                        
+021910     END-IF.                                                              
+022000                                                                          
+022001     IF  PS-EOF-CURSOR                                                    
+022002         MOVE 4095  TO  ABEND-CODE                                        
+022003     END-IF.                                                              
+022004                                                                          
+022010                                                                          
+025449*-----------------------------------------------------------------        
+025450*  LOOP THROUGH THE RESULTS TABLE.                                        
+025451*  FORMAT THE OUTPUT RECORD.  WRITE THE RECORDS THAT MEET CRITERIA.       
+025452*-----------------------------------------------------------------        
+025460 2000-PROCESS-CURSOR.                                                     
+026000                                                                          
+026001     PERFORM 3000-GET-TRIP-OPEN-TMST.                                     
+026010     PERFORM 3010-GET-TRIP-CLOSE-TMST.                                    
+026095                                                                          
+026096     PERFORM 5000-FORMAT-OUTPUT-RECORD.                                   
+026152                                                                          
+026153     PERFORM 8100-WRITE-OUTPUT-RECORD.                                    
+026160                                                                          
+026200     PERFORM 7005-FETCH-CURSOR.                                           
+026300                                                                          
+026310                                                                          
+026312*-----------------------------------------------------------------        
+026313*  GET THE FIRST DATE THE TRIP WAS OPENED.                                
+026315*  CALCULATE HOW MANY MINUTES BETWEEN FIRST OPEN AND SHIP.                
+026316*-----------------------------------------------------------------        
+026319 3000-GET-TRIP-OPEN-TMST.                                                 
+026320                                                                          
+026321     EXEC SQL                                                             
+026322         SELECT                                                           
+026323                A.OTBND_STAT_TMST                                         
+026325              , TIMESTAMPDIFF                                             
+026326                (4, CHAR( :PV-SHIP-TIMESTAMP  -                           
+026327                          A.OTBND_STAT_TMST                               
+026328                        )                                                 
+026329                )                                                         
+026330           INTO                                                           
+026331                :PV-OPEN-TIMESTAMP                                        
+026332              , :PV-OPEN-SHIP-MIN                                         
+026333           FROM TSUOBTS A                                                 
+026334          WHERE A.OTBND_TRIP_ID  = :SUOBTR-OTBND-TRIP-ID                  
+026335            AND A.TRIP_STAT_CDE  = 'DO'                                   
+026336            AND A.OTBND_STAT_TMST IN                                      
+026337                (SELECT MIN(B.OTBND_STAT_TMST)                            
+026338                   FROM TSUOBTS B                                         
+026339                  WHERE A.OTBND_TRIP_ID  =  B.OTBND_TRIP_ID               
+026340                    AND B.TRIP_STAT_CDE  = 'DO')                          
+026370           WITH UR                                                        
+026371                                                                          
+026372     END-EXEC.                                                            
+026373                                                                          
+026374     EVALUATE TRUE                                                        
+026375         WHEN SQLCODE = ZERO                                              
+026376              CONTINUE                                                    
+026379                                                                          
+026380         WHEN SQLWARN0 NOT = SPACES                                       
+026381         WHEN SQLCODE < ZERO                                              
+026382         WHEN SQLCODE > ZERO                                              
+026383             MOVE SQLCODE              TO PV-SQLCODE                      
+026384             MOVE SUOBTR-OTBND-TRIP-ID    TO PV-DISP-OPER                 
+026385             MOVE SUOBTR-ORGN-OPER-UNT-ID TO PV-DISP-STORE                
+026386             MOVE SUOBTR-DEST-OPER-UNT-ID TO PV-DISP-TRIP-ID              
+026391*                                                                         
+026392              STRING '3000-'                                              
+026393                     ' SQL:'   PV-SQLCODE                                 
+026394                     ' OPER:'  PV-DISP-OPER                               
+026395                     ' DEST:'  PV-DISP-STORE                              
+026396                     ' TRIP:'  PV-DISP-TRIP-ID                            
+026401                               DELIMITED BY SIZE                          
+026402                          INTO PV-MESSAGE-1                               
+026403                                                                          
+026418             DISPLAY PV-MESSAGE-1                                         
+026420                                                                          
+026421             MOVE '3000-GET-TRIP-OPEN-TMST    '                           
+026422                                 TO PV-PARAGRAPH-NAME                     
+026423             MOVE 'SELECT FIRST TIME TRIP OPENED  '                       
+026424                                 TO PV-DB2-OPERATION-ATTEMPTED            
+026425             PERFORM 9100-SQL-ABEND                                       
+026426     END-EVALUATE.                                                        
+026427                                                                          
+026428                                                                          
+026429*-----------------------------------------------------------------        
+026430*  GET THE LAST DATE THE TRIP WAS CLOSED.                                 
+026431*  CALCULATE HOW MANY MINUTES BETWEEN FIRST OPEN AND LAST CLOSE.          
+026432*  CALCULATE HOW MANY MINUTES BETWEEN LAST CLOSE AND SHIP.                
+026433*-----------------------------------------------------------------        
+026434 3010-GET-TRIP-CLOSE-TMST.                                                
+026435                                                                          
+026436     EXEC SQL                                                             
+026437         SELECT                                                           
+026438                A.OTBND_STAT_TMST                                         
+026439              , TIMESTAMPDIFF                                             
+026440                (4, CHAR( A.OTBND_STAT_TMST  -                            
+026441                          :PV-OPEN-TIMESTAMP                              
+026442                        )                                                 
+026443                )                                                         
+026444              , TIMESTAMPDIFF                                             
+026445                (4, CHAR( :PV-SHIP-TIMESTAMP  -                           
+026446                          A.OTBND_STAT_TMST                               
+026447                        )                                                 
+026448                )                                                         
+026449           INTO                                                           
+026450                :PV-CLOSE-TIMESTAMP                                       
+026451              , :PV-OPEN-CLOSE-MIN                                        
+026452              , :PV-CLOSE-SHIP-MIN                                        
+026453           FROM TSUOBTS A                                                 
+026454          WHERE A.OTBND_TRIP_ID  = :SUOBTR-OTBND-TRIP-ID                  
+026455            AND A.TRIP_STAT_CDE  = 'DC'                                   
+026456            AND A.OTBND_STAT_TMST IN                                      
+026457                (SELECT MAX(B.OTBND_STAT_TMST)                            
+026458                   FROM TSUOBTS B                                         
+026459                  WHERE A.OTBND_TRIP_ID  =  B.OTBND_TRIP_ID               
+026460                    AND B.TRIP_STAT_CDE  = 'DC')                          
+026461           WITH UR                                                        
+026462                                                                          
+026463     END-EXEC.                                                            
+026464                                                                          
+026465     EVALUATE TRUE                                                        
+026466         WHEN SQLCODE = ZERO                                              
+026467              CONTINUE                                                    
+026468                                                                          
+026469         WHEN SQLWARN0 NOT = SPACES                                       
+026470         WHEN SQLCODE < ZERO                                              
+026471         WHEN SQLCODE > ZERO                                              
+026472             MOVE SQLCODE              TO PV-SQLCODE                      
+026473             MOVE SUOBTR-OTBND-TRIP-ID    TO PV-DISP-OPER                 
+026474             MOVE SUOBTR-ORGN-OPER-UNT-ID TO PV-DISP-STORE                
+026475             MOVE SUOBTR-DEST-OPER-UNT-ID TO PV-DISP-TRIP-ID              
+026476*                                                                         
+026477              STRING '3000-'                                              
+026478                     ' SQL:'   PV-SQLCODE                                 
+026479                     ' OPER:'  PV-DISP-OPER                               
+026480                     ' DEST:'  PV-DISP-STORE                              
+026481                     ' TRIP:'  PV-DISP-TRIP-ID                            
+026482                               DELIMITED BY SIZE                          
+026483                          INTO PV-MESSAGE-1                               
+026484                                                                          
+026485             DISPLAY PV-MESSAGE-1                                         
+026486                                                                          
+026487             MOVE '3010-GET-TRIP-CLOSE-TMST   '                           
+026488                                 TO PV-PARAGRAPH-NAME                     
+026489             MOVE 'SELECT LAST TIME TRIP CLOSED   '                       
+026490                                 TO PV-DB2-OPERATION-ATTEMPTED            
+026491             PERFORM 9100-SQL-ABEND                                       
+026492     END-EVALUATE.                                                        
+026493                                                                          
+026494                                                                          
+026500                                                                          
+026860*-----------------------------------------------------------------        
+026861*  FORMAT OUTPUT RECORD                                                   
+026863*-----------------------------------------------------------------        
+026864 5000-FORMAT-OUTPUT-RECORD.                                               
+026865                                                                          
+026866     INITIALIZE  SU117-EXTRACT-RECORD.                                    
+026868     MOVE ZEROES            TO  SU117-OPER-UNT-ID                         
+026869                                SU117-STORE-DEST                          
+026870                                SU117-TRIP-ID                             
+026871                                SU117-TRIP-OPEN-TO-CLOSE-MIN              
+026872                                SU117-TRIP-CLOSE-TO-SHIP-MIN              
+026873                                SU117-TRIP-OPEN-TO-SHIP-MIN               
+026874                                SU117-SML-NBR                             
+026875                                SU117-MSTR-SML-NBR                        
+026876                                SU117-TRN-NBR                             
+026877                                SU117-REC-SEQ-NBR                         
+026878                                SU117-TRN-LNE-NBR                         
+026879                                SU117-SML-UNT-QTY                         
+026880                                SU117-ARRIVE-TO-PRC-MIN                   
+026881                                SU117-ARRIVE-TO-P2L-PKD-MIN               
+026882                                SU117-PRC-TO-P2L-PKD-MIN                  
+026883                                SU117-P2L-PKD-TO-CLOSE-MIN                
+026884                                SU117-P2L-OPEN-TO-CLOSE-MIN               
+026885                                SU117-P2L-CLOSE-TO-OTBND-MIN              
+026886                                SU117-ARRIVE-TO-OTBND-MIN                 
+026887                                SU117-PRC-TO-OTBND-MIN                    
+026888                                SU117-ARRIVE-TO-TCLOS-MIN                 
+026889                                SU117-ARRIVE-TO-SHIP-MIN                  
+026890                                SU117-P2L-OPEN-TO-TCLOS-MIN               
+026891                                SU117-P2L-OPEN-TO-SHIP-MIN                
+026892                                SU117-P2L-CLOSE-TO-TCLOS-MIN              
+026893                                SU117-P2L-CLOSE-TO-SHIP-MIN               
+026894                                SU117-ARRIVE-TO-MSTR-MIN                  
+026895                                SU117-PRC-TO-MSTR-MIN                     
+026896                                SU117-MSTR-CRE-TO-OTBND-MIN               
+026897                                SU117-MSTR-CRE-TO-TCLOS-MIN               
+026898                                SU117-MSTR-CRE-TO-SHIP-MIN                
+026899                                SU117-MSTR-FIRST-TO-OTBND-MIN             
+026900                                SU117-MSTR-FIRST-TO-TCLOS-MIN             
+026901                                SU117-MSTR-FIRST-TO-SHIP-MIN              
+026902                                SU117-MSTR-LAST-TO-OTBND-MIN              
+026903                                SU117-MSTR-LAST-TO-TCLOS-MIN              
+026904                                SU117-MSTR-LAST-TO-SHIP-MIN.              
+026930*                                                                         
+026931     MOVE SPACES            TO  SU117-TRIP-OPEN-TMST                      
+026932                                SU117-TRIP-CLOSE-TMST                     
+026933                                SU117-TRIP-SHIP-TMST                      
+026938                                SU117-SML-SRC-CDE                         
+026939                                SU117-SML-CRE-DTE                         
+026940                                SU117-SML-CRE-TM                          
+026941                                SU117-SML-P2L-OPEN-DTE                    
+026942                                SU117-SML-P2L-OPEN-TM                     
+026943                                SU117-SML-P2L-CLOSE-DTE                   
+026944                                SU117-SML-P2L-CLOSE-TM                    
+026945                                SU117-SML-ON-OTBND-DTE                    
+026946                                SU117-SML-ON-OTBND-TM                     
+026947                                SU117-SML-ON-OTBND-CDE                    
+026948                                SU117-MSTR-CRE-DTE                        
+026949                                SU117-MSTR-CRE-TM                         
+026950                                SU117-SML-IN-MSTR-DTE                     
+026951                                SU117-SML-IN-MSTR-TM                      
+026952                                SU117-FIRST-SML-IN-MSTR-DTE               
+026953                                SU117-FIRST-SML-IN-MSTR-TM                
+026954                                SU117-LAST-SML-IN-MSTR-DTE                
+026955                                SU117-LAST-SML-IN-MSTR-TM                 
+026956                                SU117-REC-SEQ-ARRIVE-DTE                  
+026957                                SU117-REC-SEQ-ARRIVE-TM                   
+026958                                SU117-SRC-CART-PRC-DTE                    
+026959                                SU117-SRC-CART-PRC-TM                     
+026960                                SU117-PKD-IN-P2L-SML-DTE                  
+026961                                SU117-PKD-IN-P2L-SML-TM.                  
+026966*                                                                         
+026967     MOVE SUOBTR-ORGN-OPER-UNT-ID TO SU117-OPER-UNT-ID.                   
+026968     MOVE SUOBTR-DEST-OPER-UNT-ID TO SU117-STORE-DEST.                    
+026969     MOVE SUOBTR-OTBND-TRIP-ID    TO SU117-TRIP-ID.                       
+026970*                                                                         
+026971     MOVE PV-OPEN-TIMESTAMP       TO SU117-TRIP-OPEN-TMST.                
+026972     MOVE PV-CLOSE-TIMESTAMP      TO SU117-TRIP-CLOSE-TMST.               
+026973     MOVE PV-SHIP-TIMESTAMP       TO SU117-TRIP-SHIP-TMST.                
+026974*                                                                         
+026975     MOVE PV-OPEN-CLOSE-MIN     TO SU117-TRIP-OPEN-TO-CLOSE-MIN.          
+026976     MOVE PV-CLOSE-SHIP-MIN     TO SU117-TRIP-CLOSE-TO-SHIP-MIN.          
+026977     MOVE PV-OPEN-SHIP-MIN      TO SU117-TRIP-OPEN-TO-SHIP-MIN.           
+026982                                                                          
+027032                                                                          
+027033*-----------------------------------------------------------------        
+027034*  OPEN THE CURSOR.                                                       
+027040*-----------------------------------------------------------------        
+027100 7000-OPEN-CURSOR.                                                        
+027300                                                                          
+027310     IF  PS-RDC-CSR                                                       
+027320         EXEC SQL                                                         
+027321              OPEN DC-SHIP-TRLR-CSR                                       
+027322         END-EXEC                                                         
+027323     ELSE                                                                 
+027324     IF  PS-EFC-CSR                                                       
+027325         EXEC SQL                                                         
+027326              OPEN DC-EFC-SHIP-TRLR-CSR                                   
+027327         END-EXEC                                                         
+027328     ELSE                                                                 
+027400         EXEC SQL                                                         
+027500              OPEN DC-LFC-SHIP-TRLR-CSR                                   
+027600        END-EXEC                                                          
+027620     END-IF                                                               
+027630     END-IF.                                                              
+027700                                                                          
+027800     EVALUATE TRUE                                                        
+027810         WHEN SQLCODE = ZERO                                              
+027820              CONTINUE                                                    
+027900         WHEN SQLCODE = -904                                              
+028000         WHEN SQLCODE = -911                                              
+028100              CONTINUE                                                    
+028200         WHEN SQLWARN0 NOT = SPACES                                       
+028300         WHEN SQLCODE < ZERO                                              
+028400         WHEN SQLCODE > ZERO                                              
+028410             MOVE SQLCODE              TO PV-SQLCODE                      
+028472*                                                                         
+028473              STRING '7000-'                                              
+028474                     ' SQL:'   PV-SQLCODE                                 
+028475                     ' FROM:'  PV-FROM-TIMESTAMP                          
+028476                     ' TO:'    PV-TO-TIMESTAMP                            
+028477                     ' CSR:'   PS-CURSOR-SW                               
+028482                               DELIMITED BY SIZE                          
+028483                          INTO PV-MESSAGE-1                               
+028484                                                                          
+028506                                                                          
+028510             MOVE '7000-OPEN-CURSOR            '                          
+028600                                 TO PV-PARAGRAPH-NAME                     
+028700             MOVE 'OPEN THE DC-SHIP-TRLR-CSR   '                          
+028800                                 TO PV-DB2-OPERATION-ATTEMPTED            
+028900             PERFORM 9100-SQL-ABEND                                       
+029200     END-EVALUATE.                                                        
+029400                                                                          
+030200                                                                          
+030210*-----------------------------------------------------------------        
+030220*  FETCH THE ROW FROM THE RESULTS TABLE USING THE CURSOR.                 
+030230*-----------------------------------------------------------------        
+030300 7005-FETCH-CURSOR.                                                       
+030500                                                                          
+030600     IF  PS-RDC-CSR                                                       
+030610         EXEC SQL                                                         
+030630              FETCH DC-SHIP-TRLR-CSR                                      
+030631               INTO :SUOBTR-ORGN-OPER-UNT-ID                              
+030632                   ,:SUOBTR-DEST-OPER-UNT-ID                              
+030633                   ,:SUOBTR-OTBND-TRIP-ID                                 
+030634                   ,:PV-SHIP-TIMESTAMP                                    
+030635         END-EXEC                                                         
+030640     ELSE                                                                 
+030650     IF  PS-EFC-CSR                                                       
+030680         EXEC SQL                                                         
+030681              FETCH DC-EFC-SHIP-TRLR-CSR                                  
+030682               INTO :SUOBTR-ORGN-OPER-UNT-ID                              
+030683                   ,:SUOBTR-DEST-OPER-UNT-ID                              
+030684                   ,:SUOBTR-OTBND-TRIP-ID                                 
+030685                   ,:PV-SHIP-TIMESTAMP                                    
+030686         END-EXEC                                                         
+030690     ELSE                                                                 
+030693         EXEC SQL                                                         
+030694              FETCH DC-LFC-SHIP-TRLR-CSR                                  
+030695               INTO :SUOBTR-ORGN-OPER-UNT-ID                              
+030696                   ,:SUOBTR-DEST-OPER-UNT-ID                              
+030697                   ,:SUOBTR-OTBND-TRIP-ID                                 
+030698                   ,:PV-SHIP-TIMESTAMP                                    
+030699         END-EXEC                                                         
+030700     END-IF                                                               
+030800     END-IF.                                                              
+032400                                                                          
+032500     EVALUATE TRUE                                                        
+032600         WHEN SQLCODE = ZERO                                              
+032610              ADD  1  TO  PV-FETCH-COUNT                                  
+032611                          PV-FETCH-COUNT-DISP                             
+032620              IF  PV-FETCH-COUNT-DISP >= 100                              
+032630                  DISPLAY 'FETCH: '  PV-FETCH-COUNT                       
+032631                          ' CURSOR:' PS-CURSOR-SW                         
+032640                  MOVE  ZEROES  TO  PV-FETCH-COUNT-DISP                   
+032650              END-IF                                                      
+032700             CONTINUE                                                     
+032800         WHEN SQLCODE = +100                                              
+032900             SET PS-EOF-CURSOR          TO  TRUE                          
+033000                                                                          
+033100         WHEN SQLWARN0 NOT = SPACES                                       
+033200         WHEN SQLCODE < ZERO                                              
+033300         WHEN SQLCODE > ZERO                                              
+033301             MOVE SQLCODE              TO PV-SQLCODE                      
+033394              STRING '7005-'                                              
+033395                     ' SQL:'   PV-SQLCODE                                 
+033396                     ' FROM:'  PV-FROM-TIMESTAMP                          
+033397                     ' TO:'    PV-TO-TIMESTAMP                            
+033398                     ' CSR:'   PS-CURSOR-SW                               
+033403                               DELIMITED BY SIZE                          
+033404                          INTO PV-MESSAGE-1                               
+033405             DISPLAY PV-MESSAGE-1                                         
+033406                                                                          
+033410             MOVE '7005-FETCH-CURSOR          '                           
+033500                                 TO PV-PARAGRAPH-NAME                     
+033600             MOVE 'FETCH THE DC-SHIP-TRLR-CSR     '                       
+033700                                 TO PV-DB2-OPERATION-ATTEMPTED            
+033800             PERFORM 9100-SQL-ABEND                                       
+033900     END-EVALUATE.                                                        
+034000                                                                          
+034120                                                                          
+034121*-----------------------------------------------------------------        
+034122*  CLOSE THE CURSOR.                                                      
+034123*-----------------------------------------------------------------        
+034124 7010-CLOSE-CURSOR.                                                       
+034125                                                                          
+034126     IF  PS-RDC-CSR                                                       
+034127         EXEC SQL                                                         
+034128              CLOSE DC-SHIP-TRLR-CSR                                      
+034129         END-EXEC                                                         
+034130     ELSE                                                                 
+034131     IF  PS-EFC-CSR                                                       
+034132         EXEC SQL                                                         
+034133              CLOSE DC-EFC-SHIP-TRLR-CSR                                  
+034134         END-EXEC                                                         
+034135     ELSE                                                                 
+034136         EXEC SQL                                                         
+034137              CLOSE DC-LFC-SHIP-TRLR-CSR                                  
+034138        END-EXEC                                                          
+034139     END-IF                                                               
+034140     END-IF.                                                              
+034144                                                                          
+034145     EVALUATE TRUE                                                        
+034146         WHEN SQLCODE = ZERO                                              
+034147              CONTINUE                                                    
+034148         WHEN SQLCODE = -904                                              
+034149         WHEN SQLCODE = -911                                              
+034150              CONTINUE                                                    
+034151         WHEN SQLWARN0 NOT = SPACES                                       
+034152         WHEN SQLCODE < ZERO                                              
+034153         WHEN SQLCODE > ZERO                                              
+034154             MOVE SQLCODE              TO PV-SQLCODE                      
+034155*                                                                         
+034156              STRING '7010-'                                              
+034157                     ' SQL:'   PV-SQLCODE                                 
+034158                     ' FROM:'  PV-FROM-TIMESTAMP                          
+034159                     ' TO:'    PV-TO-TIMESTAMP                            
+034160                     ' CSR:'   PS-CURSOR-SW                               
+034161                               DELIMITED BY SIZE                          
+034162                          INTO PV-MESSAGE-1                               
+034163                                                                          
+034164             MOVE '7010-CLOSE-CURSOR           '                          
+034165                                 TO PV-PARAGRAPH-NAME                     
+034166             MOVE 'CLOSE THE DC-SHIP-TRLR-CSR   '                         
+034167                                 TO PV-DB2-OPERATION-ATTEMPTED            
+034168             PERFORM 9100-SQL-ABEND                                       
+034169     END-EVALUATE.                                                        
+034170                                                                          
+034171                                                                          
+034172*-----------------------------------------------------------------        
+034173*  READ DATE CONTROL RECORD                                               
+034174*-----------------------------------------------------------------        
+034175 8000-READ-CONTROL-REC.                                                   
+034176                                                                          
+034177     READ INPUT-FILE       INTO                                           
+034178           SU032-DATE-CONTROL-REC                                         
+034179     AT END                                                               
+034180         SET PS-EOF-CURSOR            TO TRUE                             
+034181         DISPLAY 'PROGRAM:  SUKUT176'                                     
+034182         DISPLAY 'NO DATE CONTROL CARD'                                   
+034183         DISPLAY SPACES                                                   
+034184     NOT AT END                                                           
+034185         DISPLAY 'PROGRAM:  SUKUT176'                                     
+034186         DISPLAY 'DATE CONTROL CARD:'                                     
+034187                 SU032-DATE-CONTROL-REC                                   
+034188         DISPLAY SPACES                                                   
+034189     END-READ.                                                            
+034190                                                                          
+034191*-----------------------------------------------------------------        
+034192*  READ SELECTION CRITERIA RECORD                                         
+034193*  DMH - 8-23-16 ADDED                                                    
+034194*-----------------------------------------------------------------        
+034195 8010-SELECTION-REC.                                                      
+034196                                                                          
+034197     READ SELECTION-FILE       INTO                                       
+034198           SU134-SELECTION-REC                                            
+034199     AT END                                                               
+034200         SET PS-EOF-CURSOR            TO TRUE                             
+034201         DISPLAY 'PROGRAM:  SUKUT176'                                     
+034202         DISPLAY 'NO DATE SELECTION RECORD'                               
+034203         DISPLAY SPACES                                                   
+034204     NOT AT END                                                           
+034205         MOVE  SU134-SELECTION-CRITERIA  TO  PS-CURSOR-SW                 
+034206         DISPLAY 'PROGRAM:  SUKUT176'                                     
+034207         DISPLAY 'SELECTION RECORD: '                                     
+034208                 SU134-SELECTION-REC                                      
+034209         DISPLAY SPACES                                                   
+034210     END-READ.                                                            
+034211                                                                          
+034212*-----------------------------------------------------------------        
+034213*  WRITE THE SHIPMENT-UNIT-RECORD                                         
+034214*-----------------------------------------------------------------        
+034220 8100-WRITE-OUTPUT-RECORD.                                                
+034300                                                                          
+034600     WRITE OUTPUT-RECORD                                                  
+034700      FROM SU117-EXTRACT-RECORD.                                          
+034800     ADD +1 TO PV-WRITE-COUNTER.                                          
+035690                                                                          
+035700                                                                          
+035710*-----------------------------------------------------------------        
+035711*  CLOSE OUTPUT FILE.  CLOSE THE CURSOR.                                  
+035720*-----------------------------------------------------------------        
+035800 9000-EOJ-ROUTINE.                                                        
+035900                                                                          
+036000     PERFORM 7010-CLOSE-CURSOR.                                           
+036100                                                                          
+036300     CLOSE INPUT-FILE                                                     
+036310           OUTPUT-FILE.                                                   
+036400                                                                          
+036500     MOVE PV-WRITE-COUNTER TO PV-DISPLAY-COUNT.                           
+036600     DISPLAY 'TOTAL OUTPUT RECORDS:  ' PV-DISPLAY-COUNT.                  
+036700                                                                          
+040200                                                                          
+040210*-----------------------------------------------------------------        
+040220*  PERFORMS THE ABEND FOR THE PROGRAM IN THE EVENT THAT AN SQL            
+040230*  ERROR OR WARNING CODE OCCURS.                                          
+040240*-----------------------------------------------------------------        
+040300 9100-SQL-ABEND.                                                          
+040800     DISPLAY '9100-SQL-ABEND'.                                            
+040900     DISPLAY '** ABEND     **'.                                           
+041000     DISPLAY '** PROGRAM   ** =  SUKUT176'.                               
+041100     DISPLAY '** PARAGRAPH ** = ' PV-PARAGRAPH-NAME.                      
+041200     DISPLAY '** OPERATION ** = ' PV-DB2-OPERATION-ATTEMPTED.             
+041300                                                                          
+041400******************************************************************        
+041500* THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-            
+041600* MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE                 
+041700* 'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE             
+041800* FORMAT.                                                                 
+041900******************************************************************        
+042000     COPY DPPD004.                                                        
+042100                                                                          
+042200     MOVE +4013                  TO ABEND-CODE.                           
+042300     CALL 'ILBOABN0' USING ABEND-CODE.                                    
+042310/                                                                         

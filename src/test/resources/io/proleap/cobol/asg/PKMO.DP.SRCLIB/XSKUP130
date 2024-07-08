@@ -1,0 +1,396 @@
+       IDENTIFICATION DIVISION.                                                 
+                                                                                
+       PROGRAM-ID.    XSKUP130                                                  
+       AUTHOR.        RICH KELLEN.                                              
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+       DATE-WRITTEN.  02-21-09.                                                 
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *     XSKUP130 - INACTIVE XST_SKU_LOC PURGE                      *        
+      ******************************************************************        
+      *     THIS PROGRAM WILL PURGE INACTIVE ROWS FROM THE XST_SKU_LOC *        
+      * DB2 TABLE USING THE DB2 KEY INFO FROM EACH INPUT FILE RECORD.  *        
+      * THESE RECORDS ARE CREATED IN THE FIRST STEP OF THE JOB IN AN   *        
+      * BY A SQL UNLOAD UTILITY.                                       *        
+      * COMMITS ARE TAKEN EVERY TEN SECONDS, AND CHECKPOINT RESTART    *        
+      * LOGIC IS INCORPORATED.                                         *        
+      *                                                                *        
+      *    WR/PITS#     DATE        DESCRIPTION                        *        
+      *    --------   --------     ---------------------------------   *        
+      *    BRANTNER   07/23/09     REMOVE END_TMST STATEMENTS FROM THE *        
+      *                            DELETE SQL.                         *        
+260107*    JIM HUNTER 08-19-21     ADD COPYBOOK DPWS991 TO MAKE        *        
+260107*    CHG0260107              DPKUT901 CALL DYNAMIC.              *        
+      ******************************************************************        
+                                                                                
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+                                                                                
+       CONFIGURATION SECTION.                                                   
+       SOURCE-COMPUTER.        IBM-3090.                                        
+       OBJECT-COMPUTER.        IBM-3090.                                        
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+       DATA DIVISION.                                                           
+       FILE SECTION.                                                            
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  ABEND-CODE                  PIC S9(04)  VALUE ZERO COMP SYNC.        
+                                                                                
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-JOB-NAME             PIC  X(06)  VALUE 'XSK111'.              
+           05  PC-CKPT-JOB-NAME        PIC  X(06)  VALUE 'XSK111'.              
+           05  PC-PROGRAM-NAME         PIC  X(08)  VALUE 'XSKUP130'.            
+           05  PC-CKPT-PLAN-NAME       PIC  X(08)  VALUE 'XSKUP130'.            
+           05  PC-CURRENT-PROGRAM-NAME PIC  X(08)  VALUE 'XSKUP130'.            
+           05  PC-MAX-RETRIES          PIC S9(03)  VALUE +3 COMP-3.             
+           05  PC-MAX-DEADLOCKS        PIC S9(03)  VALUE +3 COMP-3.             
+           05  PC-TRAN-PRES-FUNC-CODES.                                         
+               10  PC-TRAN-PRES-FUNC-OPEN   PIC  X(05)  VALUE 'OPEN '.          
+               10  PC-TRAN-PRES-FUNC-CKPT   PIC  X(05)  VALUE 'CKPT '.          
+               10  PC-TRAN-PRES-FUNC-TRANS  PIC  X(05)  VALUE 'TRANS'.          
+               10  PC-TRAN-PRES-FUNC-RSTRT  PIC  X(05)  VALUE 'RSTRT'.          
+               10  PC-TRAN-PRES-FUNC-CLOSE  PIC  X(05)  VALUE 'CLOSE'.          
+                                                                                
+                                                                                
+       01  PC-PROGRAM-COUNTER.                                                  
+           05  PC-DELETE-CNT           PIC  9(09)  VALUE ZERO.                  
+                                                                                
+       01  PE-PROGRAM-ERROR-MESSAGES.                                           
+           05  PE-MSG-01                       PIC X(50) VALUE                  
+                'ATTEMPT TO DELETE ROW ON TABLE SKU-LOC FAILED    '.            
+           05  PE-MSG-04                       PIC X(50) VALUE                  
+                'PROGRAM ABENDED WHILE TRYING TO PERFORM A COMMIT '.            
+           05  PE-MSG-05                       PIC X(50) VALUE                  
+                'PROGRAM MAXIMUM DEADLOCK COUNT HAS BEEN EXCEEDED'.             
+           05  PE-MSG-07                       PIC X(50) VALUE                  
+                'ATTEMPT TO SELECT TIMESTAMP + CKPT_FRQNCY_QTY   '.             
+           05  PE-MSG-11                       PIC X(50) VALUE                  
+                'ATTEMPT TO SELECT ROW ON TABLE XST_SKU_LOC FAILED'.            
+      *                                                                         
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-INPUT-FILE-EOF-SW         PIC  X        VALUE 'N'.            
+               88  PS-MORE-INPUT-RECORDS                  VALUE 'N'.            
+               88  PS-NO-MORE-INPUT-RECORDS               VALUE 'Y'.            
+           05  PS-FIRST-COMMIT-SW           PIC X         VALUE 'N'.            
+               88  PS-FIRST-COMMIT                        VALUE 'Y'.            
+           05  PS-SKULOC-ROW-FOUND-SW       PIC X         VALUE 'N'.            
+               88  PS-SKULOC-ROW-FOUND                    VALUE 'Y'.            
+               88  PS-SKULOC-ROW-NOT-FOUND                VALUE 'N'.            
+           05  PS-RESTART-REQUIRED-SW  PIC X(01)          VALUE 'N'.            
+               88  PS-RESTART-REQUIRED                    VALUE 'Y'.            
+               88  PS-RESTART-NOT-REQUIRED                VALUE 'N'.            
+                                                                                
+      *                                                                         
+      *                                                                         
+       01  PROGRAM-VARIABLES.                                                   
+           05  PV-DEADLOCK-COUNTER             PIC S9(04) VALUE +0.             
+           05  PV-SKU-LOC-COUNT                PIC S9(4)  VALUE 0 COMP.         
+           05  PV-PARAGRAPH-NAME               PIC  X(30) VALUE SPACES.         
+           05  PV-ABEND-MESSAGE                PIC  X(75) VALUE SPACES.         
+           05  PV-DB2-OPER-ATTEMPTED           PIC  X(50) VALUE SPACES.         
+           05  PV-CURRENT-TIMESTAMP            PIC  X(26) VALUE SPACES.         
+           05  PV-COMMIT-TIMESTAMP             PIC  X(26) VALUE SPACES.         
+           05  PV-SQLCODE-DISPLAY              PIC  ++++9 VALUE ZERO.           
+           05  PV-BEG-TMST                     PIC  X(26) VALUE SPACES.         
+           05  PV-END-TMST                     PIC  X(26) VALUE SPACES.         
+           05  PV-UPC-ID-1.                                                     
+               10  PV-UPC-ID-1HIGH             PIC  9(1)  VALUE 1.              
+               10  PV-UPC-ID-1LOW              PIC  9(9)  VALUE ZEROES.         
+           05  PV-UPC-ID-2.                                                     
+               10  PV-UPC-ID-2HIGH             PIC  9(1)  VALUE 2.              
+               10  PV-UPC-ID-2LOW              PIC  9(9)  VALUE ZEROES.         
+           05  PV-SQL-SUB                   PIC  9(03)   VALUE ZERO.            
+      *                                                                         
+      *                                                                         
+       01  PA-PROGRAM-ACCUMULATORS.                                             
+           05  PA-RECORD-COUNTS.                                                
+               10  PA-INPUT-COUNT              PIC  9(9)  VALUE ZEROES.         
+      *                                                                         
+       01  PD-PROGRAM-DISPLAYS.                                                 
+           05  PD-DEADLOCK-COUNT         PIC  9(04) VALUE 0.                    
+      *                                                                         
+       01  SAVE-AREA.                                                           
+           05  SV-SKU-LOC-UPC-ID         PIC S9(09) VALUE +0 COMP.              
+           05  SV-SKU-LOC-STR-NBR        PIC S9(04) VALUE +0 COMP.              
+           05  SV-SKU-LOC-EFF-BEG-TMST   PIC  X(26) VALUE SPACES.               
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * XSRD130 - XST_SKU_LOC PURGE FILE COPYBOOK                               
+      ******************************************************************        
+           COPY XSRD130.                                                        
+      *                                                                         
+      ******************************************************************        
+      *  DB2 ERROR MESSAGES FORMAT AREA.                                        
+      ******************************************************************        
+           COPY DPWS004.                                                        
+      *                                                                         
+      ******************************************************************        
+      *  USED FOR DB2 ERRORS                                                    
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+      ******************************************************************        
+      *  SQL COMMUNICATIONS WORK AREA                                  *        
+      ******************************************************************        
+           COPY SQLCA2.                                                         
+                                                                                
+      *****************************************************************         
+      * DCLGEN FOR THE XST_SKU_LOC                                              
+      *****************************************************************         
+           EXEC SQL                                                             
+               INCLUDE XST00008                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  TRANSACTION PREPARATION MODULE COMMUNICATIONS AREA            *        
+      ******************************************************************        
+260107     COPY DPWS991.                                                        
+                                                                                
+           COPY DPLS001.                                                        
+           05  WORK-STORAGE-PASSED.                                             
+      ******************************************************************        
+      *PA - PROGRAM ACCUMULATORS                                                
+      ******************************************************************        
+               10  PROGRAM-ACCUMULATORS.                                        
+                   15  PA-INCENTIVE-ROWS-UPDATED PIC S9(11)  VALUE ZERO         
+                                                             COMP-3.            
+      *                                                                         
+      *-------------------*                                                     
+       PROCEDURE DIVISION.                                                      
+      *-------------------*                                                     
+                                                                                
+       0000-MAIN-MODULE.                                                        
+                                                                                
+           PERFORM 1000-INITIALIZATION.                                         
+      *                                                                         
+           PERFORM 2000-PROCESS-INPUT                                           
+                UNTIL DP001-PREP-TRANS-EOF.                                     
+      *                                                                         
+           PERFORM 8000-EOJ-ROUTINE.                                            
+                                                                                
+           STOP RUN.                                                            
+      *                                                                         
+      ******************************************************************        
+      * INITIALIZE COUNTERS , READ FIRST INPUT RECORD                           
+      * PREPARE CHECKPOINT RESTART TABLES FOR PROCESSING / RESTART              
+      ******************************************************************        
+      *                                                                         
+       1000-INITIALIZATION.                                                     
+      *                                                                         
+           MOVE PC-TRAN-PRES-FUNC-OPEN TO DP001-FUNC-CODE.                      
+           PERFORM Z100-BUILD-COMM-AREA-TRAN-PRES.                              
+           EVALUATE TRUE                                                        
+              WHEN DP001-GOOD-RET-CODE                                          
+                  DISPLAY 'PROCESSING STARTS FROM BEGINNING OF FILE'            
+              WHEN DP001-RESTART                                                
+                  DISPLAY 'PROCESSING STARTS FROM LAST CHECKPOINT'              
+              WHEN OTHER                                                        
+                  DISPLAY '1000-INITIALIZATION'                                 
+                  DISPLAY 'ERROR CALLING CHECKPOINT ROUTINE ON OPEN'            
+                  DISPLAY 'DP001-RET-CODE IS ' DP001-RET-CODE                   
+                  PERFORM Z900-SQL-ABEND                                        
+           END-EVALUATE.                                                        
+                                                                                
+      *                                                                         
+      ******************************************************************        
+      * PROCESS THE SKU-LOC PURGE FILE - DELETE EACH ROW                        
+      ******************************************************************        
+       2000-PROCESS-INPUT.                                                      
+      *                                                                         
+           MOVE XS130-SKU-LOC-UPC-ID TO XST00008-INTR-UPC-ID.                   
+           MOVE XS130-SKU-LOC-STR-NBR TO XST00008-LOC-NBR.                      
+           MOVE XS130-SKU-LOC-EFF-BEG-TMST TO PV-BEG-TMST.                      
+           MOVE XS130-SKU-LOC-EFF-END-TMST TO PV-END-TMST.                      
+                                                                                
+           SET PS-RESTART-NOT-REQUIRED TO TRUE.                                 
+           PERFORM 6000-DELETE-SKU-LOC-ROW.                                     
+      ****** RESTART TESTING LOGIC *********************************            
+      *    ADD 1 TO PA-INPUT-COUNT.                                             
+      *    IF PA-INPUT-COUNT = 5 OR 7 OR 9                                      
+      *** THIS FORCES A CHECKPOINT                                              
+      *      DISPLAY 'COMMIT - '  XST00008-INTR-UPC-ID                          
+      *                           XST00008-LOC-NBR                              
+      *      MOVE PC-TRAN-PRES-FUNC-CKPT TO DP001-FUNC-CODE                     
+      *      PERFORM Z100-BUILD-COMM-AREA-TRAN-PRES.                            
+      *    IF PA-INPUT-COUNT > 11                                               
+      ***  THIS DISPLAY MESSAGE AND ABENDS PGM                                  
+      *      DISPLAY 'INTENTIONAL ABEND FOR RESTART TESTING - '                 
+      *        PA-INPUT-COUNT                                                   
+      *        PERFORM 9999-SQL-ABEND.                                          
+      ***************************************************************           
+                                                                                
+      *----------------------------------------------------------------*        
+      *  IF A RESTART IS REQUIRED, ISSUE A RESTART CALL RATHER THAN A  *        
+      *  TRANS CALL.  THIS WILL ALLOW PROCESSING TO RESUME WITH THE    *        
+      *  FIRST TRANSACTION AFTER THE LAST COMMIT.                      *        
+      *----------------------------------------------------------------*        
+           IF PS-RESTART-REQUIRED                                               
+               MOVE PC-TRAN-PRES-FUNC-RSTRT TO DP001-FUNC-CODE                  
+           ELSE                                                                 
+               MOVE PC-TRAN-PRES-FUNC-TRANS TO DP001-FUNC-CODE                  
+           END-IF.                                                              
+                                                                                
+           PERFORM Z100-BUILD-COMM-AREA-TRAN-PRES.                              
+           EVALUATE TRUE                                                        
+              WHEN DP001-GOOD-RET-CODE                                          
+              WHEN DP001-CKPT-TAKEN                                             
+                  MOVE DP001-TRANS-RECORD    TO                                 
+                    XS130-XST-SKU-LOC-PRGE-REC                                  
+              WHEN OTHER                                                        
+                  DISPLAY '2000-PROCESS-INPUT  '                                
+                  DISPLAY 'ERROR CALLING CHECKPOINT ROUTINE ON TRANS'           
+                  DISPLAY 'DP001-RET-CODE IS ' DP001-RET-CODE                   
+                  PERFORM Z900-SQL-ABEND                                        
+           END-EVALUATE.                                                        
+                                                                                
+      *                                                                         
+      ******************************************************************        
+      * DELETE A ROW FROM THE SKU-LOC TABLE THAT MATCHES THE INPUT KEY          
+      ******************************************************************        
+       6000-DELETE-SKU-LOC-ROW.                                                 
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-SQL-SUB                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                               
+                      OR SQLCODE = -911                                         
+                      OR SQLCODE = +100                                         
+                      OR SQLCODE = 0)                                           
+                                                                                
+             EXEC SQL                                                           
+                 DELETE                                                         
+                    FROM XST_SKU_LOC                                            
+                 WHERE INTR_UPC_ID  = :XST00008-INTR-UPC-ID                     
+                   AND LOC_NBR      = :XST00008-LOC-NBR                         
+                   AND BEG_TMST     = :PV-BEG-TMST                              
+             END-EXEC                                                           
+                                                                                
+             EVALUATE SQLCODE                                                   
+                 WHEN 0                                                         
+                     ADD +1             TO PC-DELETE-CNT                        
+                     MOVE ZERO          TO PV-DEADLOCK-COUNTER                  
+                 WHEN +100                                                      
+                     MOVE ZERO          TO PV-DEADLOCK-COUNTER                  
+                 WHEN -911                                                      
+                     ADD +1             TO PV-DEADLOCK-COUNTER                  
+                     DISPLAY 'DEADLOCK -911 IN 6000-DELETE-SKU-LOC-ROW'         
+                     IF PV-DEADLOCK-COUNTER > PC-MAX-DEADLOCKS                  
+                         MOVE '6000-DELETE-SKU-LOC-ROW'                         
+                                        TO PV-PARAGRAPH-NAME                    
+                         PERFORM 9000-DEADLOCK-ERROR                            
+                     ELSE                                                       
+                       SET PS-RESTART-REQUIRED TO TRUE                          
+                     END-IF                                                     
+                 WHEN OTHER                                                     
+                     MOVE '6000-DELETE-SKU-LOC-ROW'                             
+                                        TO PV-PARAGRAPH-NAME                    
+                     MOVE PE-MSG-01     TO PV-DB2-OPER-ATTEMPTED                
+                     DISPLAY 'KEY -' XST00008-INTR-UPC-ID ' - '                 
+                                     XST00008-LOC-NBR     ' - '                 
+                                     PV-BEG-TMST          ' - '                 
+                                     PV-END-TMST                                
+                     PERFORM 9999-SQL-ABEND                                     
+             END-EVALUATE                                                       
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-SQL-SUB > PC-MAX-RETRIES                                       
+               MOVE '6000-DELETE-SKU-LOC-ROW' TO PV-PARAGRAPH-NAME              
+               MOVE 'VERIFY RETRIES EXCEEDED' TO PV-DB2-OPER-ATTEMPTED          
+               PERFORM Z900-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      *  RESET STATUS CODE, DISPLAY FINAL COUNTS , CLOSE INPUT FILE    *        
+      ******************************************************************        
+       8000-EOJ-ROUTINE.                                                        
+      *                                                                         
+           MOVE PC-TRAN-PRES-FUNC-CLOSE TO DP001-FUNC-CODE.                     
+           PERFORM Z100-BUILD-COMM-AREA-TRAN-PRES.                              
+           DISPLAY 'NUMBER OF RECORDS DELETED: ' PC-DELETE-CNT.                 
+      *                                                                         
+      ******************************************************************        
+      *     Z100-BUILD-COMM-AREA-TRAN-PRES                             *        
+      *     - BUILD THE COMMUNICATION AREA FOR A CALL TO THE           *        
+      *       TRANSACTION PRESENTATION MODULE.                         *        
+      ******************************************************************        
+       Z100-BUILD-COMM-AREA-TRAN-PRES.                                          
+                                                                                
+           MOVE LENGTH OF WORK-STORAGE-PASSED                                   
+                                             TO DP001-WORK-STRG-LENGTH.         
+           MOVE PC-CKPT-JOB-NAME             TO DP001-JOB-NAME.                 
+           MOVE PC-CKPT-PLAN-NAME            TO DP001-PLAN-NAME.                
+           PERFORM Z900-CALL-TRANS-PRES-MODULE.                                 
+           IF DP001-GOOD-RET-CODE                                               
+                   OR DP001-CKPT-TAKEN                                          
+                   OR DP001-RESTART                                             
+               MOVE DP001-TRANS-RECORD       TO                                 
+                 XS130-XST-SKU-LOC-PRGE-REC                                     
+           ELSE                                                                 
+               DISPLAY 'Z100-BUILD-COMM-AREA-TRAN-PRES '                        
+               DISPLAY 'ERROR CALLING CHECKPOINT ROUTINE ON '                   
+                   DP001-FUNC-CODE                                              
+               DISPLAY 'DP001-RET-CODE IS ' DP001-RET-CODE                      
+               PERFORM Z900-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  PERFORMED BY 6100-UPDATE AND 7200-INSERT                               
+      *  THIS ROUTINE FORCES AN ABEND DUE TO A SQLCODE -911 (3 TIMES)           
+      ******************************************************************        
+       9000-DEADLOCK-ERROR.                                                     
+      *                                                                         
+               MOVE PE-MSG-05             TO PV-DB2-OPER-ATTEMPTED              
+               PERFORM 9999-SQL-ABEND.                                          
+      *                                                                         
+      ******************************************************************        
+      *  STANDARD DB2 ERROR ABEND ROUTINE                                       
+      *  THIS ROUTINE FORCES AN ABEND DUE TO A DB2 PROBLEM.                     
+      ******************************************************************        
+       9999-SQL-ABEND.                                                          
+                                                                                
+           MOVE +4013                 TO ABEND-CODE.                            
+           MOVE SQLCODE               TO PV-SQLCODE-DISPLAY.                    
+           DISPLAY '**  ABEND     **'.                                          
+           DISPLAY '**  PROGRAM   ** => ' PC-PROGRAM-NAME.                      
+           DISPLAY '**  PARAGRAPH **  = ' PV-PARAGRAPH-NAME.                    
+           DISPLAY '**  OPERATION **  = ' PV-DB2-OPER-ATTEMPTED.                
+           DISPLAY '**  SQLCODE   **  = ' PV-SQLCODE-DISPLAY.                   
+                                                                                
+                                                                                
+      *    THE FOLLOWING COPYBOOK UTILIZES THE DB2 ABEND MODULE                 
+      *    DSNTIAR TO CONVERT SQLCA INTO UNDERSTANDABLE VERBAGE.                
+                                                                                
+           COPY DPPD004.                                                        
+           CALL 'ILBOABN0'  USING ABEND-CODE.                                   
+      ******************************************************************        
+      *  ABEND THE PROGRAM IN THE EVENT THAT A SQL ERROR OR WARNING    *        
+      *  CODE OCCURS.                                                  *        
+      ******************************************************************        
+       Z900-SQL-ABEND.                                                          
+                                                                                
+           DISPLAY '** ABEND     **'.                                           
+           DISPLAY '** PROGRAM   ** = ' PC-CURRENT-PROGRAM-NAME.                
+           DISPLAY '** PARAGRAPH ** = ' PV-PARAGRAPH-NAME.                      
+           DISPLAY '** OPERATION ** = ' PV-DB2-OPER-ATTEMPTED.                  
+      ******************************************************************        
+      *  THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-  *        
+      *  MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE       *        
+      *  'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE   *        
+      *  FORMAT.                                                       *        
+      ******************************************************************        
+           COPY DPPD004.                                                        
+                                                                                
+           MOVE +4013 TO ABEND-CODE.                                            
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    
+                                                                                
+      ******************************************************************        
+      *  THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-  *        
+      *  MENTS THAT ARE REQUIRED TO INVOKE THE TRANSACTION PRESENTATION*        
+      *  MODULE (DPKUT901) OF THE DB2 CHECKPOINT RESTART SYSTEM.       *        
+      ******************************************************************        
+           COPY DPPD001.                                                        

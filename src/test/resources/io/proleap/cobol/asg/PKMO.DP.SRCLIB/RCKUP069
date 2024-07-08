@@ -1,0 +1,926 @@
+000100******************************************************************00010000
+000200 IDENTIFICATION DIVISION.                                         00020000
+000300******************************************************************00030000
+000400 PROGRAM-ID.   RCKUP069.                                          00040000
+000500 AUTHOR.       JOE LAROSA.                                        00050000
+000600 INSTALLATION. KOHLS DEPARTMENT STORES.                           00060000
+000700 DATE-WRITTEN. NOV 2001.                                          00070000
+000800 DATE-COMPILED.                                                   00080000
+000900******************************************************************00090000
+001000*          LOAD TRANSACTION REPOSITORY PURGE PROGRAM              00100000
+001100*                                                                 00110000
+001200* THIS PROGRAM READS THE "COMPLETED" RECORDS FROM THE DB2 LOAD    00120000
+001300* REPOSITORY TABLES (WFT_LOD_CNTL & WFT_LOD_XFER) AND DELETES     00130000
+001400* TRANSACTIONS RECORDS OLDER THAN 10 DAYS AFTER COMPLETION.       00140000
+001500*                                                                 00150000
+001600* THIS PROGRAM THEN MAKES A SECOND PASS OF THE REPOSITORY TABLE   00160000
+001700* DELETING ALL TRANSACTIONS OVER 30 DAYS OLD, REGARDLESS OF THEIR 00170000
+001800* STATUS.                                                         00180000
+001810* 9/2020 GERMAN BANDA - RENAME WFKUP017 TO RCKUP069 AS PART OF THE00181000
+001820*        RETIREMENT OF WF APPLICATION                             00182000
+001900******************************************************************00190000
+002000 ENVIRONMENT DIVISION.                                            00200000
+002100******************************************************************00210000
+002200 CONFIGURATION SECTION.                                           00220000
+002300 SOURCE-COMPUTER.        IBM-3090.                                00230000
+002400 OBJECT-COMPUTER.        IBM-3090.                                00240000
+002500                                                                  00250000
+002600 INPUT-OUTPUT SECTION.                                            00260000
+002700 FILE-CONTROL.                                                    00270000
+002800                                                                  00280000
+002900******************************************************************00290000
+003000 DATA DIVISION.                                                   00300000
+003100******************************************************************00310000
+003200 FILE SECTION.                                                    00320000
+003300                                                                  00330000
+003400 WORKING-STORAGE SECTION.                                         00340000
+003500 01  PS-PROGRAM-SWITCHES.                                         00350000
+003600     05  PS-END-OF-CNTL-CSR-SW       PIC X(01) VALUE 'N'.         00360000
+003700         88  PS-END-OF-CNTL-CSR-YES            VALUE 'Y'.         00370000
+003800         88  PS-END-OF-CNTL-CSR-NO             VALUE 'N'.         00380000
+003900     05  PS-END-OF-CNTL30-CSR-SW     PIC X(01) VALUE 'N'.         00390000
+004000         88  PS-END-OF-CNTL30-CSR-YES          VALUE 'Y'.         00400000
+004100         88  PS-END-OF-CNTL30-CSR-NO           VALUE 'N'.         00410000
+004200     05  PS-END-OF-XFER-CSR-SW       PIC X(01) VALUE 'N'.         00420000
+004300         88  PS-END-OF-XFER-CSR-YES            VALUE 'Y'.         00430000
+004400         88  PS-END-OF-XFER-CSR-NO             VALUE 'N'.         00440000
+004500     05  PS-END-OF-XFER30-CSR-SW     PIC X(01) VALUE 'N'.         00450000
+004600         88  PS-END-OF-XFER30-CSR-YES          VALUE 'Y'.         00460000
+004700         88  PS-END-OF-XFER30-CSR-NO           VALUE 'N'.         00470000
+004800     05  PS-DELETE-XFER-ROWS-SW      PIC X(01) VALUE 'N'.         00480000
+004900         88  PS-DELETE-XFER-ROWS-YES           VALUE 'Y'.         00490000
+005000         88  PS-DELETE-XFER-ROWS-NO            VALUE 'N'.         00500000
+005100                                                                  00510000
+005200 01  PC-PROGRAM-CONSTANTS.                                        00520000
+005300     05  PC-CURRENT-PROGRAM-NAME     PIC X(08) VALUE 'RCKUP069'.  00530000
+005400     05  PC-MAX-RETRIES              PIC S9(3) VALUE +5 COMP-3.   00540000
+005500                                                                  00550000
+005600 01  PA-PROGRAM-ACCUMULATORS.                                     00560000
+005700     05  PA-TOTALS.                                               00570000
+005800         10  PA-TOTAL-CNTL-READ      PIC S9(7) VALUE +0 COMP-3.   00580000
+005900         10  PA-TOTAL-CNTL30-READ    PIC S9(7) VALUE +0 COMP-3.   00590000
+006000         10  PA-TOTAL-CNTL-DELETED   PIC S9(7) VALUE +0 COMP-3.   00600000
+006100         10  PA-TOTAL-CNTL30-DELETED PIC S9(7) VALUE +0 COMP-3.   00610000
+006200         10  PA-TOTAL-XFER-DELETED   PIC S9(7) VALUE +0 COMP-3.   00620000
+006300         10  PA-TOTAL-XFER30-DELETED PIC S9(7) VALUE +0 COMP-3.   00630000
+006400                                                                  00640000
+006500 01  PV-PROGRAM-VARIABLES.                                        00650000
+006600     05  PV-DISPLAY-RECORD           PIC Z,ZZZ,ZZ9-.              00660000
+006700     05  PV-DB2-COUNT                PIC S9(9) VALUE +0 COMP-3.   00670000
+006800     05  PV-COMMIT-COUNT-XFER        PIC 9(07) VALUE ZEROES.      00680000
+006900                                                                  00690000
+007000     05  PV-PRC-CNTL-TMST            PIC X(26) VALUE SPACE.       00700000
+007100     05  FILLER REDEFINES PV-PRC-CNTL-TMST.                       00710000
+007200         10  PV-TMST-DATE.                                        00720000
+007300             15  PV-TMST-CCYY        PIC 9(04).                   00730000
+007400             15  FILLER              PIC X(01).                   00740000
+007500             15  PV-TMST-MONTH       PIC 9(02).                   00750000
+007600             15  FILLER              PIC X(01).                   00760000
+007700             15  PV-TMST-DAY         PIC 9(02).                   00770000
+007800         10  FILLER                  PIC X(01).                   00780000
+007900         10  PV-TMST-HOUR            PIC 9(02).                   00790000
+008000         10  FILLER                  PIC X(01).                   00800000
+008100         10  PV-TMST-MINUTE          PIC 9(02).                   00810000
+008200         10  FILLER                  PIC X(01).                   00820000
+008300         10  PV-TMST-SECOND          PIC 9(02).                   00830000
+008400         10  FILLER                  PIC X(01).                   00840000
+008500         10  PV-TMST-LAST6           PIC 9(06).                   00850000
+008600                                                                  00860000
+008700     05  PV-TMST-MINUS-TEN-DAYS      PIC X(26) VALUE SPACE.       00870000
+008800     05  FILLER REDEFINES PV-TMST-MINUS-TEN-DAYS.                 00880000
+008900         10  PV-10D-DATE.                                         00890000
+009000             15  PV-10D-CCYY         PIC 9(04).                   00900000
+009100             15  FILLER              PIC X(01).                   00910000
+009200             15  PV-10D-MONTH        PIC 9(02).                   00920000
+009300             15  FILLER              PIC X(01).                   00930000
+009400             15  PV-10D-DAY          PIC 9(02).                   00940000
+009500         10  FILLER                  PIC X(16).                   00950000
+009600     05  PV-TMST-MINUS-30-DAYS       PIC X(26) VALUE SPACE.       00960000
+009700     05  FILLER REDEFINES PV-TMST-MINUS-30-DAYS.                  00970000
+009800         10  PV-30D-DATE.                                         00980000
+009900             15  PV-30D-CCYY         PIC 9(04).                   00990000
+010000             15  FILLER              PIC X(01).                   01000000
+010100             15  PV-30D-MONTH        PIC 9(02).                   01010000
+010200             15  FILLER              PIC X(01).                   01020000
+010300             15  PV-30D-DAY          PIC 9(02).                   01030000
+010400         10  FILLER                  PIC X(16).                   01040000
+010500                                                                  01050000
+010600 01  PV-ABEND-VARIABLES.                                          01060000
+010700     05  PV-ABEND-CODE               PIC S9(4) VALUE +0 COMP SYNC.01070000
+010800     05  PV-RETRY-COUNTER            PIC S9(4) VALUE +0 COMP.     01080000
+010900     05  PV-SQLCODE                  PIC S9(9).                   01090000
+011000     05  PV-DISPLAY-SQLCODE          PIC -------999.              01100000
+011100     05  PV-ABEND-PROGRAM            PIC X(08) VALUE 'RCKUP069'.  01110000
+011200     05  PV-ABEND-PARAGRAPH          PIC X(25) VALUE SPACES.      01120000
+011300     05  PV-ABEND-OPERATION          PIC X(20) VALUE SPACES.      01130000
+011400     05  PV-ABEND-STRUCTURE-1        PIC X(08) VALUE SPACES.      01140000
+011500     05  PV-DB2-OPERATION-MESSAGE-1  PIC X(79) VALUE SPACES.      01150000
+011600                                                                  01160000
+011700******************************************************************01170000
+011800*  WORK AREA PASSED IN CALL TO DPKUT500                           01180000
+011900******************************************************************01190000
+012000     COPY DPWS500.                                                01200000
+012100                                                                  01210000
+012200******************************************************************01220000
+012300*  DB2 FORMATTED MESSAGE AREA                                     01230000
+012400******************************************************************01240000
+012500     COPY DPWS004.                                                01250000
+012600                                                                  01260000
+012700******************************************************************01270000
+012800*  COMMUNICATIONS AREA FOR DB2                                    01280000
+012900******************************************************************01290000
+013000     EXEC SQL                                                     01300000
+013100         INCLUDE SQLCA                                            01310000
+013200     END-EXEC.                                                    01320000
+013300                                                                  01330000
+013400******************************************************************01340000
+013500*  DB2 TABLE DECLARATION - E-FULFILLMENT LOAD CONTROL             01350000
+013600*      TABLE (WFT_LOD_CNTL)                                       01360000
+013700******************************************************************01370000
+013800     EXEC SQL                                                     01380000
+013900         INCLUDE WFT00001                                         01390000
+014000     END-EXEC.                                                    01400000
+014100                                                                  01410000
+014200******************************************************************01420000
+014300*  DB2 TABLE DECLARATION - E-FULFILLMENT LOAD TRANSACTIONS        01430000
+014400*      TABLE (WFT_LOD_XFER)                                       01440000
+014500******************************************************************01450000
+014600     EXEC SQL                                                     01460000
+014700         INCLUDE WFT00002                                         01470000
+014800     END-EXEC.                                                    01480000
+014900                                                                  01490000
+015000******************************************************************01500000
+015100* COBOL CURSOR DELCARATION TO READ E-FULFILLMENT LOAD CONTROL    *01510000
+015200******************************************************************01520000
+015300     EXEC SQL                                                     01530000
+015400       DECLARE CNTL-CSR CURSOR WITH HOLD FOR                      01540000
+015500        SELECT PRC_CNTL_TMST                                      01550000
+015600             , TRN_TYP_CDE                                        01560000
+015700             , STAT_CDE                                           01570000
+015800             , STR_NBR                                            01580000
+015900          FROM WFT_LOD_CNTL                                       01590000
+016000         WHERE PRC_CNTL_TMST < :PV-TMST-MINUS-30-DAYS             01600000
+016100           AND STAT_CDE      = 'CMPLTD'                           01610000
+016200        FOR UPDATE OF ARCH_DAT_IND                                01620000
+016300     END-EXEC.                                                    01630000
+016400                                                                  01640000
+016500     EXEC SQL                                                     01650000
+016600       DECLARE CNTL30-CSR CURSOR WITH HOLD FOR                    01660000
+016700        SELECT PRC_CNTL_TMST                                      01670000
+016800             , TRN_TYP_CDE                                        01680000
+016900             , STAT_CDE                                           01690000
+017000             , STR_NBR                                            01700000
+017100          FROM WFT_LOD_CNTL                                       01710000
+017200         WHERE PRC_CNTL_TMST < :PV-TMST-MINUS-30-DAYS             01720000
+017300        FOR UPDATE OF ARCH_DAT_IND                                01730000
+017400     END-EXEC.                                                    01740000
+017500                                                                  01750000
+017600******************************************************************01760000
+017700* COBOL CURSOR DELCARATION TO READ E-FULFILLMENT LOAD TRANSACTION*01770000
+017800******************************************************************01780000
+017900     EXEC SQL                                                     01790000
+018000       DECLARE XFER-CSR CURSOR FOR                                01800000
+018100        SELECT PRC_CNTL_TMST                                      01810000
+018200             , TRN_TYP_CDE                                        01820000
+018300             , BTCH_LOD_SEQ_ID                                    01830000
+018400             , LOD_DAT_TXT                                        01840000
+018500          FROM WFT_LOD_XFER                                       01850000
+018600         WHERE PRC_CNTL_TMST = :WFT00001-PRC-CNTL-TMST            01860000
+018700           AND TRN_TYP_CDE   = :WFT00001-TRN-TYP-CDE              01870000
+018800     END-EXEC.                                                    01880000
+018900                                                                  01890000
+019000     EXEC SQL                                                     01900000
+019100       DECLARE XFER30-CSR CURSOR FOR                              01910000
+019200        SELECT PRC_CNTL_TMST                                      01920000
+019300             , TRN_TYP_CDE                                        01930000
+019400             , BTCH_LOD_SEQ_ID                                    01940000
+019500             , LOD_DAT_TXT                                        01950000
+019600          FROM WFT_LOD_XFER                                       01960000
+019700         WHERE PRC_CNTL_TMST = :WFT00001-PRC-CNTL-TMST            01970000
+019800***        AND TRN_TYP_CDE   = :WFT00001-TRN-TYP-CDE              01980000
+019900     END-EXEC.                                                    01990000
+020000                                                                  02000000
+020100******************************************************************02010000
+020200 LINKAGE SECTION.                                                 02020000
+020300******************************************************************02030000
+020400                                                                  02040000
+020500                                                                  02050000
+020600/*****************************************************************02060000
+020700 PROCEDURE DIVISION.                                              02070000
+020800******************************************************************02080000
+020900 0000-PROGRAM-MAINLINE.                                           02090000
+021000     DISPLAY '************ START OF RCKUP069 ***************'     02100000
+021100                                                                  02110000
+021200     PERFORM 1000-INITIALIZE.                                     02120000
+021300                                                                  02130000
+021400*PROCESS COMPLETED TRANSACTIONS.                                  02140000
+021500     PERFORM 2000-PROCESS-CMPLTD-RECORDS.                         02150000
+021600                                                                  02160000
+021700*PROCESS MONTH-OLD TRANSACTIONS.                                  02170000
+021800     PERFORM 4000-PROCESS-30DAY-RECORDS.                          02180000
+021900                                                                  02190000
+022000*EOJ ROUTINE.                                                     02200000
+022100     PERFORM 9000-EOJ-ROUTINE.                                    02210000
+022200                                                                  02220000
+022300*STOP                                                             02230000
+022400     DISPLAY ' '.                                                 02240000
+022500     DISPLAY '************  END OF RCKUP069  ***************'     02250000
+022600     STOP RUN.                                                    02260000
+022700                                                                  02270000
+022800******************************************************************02280000
+022900*                                                                *02290000
+023000*                I N I T I A L I Z A T I O N                     *02300000
+023100*                                                                *02310000
+023200******************************************************************02320000
+023300 1000-INITIALIZE.                                                 02330000
+023400                                                                  02340000
+023500*INIT COUNTERS.                                                   02350000
+023600     INITIALIZE PA-TOTAL-CNTL-READ                                02360000
+023700                PA-TOTAL-CNTL30-READ                              02370000
+023800                PA-TOTAL-CNTL-DELETED                             02380000
+023900                PA-TOTAL-CNTL30-DELETED                           02390000
+024000                PA-TOTAL-XFER-DELETED                             02400000
+024100                PA-TOTAL-XFER30-DELETED                           02410000
+024200                PV-COMMIT-COUNT-XFER.                             02420000
+024300                                                                  02430000
+024400*GET CURRENT TIMESTAMP.                                           02440000
+024500     EXEC SQL                                                     02450000
+024600         SET :PV-PRC-CNTL-TMST = CURRENT TIMESTAMP                02460000
+024700     END-EXEC.                                                    02470000
+024800                                                                  02480000
+024900     EVALUATE TRUE                                                02490000
+025000       WHEN SQLCODE = ZERO                                        02500000
+025100           MOVE PV-PRC-CNTL-TMST TO PV-TMST-MINUS-TEN-DAYS        02510000
+025200                                    PV-TMST-MINUS-30-DAYS         02520000
+025300           DISPLAY ' CURRENT TIMESTAMP      = ' PV-PRC-CNTL-TMST  02530000
+025400                                                                  02540000
+025500       WHEN OTHER                                                 02550000
+025600           MOVE '1000-INITIALIZATION' TO PV-ABEND-PARAGRAPH       02560000
+025700           MOVE 'GET DB2 TMST'        TO PV-ABEND-OPERATION       02570000
+025800           PERFORM 9900-DB2-ABEND                                 02580000
+025900         END-EVALUATE.                                            02590000
+026000                                                                  02600000
+026100*CALCULATE 10 DAYS AGO.                                           02610000
+026200     INITIALIZE DPG51 DPG52 DPG53 DPG54 DPG55 DPG56.              02620000
+026300     SET  DPG51-ACTUAL-CALENDAR-ONLY                              02630000
+026400          DPG51-DECREMENT-DATE TO TRUE.                           02640000
+026500     MOVE 10                   TO DPG51-INCR-DECR-DAYS-9.         02650000
+026600     SET  DPG52-LK-DTE-ISO-FMT TO TRUE.                           02660000
+026700*            'CCYY-MM-DD'                                         02670000
+026800     MOVE PV-TMST-DATE TO DPG52-LK-DATE-INPUT.                    02680000
+026900                                                                  02690000
+027000     CALL DP500-KOHLS-CALENDAR-ROUTINE                            02700000
+027100          USING DPG51 DPG52 DPG53 DPG54 DPG55 DPG56.              02710000
+027200                                                                  02720000
+027300     IF DPG54-DATE-INVALID                                        02730000
+027400       OR DPG54-SEVERE-ERROR                                      02740000
+027500         DISPLAY 'BAD RETURN FROM CALENDAR ROUTINE - '            02750000
+027600                 DPG54-RETURN-FLAGS                               02760000
+027700         MOVE '1000-INITIALIZATION' TO PV-ABEND-PARAGRAPH         02770000
+027800         MOVE 'GET 10D TMST'        TO PV-ABEND-OPERATION         02780000
+027900         PERFORM 9900-DB2-ABEND                                   02790000
+028000     ELSE                                                         02800000
+028100         MOVE DPG55-DB2-ISO-DATE-FMT TO PV-10D-DATE               02810000
+028200     END-IF.                                                      02820000
+028300                                                                  02830000
+028400     DISPLAY ' COMPLETED DATE CUT-OFF = ' PV-10D-DATE.            02840000
+028500                                                                  02850000
+028600*CALCULATE 30 DAYS AGO.                                           02860000
+028700     INITIALIZE DPG51 DPG52 DPG53 DPG54 DPG55 DPG56.              02870000
+028800     SET  DPG51-ACTUAL-CALENDAR-ONLY                              02880000
+028900          DPG51-DECREMENT-DATE TO TRUE.                           02890000
+029000     MOVE 30                   TO DPG51-INCR-DECR-DAYS-9.         02900000
+029100     SET  DPG52-LK-DTE-ISO-FMT TO TRUE.                           02910000
+029200*            'CCYY-MM-DD'                                         02920000
+029300     MOVE PV-TMST-DATE TO DPG52-LK-DATE-INPUT.                    02930000
+029400                                                                  02940000
+029500     CALL DP500-KOHLS-CALENDAR-ROUTINE                            02950000
+029600          USING DPG51 DPG52 DPG53 DPG54 DPG55 DPG56.              02960000
+029700                                                                  02970000
+029800     IF DPG54-DATE-INVALID                                        02980000
+029900       OR DPG54-SEVERE-ERROR                                      02990000
+030000         DISPLAY 'BAD RETURN FROM CALENDAR ROUTINE - '            03000000
+030100                 DPG54-RETURN-FLAGS                               03010000
+030200         MOVE '1000-INITIALIZATION' TO PV-ABEND-PARAGRAPH         03020000
+030300         MOVE 'GET 30D TMST'        TO PV-ABEND-OPERATION         03030000
+030400         PERFORM 9900-DB2-ABEND                                   03040000
+030500     ELSE                                                         03050000
+030600         MOVE DPG55-DB2-ISO-DATE-FMT TO PV-30D-DATE               03060000
+030700     END-IF.                                                      03070000
+030800                                                                  03080000
+030900     DISPLAY ' 30 DAYS DATE CUT-OFF   = ' PV-30D-DATE.            03090000
+031000     DISPLAY ' '.                                                 03100000
+031100                                                                  03110000
+031200******************************************************************03120000
+031300*                                                                *03130000
+031400*      P R O C E S S   C O M P L E T E D   R E C O R D S         *03140000
+031500*                                                                *03150000
+031600******************************************************************03160000
+031700 2000-PROCESS-CMPLTD-RECORDS.                                     03170000
+031800     DISPLAY '2000-PROCESS-CMPLTD-RECORDS'.                       03180000
+031900                                                                  03190000
+032000     PERFORM 2100-OPEN-CNTL-CURSOR.                               03200000
+032100                                                                  03210000
+032200     PERFORM 2200-FETCH-CNTL-CURSOR.                              03220000
+032300                                                                  03230000
+032400     IF PS-END-OF-CNTL-CSR-YES                                    03240000
+032500         DISPLAY ' '                                              03250000
+032600         DISPLAY '*************************************'          03260000
+032700         DISPLAY '**    NO COMPLETED TRANSACTIONS    **'          03270000
+032800         DISPLAY '**      FOUND ON WFT_LOD_CNTL      **'          03280000
+032900         DISPLAY '*************************************'          03290000
+033000         DISPLAY ' '                                              03300000
+033100     END-IF.                                                      03310000
+033200                                                                  03320000
+033300*PROCESS COMPLETED TRANSACTIONS.                                  03330000
+033400     PERFORM                                                      03340000
+033500       UNTIL PS-END-OF-CNTL-CSR-YES                               03350000
+033600                                                                  03360000
+033700*INCREMENT COUNTER OF CNTL RECORDS READ.                          03370000
+033800         ADD +1 TO PA-TOTAL-CNTL-READ                             03380000
+033900                                                                  03390000
+034000*CHECK THAT ALL CNTL ARE COMPLETE BEFORE DELETING XFER.           03400000
+034100         SET PS-DELETE-XFER-ROWS-NO TO TRUE                       03410000
+034200         PERFORM 2010-CHECK-CMPLTD-CNTL                           03420000
+034300                                                                  03430000
+034400*DELETE 'XFER' RECORDS ASSOCIATED WITH THE 'CNTL' RECORD.         03440000
+034500         IF PS-DELETE-XFER-ROWS-YES                               03450000
+034600             PERFORM 3000-DELETE-XFER-RECORDS                     03460000
+034700         END-IF                                                   03470000
+034800                                                                  03480000
+034900*DELETE 'CNTL' RECORD.                                            03490000
+035000         PERFORM 2400-DELETE-CNTL                                 03500000
+035100**GB     DISPLAY ' ROW(S) DELETED FOR ' WFT00001-PRC-CNTL-TMST    03510001
+035200**GB                              ' / ' WFT00001-TRN-TYP-CDE      03520001
+035300**GB                              ' / ' WFT00001-STR-NBR          03530001
+035400                                                                  03540000
+035500*COMMIT THE DATA.                                                 03550000
+035600         PERFORM 2800-COMMIT                                      03560000
+035700                                                                  03570000
+035800*GET NEXT 'CNTL' RECORD.                                          03580000
+035900         PERFORM 2200-FETCH-CNTL-CURSOR                           03590000
+036000                                                                  03600000
+036100     END-PERFORM.                                                 03610000
+036200                                                                  03620000
+036300*CLOSE THE 'CNTL' CURSOR.                                         03630000
+036400     PERFORM 2500-CLOSE-CNTL-CURSOR.                              03640000
+036500                                                                  03650000
+036600******************************************************************03660000
+036700 2010-CHECK-CMPLTD-CNTL.                                          03670000
+036800                                                                  03680000
+036900*COUNT CNTL RECORDS FOR STATUS OTHER THAN 'CMPLTD'.               03690000
+037000     MOVE ZEROES TO PV-DB2-COUNT.                                 03700000
+037100     EXEC SQL                                                     03710000
+037200         SELECT COUNT (*)                                         03720000
+037300           INTO  :PV-DB2-COUNT                                    03730000
+037400           FROM  WFT_LOD_CNTL A                                   03740000
+037500          WHERE  A.PRC_CNTL_TMST = :WFT00001-PRC-CNTL-TMST        03750000
+037600            AND  A.TRN_TYP_CDE   = :WFT00001-TRN-TYP-CDE          03760000
+037700            AND  A.STAT_CDE     <> 'CMPLTD'                       03770000
+037800     END-EXEC.                                                    03780000
+037900                                                                  03790000
+038000     EVALUATE TRUE                                                03800000
+038100       WHEN SQLCODE = ZERO                                        03810000
+038200           CONTINUE                                               03820000
+038300                                                                  03830000
+038400       WHEN OTHER                                                 03840000
+038500           MOVE '2010-CHECK-CMPLTD-CNTL' TO PV-ABEND-PARAGRAPH    03850000
+038600           MOVE 'COUNT WFT_LOD_CNTL'     TO PV-ABEND-OPERATION    03860000
+038700           PERFORM 9900-DB2-ABEND                                 03870000
+038800     END-EVALUATE.                                                03880000
+038900                                                                  03890000
+039000*IF COUNT = 0, OK TO DELETE ASSOCIATED XFER ROWS.                 03900000
+039100     IF PV-DB2-COUNT = ZEROES                                     03910000
+039200         SET PS-DELETE-XFER-ROWS-YES TO TRUE                      03920000
+039300***      DISPLAY '  OK TO DELETE XFER ROWS'                       03930000
+039400     ELSE                                                         03940000
+039500         DISPLAY '  DO NOT DELETE XFER ROWS'                      03950000
+039600     END-IF.                                                      03960000
+039700                                                                  03970000
+039800******************************************************************03980000
+039900 2100-OPEN-CNTL-CURSOR.                                           03990000
+040000                                                                  04000000
+040100     EXEC SQL                                                     04010000
+040200         OPEN CNTL-CSR                                            04020000
+040300     END-EXEC.                                                    04030000
+040400                                                                  04040000
+040500     EVALUATE TRUE                                                04050000
+040600       WHEN SQLCODE = ZERO                                        04060000
+040700           SET PS-END-OF-CNTL-CSR-NO TO TRUE                      04070000
+040800                                                                  04080000
+040900       WHEN OTHER                                                 04090000
+041000           MOVE '2100-OPEN-CNTL-CURSOR'                           04100000
+041100                                 TO PV-ABEND-PARAGRAPH            04110000
+041200           MOVE 'OPEN CNTL-CSR ' TO PV-ABEND-OPERATION            04120000
+041300           PERFORM 9900-DB2-ABEND                                 04130000
+041400     END-EVALUATE.                                                04140000
+041500                                                                  04150000
+041600******************************************************************04160000
+041700 2200-FETCH-CNTL-CURSOR.                                          04170000
+041800                                                                  04180000
+041900     EXEC SQL                                                     04190000
+042000         FETCH CNTL-CSR                                           04200000
+042100          INTO :WFT00001-PRC-CNTL-TMST                            04210000
+042200             , :WFT00001-TRN-TYP-CDE                              04220000
+042300             , :WFT00001-STAT-CDE                                 04230000
+042400             , :WFT00001-STR-NBR                                  04240000
+042500     END-EXEC.                                                    04250000
+042600                                                                  04260000
+042700     EVALUATE TRUE                                                04270000
+042800       WHEN SQLCODE = +100                                        04280000
+042900           SET PS-END-OF-CNTL-CSR-YES TO TRUE                     04290000
+043000                                                                  04300000
+043100       WHEN SQLCODE = ZERO                                        04310000
+043200           CONTINUE                                               04320000
+043300                                                                  04330000
+043400       WHEN OTHER                                                 04340000
+043500           MOVE '2200-FETCH-CNTL-CURSOR'                          04350000
+043600                                  TO PV-ABEND-PARAGRAPH           04360000
+043700           MOVE 'FETCH CNTL-CSR ' TO PV-ABEND-OPERATION           04370000
+043800           PERFORM 9900-DB2-ABEND                                 04380000
+043900     END-EVALUATE.                                                04390000
+044000                                                                  04400000
+044100******************************************************************04410000
+044200 2400-DELETE-CNTL.                                                04420000
+044300                                                                  04430000
+044400     EXEC SQL                                                     04440000
+044500         DELETE FROM WFT_LOD_CNTL                                 04450000
+044600***      WHERE CURRENT OF CNTL-CSR                                04460000
+044700          WHERE PRC_CNTL_TMST = :WFT00001-PRC-CNTL-TMST           04470000
+044800            AND TRN_TYP_CDE   = :WFT00001-TRN-TYP-CDE             04480000
+044900            AND STAT_CDE      = :WFT00001-STAT-CDE                04490000
+045000            AND STR_NBR       = :WFT00001-STR-NBR                 04500000
+045100     END-EXEC.                                                    04510000
+045200                                                                  04520000
+045300     EVALUATE TRUE                                                04530000
+045400       WHEN SQLCODE = ZERO                                        04540000
+045500           ADD +1 TO PA-TOTAL-CNTL-DELETED                        04550000
+045600                                                                  04560000
+045700       WHEN OTHER                                                 04570000
+045800           MOVE '2400-DELETE-CNTL'    TO PV-ABEND-PARAGRAPH       04580000
+045900           MOVE 'DELETE WFT_LOD_CNTL' TO PV-ABEND-OPERATION       04590000
+046000           MOVE DCLWFT00001 TO PV-DB2-OPERATION-MESSAGE-1         04600000
+046100           PERFORM 9900-DB2-ABEND                                 04610000
+046200     END-EVALUATE.                                                04620000
+046300                                                                  04630000
+046400******************************************************************04640000
+046500 2500-CLOSE-CNTL-CURSOR.                                          04650000
+046600                                                                  04660000
+046700     EXEC SQL                                                     04670000
+046800         CLOSE CNTL-CSR                                           04680000
+046900     END-EXEC.                                                    04690000
+047000                                                                  04700000
+047100     EVALUATE TRUE                                                04710000
+047200       WHEN SQLCODE = ZERO                                        04720000
+047300           CONTINUE                                               04730000
+047400                                                                  04740000
+047500       WHEN OTHER                                                 04750000
+047600           MOVE '2500-CLOSE-CNTL-CURSOR'                          04760000
+047700                                  TO PV-ABEND-PARAGRAPH           04770000
+047800           MOVE 'CLOSE CNTL-CSR ' TO PV-ABEND-OPERATION           04780000
+047900           PERFORM 9900-DB2-ABEND                                 04790000
+048000     END-EVALUATE.                                                04800000
+048100                                                                  04810000
+048200******************************************************************04820000
+048300 2800-COMMIT.                                                     04830000
+048400                                                                  04840000
+048500     EXEC SQL                                                     04850000
+048600         COMMIT                                                   04860000
+048700     END-EXEC.                                                    04870000
+048800                                                                  04880000
+048900     EVALUATE TRUE                                                04890000
+049000       WHEN SQLCODE = ZERO                                        04900000
+049100           CONTINUE                                               04910000
+049200                                                                  04920000
+049300       WHEN OTHER                                                 04930000
+049400           MOVE '2800-COMMIT'        TO PV-ABEND-PARAGRAPH        04940000
+049500           MOVE 'COMMIT LOAD TABLES' TO PV-ABEND-OPERATION        04950000
+049600           PERFORM 9900-DB2-ABEND                                 04960000
+049700     END-EVALUATE.                                                04970000
+049800                                                                  04980000
+049900******************************************************************04990000
+050000******************************************************************05000000
+050100 3000-DELETE-XFER-RECORDS.                                        05010000
+050200                                                                  05020000
+050300     PERFORM 3100-OPEN-XFER-CURSOR.                               05030000
+050400                                                                  05040000
+050500     PERFORM                                                      05050000
+050600       UNTIL PS-END-OF-XFER-CSR-YES                               05060000
+050700                                                                  05070000
+050800          PERFORM 3200-PROCESS-XFER-ROWS                          05080000
+050900                                                                  05090000
+051000     END-PERFORM.                                                 05100000
+051100                                                                  05110000
+051200     PERFORM 3300-CLOSE-XFER-CURSOR.                              05120000
+051300                                                                  05130000
+051400******************************************************************05140000
+051500 3100-OPEN-XFER-CURSOR.                                           05150000
+051600                                                                  05160000
+051700     EXEC SQL                                                     05170000
+051800         OPEN XFER-CSR                                            05180000
+051900     END-EXEC.                                                    05190000
+052000                                                                  05200000
+052100     EVALUATE TRUE                                                05210000
+052200       WHEN SQLCODE = ZERO                                        05220000
+052300           SET PS-END-OF-XFER-CSR-NO TO TRUE                      05230000
+052400                                                                  05240000
+052500       WHEN OTHER                                                 05250000
+052600           MOVE '3100-OPEN-XFER-CURSOR'                           05260000
+052700                                 TO PV-ABEND-PARAGRAPH            05270000
+052800           MOVE 'OPEN XFER-CSR ' TO PV-ABEND-OPERATION            05280000
+052900           PERFORM 9900-DB2-ABEND                                 05290000
+053000     END-EVALUATE.                                                05300000
+053100                                                                  05310000
+053200******************************************************************05320000
+053300 3200-PROCESS-XFER-ROWS.                                          05330000
+053400                                                                  05340000
+053500     EXEC SQL                                                     05350000
+053600         FETCH XFER-CSR                                           05360000
+053700          INTO :WFT00002-LOD-DAT-TXT                              05370000
+053800     END-EXEC.                                                    05380000
+053900                                                                  05390000
+054000     EVALUATE TRUE                                                05400000
+054100       WHEN SQLCODE = +100                                        05410000
+054200           SET PS-END-OF-XFER-CSR-YES TO TRUE                     05420000
+054300                                                                  05430000
+054400       WHEN SQLCODE = ZERO                                        05440000
+054500           PERFORM 3210-DELETE-XFER-ROW                           05450000
+054600                                                                  05460000
+054700       WHEN OTHER                                                 05470000
+054800           MOVE '3200-PROCESS-XFER-ROWS' TO PV-ABEND-PARAGRAPH    05480000
+054900           MOVE 'FETCH XFER ROW'         TO PV-ABEND-OPERATION    05490000
+055000           PERFORM 9900-DB2-ABEND                                 05500000
+055100     END-EVALUATE.                                                05510000
+055200                                                                  05520000
+055300******************************************************************05530000
+055400 3210-DELETE-XFER-ROW.                                            05540000
+055500                                                                  05550000
+055600     INITIALIZE PV-RETRY-COUNTER.                                 05560000
+055700                                                                  05570000
+055800     PERFORM WITH TEST AFTER                                      05580000
+055900       UNTIL SQLCODE = ZERO OR SQLCODE = +100                     05590000
+056000         OR PV-RETRY-COUNTER > PC-MAX-RETRIES                     05600000
+056100                                                                  05610000
+056200         EXEC SQL                                                 05620000
+056300             DELETE FROM WFT_LOD_XFER                             05630000
+056400             WHERE CURRENT OF XFER-CSR                            05640000
+056500         END-EXEC                                                 05650000
+056600                                                                  05660000
+056700         EVALUATE TRUE                                            05670000
+056800           WHEN SQLCODE = ZERO                                    05680000
+056900               ADD +1 TO PA-TOTAL-XFER-DELETED                    05690000
+057000                         PV-COMMIT-COUNT-XFER                     05700000
+057100               IF PV-COMMIT-COUNT-XFER > 999                      05710000
+057200                   DISPLAY '  3210-COMMIT-XFER = '                05720000
+057300                            PV-COMMIT-COUNT-XFER                  05730000
+057400                   PERFORM 2800-COMMIT                            05740000
+057500                   PERFORM 3100-OPEN-XFER-CURSOR                  05750000
+057600                   MOVE ZEROES TO PV-COMMIT-COUNT-XFER            05760000
+057700               END-IF                                             05770000
+057800                                                                  05780000
+057900           WHEN SQLCODE = -911                                    05790000
+058000           WHEN SQLCODE = -913                                    05800000
+058100               ADD +1 TO PV-RETRY-COUNTER                         05810000
+058200                                                                  05820000
+058300           WHEN OTHER                                             05830000
+058400               MOVE '3210-DELETE-XFER-ROW' TO PV-ABEND-PARAGRAPH  05840000
+058500               MOVE 'DELETE WFT_LOD_XFER'  TO PV-ABEND-OPERATION  05850000
+058600               MOVE DCLWFT00001    TO PV-DB2-OPERATION-MESSAGE-1  05860000
+058700               PERFORM 9900-DB2-ABEND                             05870000
+058800         END-EVALUATE                                             05880000
+058900     END-PERFORM.                                                 05890000
+059000                                                                  05900000
+059100     IF PV-RETRY-COUNTER > PC-MAX-RETRIES                         05910000
+059200         MOVE '3210-DELETE-XFER-ROW' TO PV-ABEND-PARAGRAPH        05920000
+059300         MOVE 'DELETE WFT_LOD_XFER'  TO PV-ABEND-OPERATION        05930000
+059400         MOVE DCLWFT00001            TO PV-DB2-OPERATION-MESSAGE-105940000
+059500         PERFORM 9900-DB2-ABEND                                   05950000
+059600     END-IF.                                                      05960000
+059700                                                                  05970000
+059800******************************************************************05980000
+059900 3300-CLOSE-XFER-CURSOR.                                          05990000
+060000                                                                  06000000
+060100     EXEC SQL                                                     06010000
+060200         CLOSE XFER-CSR                                           06020000
+060300     END-EXEC.                                                    06030000
+060400                                                                  06040000
+060500     EVALUATE TRUE                                                06050000
+060600       WHEN SQLCODE = ZERO                                        06060000
+060700           CONTINUE                                               06070000
+060800                                                                  06080000
+060900       WHEN OTHER                                                 06090000
+061000           MOVE '3300-CLOSE-XFER-CURSOR'                          06100000
+061100                                  TO PV-ABEND-PARAGRAPH           06110000
+061200           MOVE 'CLOSE XFER-CSR ' TO PV-ABEND-OPERATION           06120000
+061300           PERFORM 9900-DB2-ABEND                                 06130000
+061400     END-EVALUATE.                                                06140000
+061500                                                                  06150000
+061600******************************************************************06160000
+061700*                                                                *06170000
+061800*      P R O C E S S   M O N T H   O L D   R E C O R D S         *06180000
+061900*                                                                *06190000
+062000******************************************************************06200000
+062100 4000-PROCESS-30DAY-RECORDS.                                      06210000
+062200     DISPLAY '4000-PROCESS-30DAY-RECORDS'.                        06220000
+062300                                                                  06230000
+062400     PERFORM 4100-OPEN-CNTL30-CURSOR.                             06240000
+062500                                                                  06250000
+062600     PERFORM 4200-FETCH-CNTL30-CURSOR.                            06260000
+062700                                                                  06270000
+062800     IF PS-END-OF-CNTL30-CSR-YES                                  06280000
+062900         DISPLAY ' '                                              06290000
+063000         DISPLAY '*************************************'          06300000
+063100         DISPLAY '**    NO MONTH OLD TRANSACTIONS    **'          06310000
+063200         DISPLAY '**      FOUND ON WFT_LOD_CNTL      **'          06320000
+063300         DISPLAY '*************************************'          06330000
+063400         DISPLAY ' '                                              06340000
+063500     END-IF.                                                      06350000
+063600                                                                  06360000
+063700*PROCESS MONTH OLD TRANSACTIONS.                                  06370000
+063800     PERFORM                                                      06380000
+063900       UNTIL PS-END-OF-CNTL30-CSR-YES                             06390000
+064000                                                                  06400000
+064100*DELETE 'XFER' RECORDS ASSOCIATED WITH THE 'CNTL' RECORD.         06410000
+064200         PERFORM 5000-DELETE-XFER30-RECORDS                       06420000
+064300                                                                  06430000
+064400*DELETE 'CNTL' RECORD.                                            06440000
+064500         PERFORM 4400-DELETE-CNTL30                               06450000
+064600         DISPLAY ' ROW(S) DELETED FOR ' WFT00001-PRC-CNTL-TMST    06460000
+064700                                  ' / ' WFT00001-TRN-TYP-CDE      06470000
+064800                                  ' / ' WFT00001-STR-NBR          06480000
+064900                                                                  06490000
+065000*COMMIT THE DATA.                                                 06500000
+065100         PERFORM 2800-COMMIT                                      06510000
+065200                                                                  06520000
+065300*GET NEXT 'CNTL' RECORD.                                          06530000
+065400         PERFORM 4200-FETCH-CNTL30-CURSOR                         06540000
+065500                                                                  06550000
+065600     END-PERFORM.                                                 06560000
+065700                                                                  06570000
+065800*CLOSE THE 'CNTL' CURSOR.                                         06580000
+065900     PERFORM 4300-CLOSE-CNTL30-CURSOR.                            06590000
+066000                                                                  06600000
+066100******************************************************************06610000
+066200 4100-OPEN-CNTL30-CURSOR.                                         06620000
+066300                                                                  06630000
+066400     EXEC SQL                                                     06640000
+066500         OPEN CNTL30-CSR                                          06650000
+066600     END-EXEC.                                                    06660000
+066700                                                                  06670000
+066800     EVALUATE TRUE                                                06680000
+066900       WHEN SQLCODE = ZERO                                        06690000
+067000           SET PS-END-OF-CNTL30-CSR-NO TO TRUE                    06700000
+067100                                                                  06710000
+067200       WHEN OTHER                                                 06720000
+067300           MOVE '4100-OPEN-CNTL30-CURSOR'                         06730000
+067400                                   TO PV-ABEND-PARAGRAPH          06740000
+067500           MOVE 'OPEN CNTL30-CSR ' TO PV-ABEND-OPERATION          06750000
+067600           PERFORM 9900-DB2-ABEND                                 06760000
+067700     END-EVALUATE.                                                06770000
+067800                                                                  06780000
+067900******************************************************************06790000
+068000 4200-FETCH-CNTL30-CURSOR.                                        06800000
+068100                                                                  06810000
+068200     EXEC SQL                                                     06820000
+068300         FETCH CNTL30-CSR                                         06830000
+068400          INTO :WFT00001-PRC-CNTL-TMST                            06840000
+068500             , :WFT00001-TRN-TYP-CDE                              06850000
+068600             , :WFT00001-STAT-CDE                                 06860000
+068700             , :WFT00001-STR-NBR                                  06870000
+068800     END-EXEC.                                                    06880000
+068900                                                                  06890000
+069000     EVALUATE TRUE                                                06900000
+069100       WHEN SQLCODE = +100                                        06910000
+069200           SET PS-END-OF-CNTL30-CSR-YES TO TRUE                   06920000
+069300                                                                  06930000
+069400       WHEN SQLCODE = ZERO                                        06940000
+069500           CONTINUE                                               06950000
+069600                                                                  06960000
+069700       WHEN OTHER                                                 06970000
+069800           MOVE '4200-FETCH-CNTL30-CURSOR'                        06980000
+069900                                    TO PV-ABEND-PARAGRAPH         06990000
+070000           MOVE 'FETCH CNTL30-CSR ' TO PV-ABEND-OPERATION         07000000
+070100           PERFORM 9900-DB2-ABEND                                 07010000
+070200     END-EVALUATE.                                                07020000
+070300                                                                  07030000
+070400******************************************************************07040000
+070500 4300-CLOSE-CNTL30-CURSOR.                                        07050000
+070600                                                                  07060000
+070700     EXEC SQL                                                     07070000
+070800         CLOSE CNTL30-CSR                                         07080000
+070900     END-EXEC.                                                    07090000
+071000                                                                  07100000
+071100     EVALUATE TRUE                                                07110000
+071200       WHEN SQLCODE = ZERO                                        07120000
+071300           CONTINUE                                               07130000
+071400                                                                  07140000
+071500       WHEN OTHER                                                 07150000
+071600           MOVE '4300-CLOSE-CNTL30-CURSOR'                        07160000
+071700                                    TO PV-ABEND-PARAGRAPH         07170000
+071800           MOVE 'CLOSE CNTL30-CSR ' TO PV-ABEND-OPERATION         07180000
+071900           PERFORM 9900-DB2-ABEND                                 07190000
+072000     END-EVALUATE.                                                07200000
+072100                                                                  07210000
+072200******************************************************************07220000
+072300 4400-DELETE-CNTL30.                                              07230000
+072400                                                                  07240000
+072500     EXEC SQL                                                     07250000
+072600         DELETE FROM WFT_LOD_CNTL                                 07260000
+072700***       WHERE CURRENT OF CNTL30-CSR                             07270000
+072800          WHERE PRC_CNTL_TMST = :WFT00001-PRC-CNTL-TMST           07280000
+072900            AND TRN_TYP_CDE   = :WFT00001-TRN-TYP-CDE             07290000
+073000            AND STAT_CDE      = :WFT00001-STAT-CDE                07300000
+073100            AND STR_NBR       = :WFT00001-STR-NBR                 07310000
+073200     END-EXEC.                                                    07320000
+073300                                                                  07330000
+073400     EVALUATE TRUE                                                07340000
+073500       WHEN SQLCODE = ZERO                                        07350000
+073600           ADD +1 TO PA-TOTAL-CNTL30-DELETED                      07360000
+073700                                                                  07370000
+073800       WHEN OTHER                                                 07380000
+073900           MOVE '4400-DELETE-CNTL30'  TO PV-ABEND-PARAGRAPH       07390000
+074000           MOVE 'DELETE WFT_LOD_CNTL' TO PV-ABEND-OPERATION       07400000
+074100           MOVE DCLWFT00001 TO PV-DB2-OPERATION-MESSAGE-1         07410000
+074200           PERFORM 9900-DB2-ABEND                                 07420000
+074300     END-EVALUATE.                                                07430000
+074400                                                                  07440000
+074500******************************************************************07450000
+074600******************************************************************07460000
+074700 5000-DELETE-XFER30-RECORDS.                                      07470000
+074800                                                                  07480000
+074900     PERFORM 5100-OPEN-XFER30-CURSOR.                             07490000
+075000                                                                  07500000
+075100     PERFORM                                                      07510000
+075200       UNTIL PS-END-OF-XFER30-CSR-YES                             07520000
+075300                                                                  07530000
+075400          PERFORM 5200-PROCESS-XFER30-ROWS                        07540000
+075500                                                                  07550000
+075600     END-PERFORM.                                                 07560000
+075700                                                                  07570000
+075800     PERFORM 5300-CLOSE-XFER30-CURSOR.                            07580000
+075900                                                                  07590000
+076000******************************************************************07600000
+076100 5100-OPEN-XFER30-CURSOR.                                         07610000
+076200                                                                  07620000
+076300     EXEC SQL                                                     07630000
+076400         OPEN XFER30-CSR                                          07640000
+076500     END-EXEC.                                                    07650000
+076600                                                                  07660000
+076700     EVALUATE TRUE                                                07670000
+076800       WHEN SQLCODE = ZERO                                        07680000
+076900           SET PS-END-OF-XFER30-CSR-NO TO TRUE                    07690000
+077000                                                                  07700000
+077100       WHEN OTHER                                                 07710000
+077200           MOVE '5100-OPEN-XFER30-CURSOR'                         07720000
+077300                                   TO PV-ABEND-PARAGRAPH          07730000
+077400           MOVE 'OPEN XFER30-CSR ' TO PV-ABEND-OPERATION          07740000
+077500           PERFORM 9900-DB2-ABEND                                 07750000
+077600     END-EVALUATE.                                                07760000
+077700                                                                  07770000
+077800******************************************************************07780000
+077900 5200-PROCESS-XFER30-ROWS.                                        07790000
+078000                                                                  07800000
+078100     EXEC SQL                                                     07810000
+078200         FETCH XFER30-CSR                                         07820000
+078300          INTO :WFT00002-LOD-DAT-TXT                              07830000
+078400     END-EXEC.                                                    07840000
+078500                                                                  07850000
+078600     EVALUATE TRUE                                                07860000
+078700       WHEN SQLCODE = +100                                        07870000
+078800           SET PS-END-OF-XFER30-CSR-YES TO TRUE                   07880000
+078900                                                                  07890000
+079000       WHEN SQLCODE = ZERO                                        07900000
+079100           PERFORM 5210-DELETE-XFER30-ROW                         07910000
+079200                                                                  07920000
+079300       WHEN OTHER                                                 07930000
+079400           MOVE '5200-PROCESS-XFER30-ROWS' TO PV-ABEND-PARAGRAPH  07940000
+079500           MOVE 'FETCH XFER30 ROW'         TO PV-ABEND-OPERATION  07950000
+079600           PERFORM 9900-DB2-ABEND                                 07960000
+079700     END-EVALUATE.                                                07970000
+079800                                                                  07980000
+079900******************************************************************07990000
+080000 5210-DELETE-XFER30-ROW.                                          08000000
+080100                                                                  08010000
+080200     INITIALIZE PV-RETRY-COUNTER.                                 08020000
+080300                                                                  08030000
+080400     PERFORM WITH TEST AFTER                                      08040000
+080500       UNTIL SQLCODE = ZERO OR SQLCODE = +100                     08050000
+080600         OR PV-RETRY-COUNTER > PC-MAX-RETRIES                     08060000
+080700                                                                  08070000
+080800         EXEC SQL                                                 08080000
+080900             DELETE FROM WFT_LOD_XFER                             08090000
+081000             WHERE CURRENT OF XFER30-CSR                          08100000
+081100         END-EXEC                                                 08110000
+081200                                                                  08120000
+081300         EVALUATE TRUE                                            08130000
+081400           WHEN SQLCODE = ZERO                                    08140000
+081500               ADD +1 TO PA-TOTAL-XFER30-DELETED                  08150000
+081600                         PV-COMMIT-COUNT-XFER                     08160000
+081700               IF PV-COMMIT-COUNT-XFER > 999                      08170000
+081800                   DISPLAY '  5210-COMMIT-XFER = '                08180000
+081900                            PV-COMMIT-COUNT-XFER                  08190000
+082000                   PERFORM 2800-COMMIT                            08200000
+082100                   PERFORM 5100-OPEN-XFER30-CURSOR                08210000
+082200                   MOVE ZEROES TO PV-COMMIT-COUNT-XFER            08220000
+082300               END-IF                                             08230000
+082400                                                                  08240000
+082500           WHEN SQLCODE = -911                                    08250000
+082600           WHEN SQLCODE = -913                                    08260000
+082700               ADD +1 TO PV-RETRY-COUNTER                         08270000
+082800                                                                  08280000
+082900           WHEN OTHER                                             08290000
+083000               MOVE '5210-DELETE-XFER30-ROW' TO PV-ABEND-PARAGRAPH08300000
+083100               MOVE 'DELETE WFT_LOD_XFER'    TO PV-ABEND-OPERATION08310000
+083200               MOVE DCLWFT00001    TO PV-DB2-OPERATION-MESSAGE-1  08320000
+083300               PERFORM 9900-DB2-ABEND                             08330000
+083400         END-EVALUATE                                             08340000
+083500     END-PERFORM.                                                 08350000
+083600                                                                  08360000
+083700     IF PV-RETRY-COUNTER > PC-MAX-RETRIES                         08370000
+083800         MOVE '5210-DELETE-XFER30-ROW' TO PV-ABEND-PARAGRAPH      08380000
+083900         MOVE 'DELETE WFT_LOD_XFER'    TO PV-ABEND-OPERATION      08390000
+084000         MOVE DCLWFT00001            TO PV-DB2-OPERATION-MESSAGE-108400000
+084100         PERFORM 9900-DB2-ABEND                                   08410000
+084200     END-IF.                                                      08420000
+084300                                                                  08430000
+084400******************************************************************08440000
+084500 5300-CLOSE-XFER30-CURSOR.                                        08450000
+084600                                                                  08460000
+084700     EXEC SQL                                                     08470000
+084800         CLOSE XFER30-CSR                                         08480000
+084900     END-EXEC.                                                    08490000
+085000                                                                  08500000
+085100     EVALUATE TRUE                                                08510000
+085200       WHEN SQLCODE = ZERO                                        08520000
+085300           CONTINUE                                               08530000
+085400                                                                  08540000
+085500       WHEN OTHER                                                 08550000
+085600           MOVE '5300-CLOSE-XFER-CURSOR'                          08560000
+085700                                    TO PV-ABEND-PARAGRAPH         08570000
+085800           MOVE 'CLOSE XFER30-CSR ' TO PV-ABEND-OPERATION         08580000
+085900           PERFORM 9900-DB2-ABEND                                 08590000
+086000     END-EVALUATE.                                                08600000
+086100                                                                  08610000
+086200******************************************************************08620000
+086300*                                                                *08630000
+086400*                   E O J   P R O C E S S I N G                  *08640000
+086500*                                                                *08650000
+086600******************************************************************08660000
+086700 9000-EOJ-ROUTINE.                                                08670000
+086800                                                                  08680000
+086900     DISPLAY ' '.                                                 08690000
+087000     DISPLAY '*******************************************'.       08700000
+087100     DISPLAY '      * RCKUP069 SUMMARY STATISTICS *      '.       08710000
+087200     DISPLAY ' '.                                                 08720000
+087300     DISPLAY '      -------------------------------      '.       08730000
+087400     DISPLAY '       LOAD REPOSITORY PURGE RESULTS       '.       08740000
+087500     DISPLAY '      -------------------------------      '.       08750000
+087600     MOVE PA-TOTAL-CNTL-READ              TO PV-DISPLAY-RECORD.   08760000
+087700     DISPLAY ' CMPLTD WFT_LOD_CNTL > 10 DAYS ='                   08770000
+087800                                             PV-DISPLAY-RECORD.   08780000
+087900     MOVE PA-TOTAL-XFER-DELETED           TO PV-DISPLAY-RECORD.   08790000
+088000     DISPLAY ' ASSOC WFT_LOD_XFER DELETED    ='                   08800000
+088100                                             PV-DISPLAY-RECORD.   08810000
+088200     DISPLAY ' '.                                                 08820000
+088300     MOVE PA-TOTAL-CNTL30-DELETED         TO PV-DISPLAY-RECORD.   08830000
+088400     DISPLAY ' DELETED WFT_LOD_CNTL(30 DAYS) ='                   08840000
+088500                                             PV-DISPLAY-RECORD.   08850000
+088600     MOVE PA-TOTAL-XFER30-DELETED         TO PV-DISPLAY-RECORD.   08860000
+088700     DISPLAY ' DELETED WFT_LOD_XFER(30 DAYS) ='                   08870000
+088800                                             PV-DISPLAY-RECORD.   08880000
+088900     DISPLAY '*******************************************'.       08890000
+089000                                                                  08900000
+089100******************************************************************08910000
+089200* 9900-DB2-ABEND - PERFORMS THE ABEND FOR THE PROGRAM IN THE      08920000
+089300* EVENT THAT AN SQL ERROR OR WARNING CODE OCCURS.                 08930000
+089400******************************************************************08940000
+089500 9900-DB2-ABEND.                                                  08950000
+089600                                                                  08960000
+089700     MOVE SQLCODE    TO PV-SQLCODE.                               08970000
+089800     MOVE PV-SQLCODE TO PV-DISPLAY-SQLCODE.                       08980000
+089900     DISPLAY '*** DB2 ERROR ***'.                                 08990000
+090000     DISPLAY '*** SQLCODE   = ' PV-DISPLAY-SQLCODE.               09000000
+090100     DISPLAY '*** PROGRAM   = ' PV-ABEND-PROGRAM.                 09010000
+090200     DISPLAY '*** PARAGRAPH = ' PV-ABEND-PARAGRAPH.               09020000
+090300     DISPLAY '*** OPERATION = ' PV-ABEND-OPERATION.               09030000
+090400     DISPLAY '*** MESSAGE   = ' PV-DB2-OPERATION-MESSAGE-1.       09040000
+090500     DISPLAY '*** TABLE 1   = ' PV-ABEND-STRUCTURE-1.             09050000
+090600                                                                  09060000
+090700******************************************************************09070000
+090800* THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-    09080000
+090900* MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE         09090000
+091000* 'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE     09100000
+091100* FORMAT.                                                         09110000
+091200******************************************************************09120000
+091300     COPY DPPD004.                                                09130000
+091400                                                                  09140000
+091500     IF SQLCODE NOT = -911                                        09150000
+091600         EXEC SQL                                                 09160000
+091700             ROLLBACK                                             09170000
+091800         END-EXEC                                                 09180000
+091900     END-IF.                                                      09190000
+092000                                                                  09200000
+092100     MOVE +4013         TO PV-ABEND-CODE.                         09210000
+092200     CALL 'ILBOABN0' USING PV-ABEND-CODE.                         09220000
+092300******************************************************************09230000
+092400******************************************************************09240000

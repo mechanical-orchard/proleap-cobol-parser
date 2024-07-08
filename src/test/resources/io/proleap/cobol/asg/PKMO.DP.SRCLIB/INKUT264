@@ -1,0 +1,649 @@
+      ******************************************************************        
+       IDENTIFICATION DIVISION.                                                 
+      ******************************************************************        
+       PROGRAM-ID.             INKUT264.                                        
+       AUTHOR.                 JIM LEIKNESS.                                    
+       INSTALLATION.           KOHLS.                                           
+       DATE-WRITTEN            NOVEMBER 2005.                                   
+       DATE-COMPILED.                                                           
+      ******************************************************************        
+      *     ESTIMATED INVENTORY ADJUSTMENT EXTRACT                     *        
+      *                                                                *        
+      * THIS PROGRAM IS A COPY OF INKUT164.  IT WILL TAKE IN           *        
+      * TRANSACTION/ADJUSTMENT FILE AND GENERATE AN ESTIMATED          *        
+      * INVENTORY (EIR) BASE ON PREVIOUS ENDING INVENTORY AND ALL THE  *        
+      * ADJUSTMENTS THUS FAR.                                          *        
+      *                                                                *        
+      ******************** HISTORY OF CHANGES **************************        
+      * WR/PROJ  DATE        DESCRIPTION OF CHANGES                             
+      * -------  ----------  ----------------------------------------           
+W29908* WR29908  2005-01-18  CORRECT MISSING PHYSICAL INVENTORY DATA            
+L29908* WR29908  2005-01-24  CORRECT TINSCLS PROCESS/CALCULATION                
+843633* P843633  2005-01-26  CORRECT TINSCLS PROCESS/CALCULATION                
+W28545* WR28545  2006-07-24  DEPARTMENT LEVEL INVENTORY. INCORPORATE            
+W28545*                      INVENTORY ID. - J SELWITSCHKA / STRATAGEM          
+W34517* WR34517  2009-02-19  INVENTORY LEDGER TBL SWITCH FROM TINSCLS           
+W34517*                      TO INT_SUB_CL_INV_LDGR                             
+W33304* WR33304  2008-10-21  HOLDING INVENTORY LEDGER OPEN (HILO)               
+W33304*                      CHANGES. SATHISH / INFOSYS                         
+W66886* WR66886  2021-02-01  REMOVED THE END OF FILE CHECK IN THE MAIN          
+W66886*                      LOOP TO AVOID PROCESSING ONLY ONE STORE            
+      ******************************************************************        
+                                                                                
+      ******************************************************************        
+       ENVIRONMENT DIVISION.                                                    
+      ******************************************************************        
+                                                                                
+       CONFIGURATION SECTION.                                                   
+                                                                                
+       SOURCE-COMPUTER.        IBM-3090.                                        
+       OBJECT-COMPUTER.        IBM-3090.                                        
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT CONTROL-DATE-FILE         ASSIGN TO INP01.                    
+           SELECT ADJUSTMENT-EXTRACT        ASSIGN TO INP02.                    
+           SELECT OUTPUT-FILE               ASSIGN TO OUT01.                    
+                                                                                
+      ******************************************************************        
+       DATA DIVISION.                                                           
+      ******************************************************************        
+                                                                                
+       FILE SECTION.                                                            
+                                                                                
+       FD  CONTROL-DATE-FILE                                                    
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  CONTROL-DATE-RECORD             PIC X(80).                           
+                                                                                
+       FD  ADJUSTMENT-EXTRACT                                                   
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  ADJUSTMENT-RECORD               PIC X(144).                          
+                                                                                
+       FD  OUTPUT-FILE                                                          
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  OUTPUT-RECORD                   PIC X(144).                          
+                                                                                
+      ******************************************************************        
+       WORKING-STORAGE SECTION.                                                 
+      ******************************************************************        
+      *                                                                         
+      * FILE RECORD FOR THE DATE CONTROL CARD                                   
+       01  CC-CONTROL-RECORD.                                                   
+           05  FILLER                      PIC X(02) VALUE SPACES.              
+           05  CC-CONTROL-DATE.                                                 
+               10  CC-BEG-CC               PIC X(02) VALUE SPACES.              
+               10  CC-BEG-YY               PIC X(02) VALUE SPACES.              
+               10  FILLER                  PIC X(01) VALUE '-'.                 
+               10  CC-BEG-MM               PIC X(02) VALUE SPACES.              
+               10  FILLER                  PIC X(01) VALUE '-'.                 
+               10  CC-BEG-DD               PIC X(02) VALUE SPACES.              
+           05  FILLER                      PIC X(01) VALUE SPACE.               
+      *                                                                         
+      * PROGRAM SWITCHES                                                        
+       01  PROGRAM-SWITCHES.                                                    
+           05  PS-END-OF-CONTROL-FILE-SW   PIC  X(01) VALUE 'N'.                
+               88  PS-END-OF-CONTROL-FILE             VALUE 'Y'.                
+           05  PS-END-OF-EXTRACT-FILE-SW   PIC  X(01) VALUE 'N'.                
+               88  PS-END-OF-EXTRACT                  VALUE 'Y'.                
+           05  PS-END-OF-TINVPAR-CSR-SW    PIC  X(01) VALUE 'N'.                
+               88  PS-END-OF-TINVPAR-CSR              VALUE 'Y'.                
+W34517     05  PS-END-OF-INVLDGR-CSR-SW    PIC  X(01) VALUE 'N'.                
+W34517         88  PS-NOT-END-OF-INVLDGR-CSR          VALUE 'N'.                
+W34517         88  PS-END-OF-INVLDGR-CSR              VALUE 'Y'.                
+      *                                                                         
+      * PROGRAM VARIABLES                                                       
+       01  PROGRAM-VARIABLES.                                                   
+           05  PV-INV-DTE            PIC X(10)  VALUE SPACES.                   
+           05  PV-END-INV-RTL-AMT    PIC S9(13)V99 VALUE 0 COMP-3.              
+           05  PV-ABEND-CODE         PIC S9(04) COMP VALUE ZERO.                
+           05  PV-PARAGRAPH-NAME     PIC X(30)  VALUE SPACES.                   
+           05  PV-DB2-OPER-ATTEMPTED PIC X(30)  VALUE SPACES.                   
+           05  PV-STR-COUNT          PIC S9(04) COMP VALUE 0.                   
+           05  PV-STR-COUNT-X        PIC 9(05)  VALUE 0.                        
+           05  PV-SEL-COUNT          PIC 9(09)  VALUE 0.                        
+           05  PV-READ-COUNT         PIC 9(09)  VALUE 0.                        
+           05  PV-WRITE-COUNT        PIC 9(09)  VALUE 0.                        
+           05  PV-FSCL-MN-NBR        PIC 9(02)  VALUE ZERO.                     
+           05  PV-RETRY-COUNT        PIC S9(04) COMP VALUE 0.                   
+           05  PV-DTATTR-KEY-DTE     PIC X(10)  VALUE SPACES.                   
+           05  PV-GMA-NBR            PIC X(02)  VALUE SPACES.                   
+           05  PV-DMA-NBR            PIC X(02)  VALUE SPACES.                   
+           05  PV-BYR-NBR            PIC X(03)  VALUE SPACES.                   
+           05  PV-DEPT-NBR           PIC X(03)  VALUE SPACES.                   
+           05  PV-HOLD-DEPT          PIC X(03)  VALUE SPACES.                   
+           05  PV-SUB-CL-NBR         PIC X(02)  VALUE SPACES.                   
+           05  PV-STR-NBR            PIC S9(4) COMP VALUE ZERO.                 
+      *                                                                         
+      * PROGRAM CONSTANTS                                                       
+       01  PROGRAM-CONSTANTS.                                                   
+           05  PC-PROGRAM-NAME     PIC X(08) VALUE 'INKUT264'.                  
+           05  PC-MAX-RETRIES      PIC S9(04) COMP  VALUE +3.                   
+           05  PC-OPERCO-NBR       PIC X(02)  VALUE '03'.                       
+                                                                                
+      *                                                                         
+      * INVENTORY LOCATION TABLE                                                
+       01  INV-LOC-TABLE.                                                       
+           05  INV-LOC-TBL          OCCURS 9999 TIMES                           
+                                    INDEXED BY  PV-IDX.                         
+               10  INV-LOC          PIC S9(04) COMP.                            
+                                                                                
+      *                                                                         
+      * COPYBOOK FOR DPKUT500                                                   
+           COPY DPWS500.                                                        
+                                                                                
+      *                                                                         
+      * COPYBOOK FOR DB2                                                        
+           COPY DPWS004.                                                        
+                                                                                
+      *                                                                         
+      * COPYBOOK FOR INVENTORY EXTRACT                                          
+           COPY INRD013.                                                        
+                                                                                
+      *                                                                         
+      * INVENTORY SUB-CLASS CUTOFF TABLE                                        
+                                                                                
+           EXEC SQL                                                             
+W34517         INCLUDE INT00007                                                 
+           END-EXEC.                                                            
+                                                                                
+      *                                                                         
+      * INVENTORY PARAMETER TABLE                                               
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TINVPAR                                                  
+           END-EXEC.                                                            
+                                                                                
+W28545*                                                                         
+W28545* INVENTORY CYCLE CONTROL TABLE                                           
+W28545                                                                          
+W28545     EXEC SQL                                                             
+W28545         INCLUDE TINCNTL                                                  
+W28545     END-EXEC.                                                            
+W28545                                                                          
+      *                                                                         
+      * DATE ATTRIBUTE TABLE                                                    
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TDTATTR                                                  
+           END-EXEC.                                                            
+                                                                                
+      *                                                                         
+      * MBS MERCHANDISE AREA TABLE                                              
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TMDSEAR                                                  
+           END-EXEC.                                                            
+                                                                                
+      *                                                                         
+      *  COMMUNICATION AREAS FOR DB2                                            
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+      *-----------------------------------------------------------------        
+      *  INVENTORY LOCATION CURSOR                                              
+      *-----------------------------------------------------------------        
+           EXEC SQL                                                             
+              DECLARE TINVPAR-CSR CURSOR FOR                                    
+                  SELECT                                                        
+                      LOC_NBR                                                   
+                  FROM                                                          
+W28545*               TINVPAR                                                   
+W28545                TINVPAR A                                                 
+W28545               ,TINCNTL B                                                 
+                  WHERE ACTL_INV_DTE = :PV-INV-DTE                              
+W28545            AND   B.ACTV_IND   = 'Y'                                      
+W33304            AND   A.LOC_INV_STAT_CDE = 'IN'                               
+W33304            AND   A.ACTL_FIN_BK_DTE  = '9999-09-09'                       
+W28545            AND   A.INV_ID     = B.INV_ID                                 
+                  ORDER BY LOC_NBR                                              
+           END-EXEC.                                                            
+                                                                                
+      *-----------------------------------------------------------------        
+      *  INVENTORY SUB-CLASS CUTOFF TABLE CURSOR                                
+      *-----------------------------------------------------------------        
+           EXEC SQL                                                             
+W34517        DECLARE INVLDGR-CSR CURSOR FOR                                    
+                  SELECT                                                        
+                       DEPT_NBR                                                 
+                      ,SUB_CL_NBR                                               
+                      ,COALESCE(SUM(SLS_RTL_AMT),0)                             
+                      ,COALESCE(SUM(MKDN_RTL_AMT),0)                            
+                      ,COALESCE(SUM(MKUP_RTL_AMT),0)                            
+                      ,COALESCE(SUM(XFER_IN_RTL_AMT),0)                         
+                      ,COALESCE(SUM(XFER_OUT_RTL_AMT),0)                        
+                      ,COALESCE(SUM(RCPT_RTL_AMT),0)                            
+                      ,COALESCE(SUM(PADJ_RTL_AMT),0)                            
+                      ,COALESCE(SUM(END_INV_RTL_AMT),0)                         
+OCFSFS                ,COALESCE(SUM(STR_PARL_SHIP_RTL_AMT),0)                   
+                      ,COALESCE(SUM(CTOFF_END_INV_AMT),0)                       
+                      ,COALESCE(SUM(STR_EXPTED_RTL_AMT),0)                      
+                  FROM                                                          
+W34517                INT_SUB_CL_INV_LDGR                                       
+                  WHERE FSCL_MN_NBR = :DTATTR-FSCL-MN-NBR                       
+                    AND FSCL_MN_END_DTE                                         
+                                    = :DTATTR-FSCL-MN-END-DTE                   
+                    AND STR_NBR     = :PV-STR-NBR                               
+                  GROUP BY DEPT_NBR, SUB_CL_NBR                                 
+           END-EXEC.                                                            
+      *-----------------------------------------------------------------        
+                                                                                
+       LINKAGE SECTION.                                                         
+                                                                                
+      ******************************************************************        
+       PROCEDURE DIVISION.                                                      
+      ******************************************************************        
+      *-----------------------------------------------------------------        
+       0000-PROGRAM-MAINLINE.                                                   
+      *-----------------------------------------------------------------        
+           PERFORM 1000-INITIALIZE.                                             
+                                                                                
+           PERFORM                                                              
+               VARYING PV-IDX FROM 1 BY 1                                       
+               UNTIL PV-IDX > PV-STR-COUNT                                      
+266886*           OR PS-END-OF-EXTRACT                                          
+                   MOVE INV-LOC (PV-IDX) TO PV-STR-NBR                          
+843633             DISPLAY ' PROCESSING LOC: ' PV-STR-NBR                       
+                                                                                
+                   PERFORM 2000-PROCESS                                         
+                       UNTIL PS-END-OF-EXTRACT                                  
+                          OR IN013-STR-NBR > PV-STR-NBR                         
+                                                                                
+W34517             PERFORM 8500-OPEN-INVLDGR-CSR                                
+                                                                                
+W34517             PERFORM 8600-FETCH-INVLDGR-CSR                               
+W34517             PERFORM 3000-PROCESS-INVLDGR                                 
+W34517                 UNTIL PS-END-OF-INVLDGR-CSR                              
+                                                                                
+W34517             PERFORM 8700-CLOSE-INVLDGR-CSR                               
+           END-PERFORM.                                                         
+                                                                                
+           PERFORM 9000-EOJ-ROUTINE.                                            
+           STOP RUN.                                                            
+                                                                                
+      *-----------------------------------------------------------------        
+       1000-INITIALIZE.                                                         
+      *-----------------------------------------------------------------        
+           OPEN INPUT  CONTROL-DATE-FILE                                        
+                       ADJUSTMENT-EXTRACT                                       
+                OUTPUT OUTPUT-FILE.                                             
+                                                                                
+           READ CONTROL-DATE-FILE INTO CC-CONTROL-RECORD                        
+              AT END                                                            
+                 SET PS-END-OF-CONTROL-FILE TO TRUE.                            
+                                                                                
+           IF PS-END-OF-CONTROL-FILE                                            
+              DISPLAY ' '                                                       
+              DISPLAY '** ABEND     **'                                         
+              DISPLAY '** PROGRAM   **  = ' PC-PROGRAM-NAME                     
+              DISPLAY '** PARAGRAPH **  = 1000-INITIALIZE      '                
+              DISPLAY '** CONTROL DATE FILE IS EMPTY  '                         
+              CALL 'ILBOABN0' USING PV-ABEND-CODE                               
+           ELSE                                                                 
+              INITIALIZE DPG51, DPG52, DPG53, DPG54, DPG55, DPG56.              
+              SET DPG51-ACTUAL-CALENDAR-ONLY  TO TRUE.                          
+              SET DPG52-LK-DTE-ISO-FMT        TO TRUE.                          
+                                                                                
+              MOVE CC-CONTROL-DATE TO DPG52-LK-DATE-INPUT.                      
+              SET DPG52-LK-DTE-ISO-FMT TO TRUE.                                 
+                                                                                
+              CALL DP500-KOHLS-CALENDAR-ROUTINE                                 
+                   USING DPG51 DPG52 DPG53 DPG54 DPG55 DPG56.                   
+                                                                                
+           EVALUATE TRUE                                                        
+             WHEN DPG54-SEVERE-ERROR                                            
+             WHEN DPG54-DATE-INVALID                                            
+               DISPLAY ' '                                                      
+               DISPLAY '** ABEND     **'                                        
+               DISPLAY '** PROGRAM   **  = ' PC-PROGRAM-NAME                    
+               DISPLAY '** PARAGRAPH **  = 1000-INITIALIZE'                     
+               DISPLAY '** BAD CALL TO CALENDAR MODULE '                        
+               DISPLAY DPG54-ERROR-MESSAGE                                      
+               CALL 'ILBOABN0' USING PV-ABEND-CODE                              
+           END-EVALUATE.                                                        
+                                                                                
+           MOVE CC-CONTROL-DATE TO PV-INV-DTE                                   
+                                   PV-DTATTR-KEY-DTE.                           
+                                                                                
+           PERFORM 8900-GET-DATE-ATTRIBUTES.                                    
+                                                                                
+           PERFORM 1100-RETRIEVE-LOC.                                           
+                                                                                
+           PERFORM 7100-READ-EXTRACT.                                           
+      *-----------------------------------------------------------------        
+       1100-RETRIEVE-LOC.                                                       
+      *-----------------------------------------------------------------        
+           SET PV-IDX TO +1.                                                    
+           PERFORM 8000-OPEN-TINVPAR-CSR.                                       
+           PERFORM 8100-FETCH-TINVPAR-CSR UNTIL                                 
+               PS-END-OF-TINVPAR-CSR.                                           
+           PERFORM 8200-CLOSE-TINVPAR-CSR.                                      
+                                                                                
+      *-----------------------------------------------------------------        
+       2000-PROCESS.                                                            
+      *-----------------------------------------------------------------        
+L29908     IF IN013-STR-NBR < PV-STR-NBR                                        
+              PERFORM 7100-READ-EXTRACT                                         
+           ELSE                                                                 
+L29908        IF IN013-STR-NBR = PV-STR-NBR                                     
+                 IF IN013-DEPT-NBR NOT = PV-HOLD-DEPT                           
+                    MOVE IN013-DEPT-NBR TO PV-DEPT-NBR                          
+                    PERFORM 8400-GET-EFFECTIVE-MBS-INFO                         
+                 END-IF                                                         
+                 MOVE MDSEAR-GMA-NBR TO PV-GMA-NBR                              
+                                        IN013-GMA-NBR                           
+                 MOVE MDSEAR-DMA-NBR TO PV-DMA-NBR                              
+                                        IN013-DMA-NBR                           
+                 MOVE MDSEAR-BYR-NBR TO PV-BYR-NBR                              
+                                        IN013-BYR-NBR                           
+L29908           MOVE ZEROES              TO IN013-BEG-INV-RTL-AMT              
+                 PERFORM 5000-RECALC-ENDING-EXTRACT-INV                         
+L29908           MOVE PV-END-INV-RTL-AMT  TO IN013-END-INV-RTL-AMT              
+                 PERFORM 4000-WRITE                                             
+                 PERFORM 7100-READ-EXTRACT                                      
+              END-IF                                                            
+           END-IF.                                                              
+      *-----------------------------------------------------------------        
+W34517 3000-PROCESS-INVLDGR.                                                    
+      *-----------------------------------------------------------------        
+                                                                                
+843633     ADD +1 TO PV-SEL-COUNT.                                              
+W34517     MOVE INT00007-END-INV-RTL-AMT TO IN013-BEG-INV-RTL-AMT               
+843633                                    IN013-END-INV-RTL-AMT.                
+                                                                                
+843633     IF IN013-DEPT-NBR NOT = PV-HOLD-DEPT                                 
+843633        MOVE IN013-DEPT-NBR TO PV-DEPT-NBR                                
+843633        PERFORM 8400-GET-EFFECTIVE-MBS-INFO                               
+843633     END-IF.                                                              
+                                                                                
+843633     MOVE PV-GMA-NBR        TO IN013-GMA-NBR.                             
+843633     MOVE PV-DMA-NBR        TO IN013-DMA-NBR.                             
+843633     MOVE PV-BYR-NBR        TO IN013-BYR-NBR.                             
+W34517     MOVE INT00007-DEPT-NBR TO IN013-DEPT-NBR.                            
+W34517     MOVE INT00007-SUB-CL-NBR TO IN013-SUB-CL-NBR.                        
+843633     MOVE PV-STR-NBR        TO IN013-STR-NBR.                             
+                                                                                
+843633     MOVE ZEROES            TO IN013-SLS-RTL-AMT                          
+843633                               IN013-MKDN-RTL-AMT                         
+843633                               IN013-MKUP-RTL-AMT                         
+843633                               IN013-XFER-IN-RTL-AMT                      
+843633                               IN013-XFER-OUT-RTL-AMT                     
+843633                               IN013-RCPT-RTL-AMT                         
+843633                               IN013-PADJ-RTL-AMT                         
+843633                               IN013-SHNK-RTL-AMT                         
+OCFSFS                               IN013-STR-PARL-SHIP-RTL-AMT                
+843633                               IN013-STR-EXPTED-RTL-AMT                   
+843633                               IN013-PHY-INV-RTL-AMT.                     
+                                                                                
+843633     PERFORM 4000-WRITE.                                                  
+                                                                                
+W34517     PERFORM 8600-FETCH-INVLDGR-CSR.                                      
+                                                                                
+      *-----------------------------------------------------------------        
+       4000-WRITE.                                                              
+      *-----------------------------------------------------------------        
+L29908     WRITE OUTPUT-RECORD FROM IN013-INVENTORY-ADJ-EXTR-REC.               
+                                                                                
+L29908     INITIALIZE IN013-INVENTORY-ADJ-EXTR-REC.                             
+                                                                                
+           ADD +1 TO PV-WRITE-COUNT.                                            
+                                                                                
+      *-----------------------------------------------------------------        
+       5000-RECALC-ENDING-EXTRACT-INV.                                          
+      *-----------------------------------------------------------------        
+      **  ENDING INVENTORY RETAIL AMOUNT CALCULATIONS AT THE                    
+      **  DEPT/CLASS/STORE                                                      
+           COMPUTE  PV-END-INV-RTL-AMT =                                        
+                    IN013-BEG-INV-RTL-AMT    +                                  
+                    IN013-RCPT-RTL-AMT       +                                  
+                    IN013-PADJ-RTL-AMT       +                                  
+                    IN013-MKUP-RTL-AMT       +                                  
+                    IN013-XFER-IN-RTL-AMT    -                                  
+                    IN013-SLS-RTL-AMT        -                                  
+                    IN013-MKDN-RTL-AMT       -                                  
+                    IN013-XFER-OUT-RTL-AMT   -                                  
+                    IN013-STR-EXPTED-RTL-AMT -                                  
+OCFSFS              IN013-STR-PARL-SHIP-RTL-AMT.                                
+                                                                                
+      *-----------------------------------------------------------------        
+       7100-READ-EXTRACT.                                                       
+      *-----------------------------------------------------------------        
+           READ ADJUSTMENT-EXTRACT INTO IN013-INVENTORY-ADJ-EXTR-REC            
+              AT END                                                            
+                 SET PS-END-OF-EXTRACT  TO TRUE.                                
+           ADD +1 TO PV-READ-COUNT.                                             
+      *-----------------------------------------------------------------        
+       8000-OPEN-TINVPAR-CSR.                                                   
+      *-----------------------------------------------------------------        
+           EXEC SQL                                                             
+               OPEN TINVPAR-CSR                                                 
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = ZERO                                               
+                 CONTINUE                                                       
+              WHEN OTHER                                                        
+                 MOVE '8000-OPEN-TINVPAR-CSR' TO PV-PARAGRAPH-NAME              
+                 MOVE 'OPEN TINVPAR-CSR'    TO PV-DB2-OPER-ATTEMPTED            
+                 PERFORM 9999-SQL-ABEND                                         
+           END-EVALUATE.                                                        
+      *-----------------------------------------------------------------        
+       8100-FETCH-TINVPAR-CSR.                                                  
+      *-----------------------------------------------------------------        
+           EXEC SQL                                                             
+              FETCH                                                             
+                 TINVPAR-CSR                                                    
+              INTO                                                              
+                 :INVPAR-LOC-NBR                                                
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = ZERO                                               
+                 MOVE INVPAR-LOC-NBR  TO INV-LOC (PV-IDX)                       
+                 SET PV-IDX UP BY +1                                            
+                 ADD +1 TO PV-STR-COUNT                                         
+              WHEN SQLCODE = +100                                               
+                 SET PS-END-OF-TINVPAR-CSR TO TRUE                              
+              WHEN OTHER                                                        
+                 MOVE '8100-FETCH-TINVPAR-CSR' TO PV-PARAGRAPH-NAME             
+                 MOVE 'FETCH TINVPAR-CSR'     TO PV-DB2-OPER-ATTEMPTED          
+                 PERFORM 9999-SQL-ABEND                                         
+           END-EVALUATE.                                                        
+                                                                                
+      *-----------------------------------------------------------------        
+       8200-CLOSE-TINVPAR-CSR.                                                  
+      *-----------------------------------------------------------------        
+           EXEC SQL                                                             
+              CLOSE TINVPAR-CSR                                                 
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = ZERO                                               
+                 CONTINUE                                                       
+              WHEN OTHER                                                        
+                 MOVE '8200-CLOSE-TINVPAR-CSR' TO PV-PARAGRAPH-NAME             
+                 MOVE 'CLOSE TINVPAR-CSR'     TO PV-DB2-OPER-ATTEMPTED          
+                 PERFORM 9999-SQL-ABEND                                         
+           END-EVALUATE.                                                        
+                                                                                
+      *-----------------------------------------------------------------        
+       8400-GET-EFFECTIVE-MBS-INFO.                                             
+      *-----------------------------------------------------------------        
+           EXEC SQL                                                             
+              SELECT                                                            
+                   GMA_NBR                                                      
+                  ,DMA_NBR                                                      
+                  ,BYR_NBR                                                      
+              INTO                                                              
+                  :MDSEAR-GMA-NBR                                               
+                 ,:MDSEAR-DMA-NBR                                               
+                 ,:MDSEAR-BYR-NBR                                               
+              FROM TMDSEAR A                                                    
+             WHERE A.OPERCO_NBR  = :PC-OPERCO-NBR                               
+               AND A.MDSELV_CDE  = 'DPT'                                        
+               AND A.DEPT_NBR    = :PV-DEPT-NBR                                 
+               AND :DTATTR-FSCL-MN-END-DTE                                      
+                         BETWEEN A.STRT_DTE                                     
+                                 AND A.END_DTE                                  
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = ZERO                                               
+                 MOVE PV-DEPT-NBR TO PV-HOLD-DEPT                               
+              WHEN SQLCODE = +100                                               
+                 CONTINUE                                                       
+              WHEN OTHER                                                        
+                 MOVE '8400-GET-MBS-INFO' TO PV-PARAGRAPH-NAME                  
+                 MOVE 'SELECT FROM TMDSEAR' TO PV-DB2-OPER-ATTEMPTED            
+                 PERFORM 9999-SQL-ABEND                                         
+           END-EVALUATE.                                                        
+                                                                                
+      *-----------------------------------------------------------------        
+W34517 8500-OPEN-INVLDGR-CSR.                                                   
+      *-----------------------------------------------------------------        
+           EXEC SQL                                                             
+W34517         OPEN INVLDGR-CSR                                                 
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = ZERO                                              
+W34517             SET PS-NOT-END-OF-INVLDGR-CSR TO TRUE                        
+               WHEN OTHER                                                       
+W34517             MOVE '8500-OPEN-INVLDGR-CSR' TO PV-PARAGRAPH-NAME            
+W34517             MOVE 'OPEN INVLDGR-CSR'    TO PV-DB2-OPER-ATTEMPTED          
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+      *-----------------------------------------------------------------        
+W34517 8600-FETCH-INVLDGR-CSR.                                                  
+      *-----------------------------------------------------------------        
+           EXEC SQL                                                             
+W34517        FETCH INVLDGR-CSR                                                 
+W34517           INTO   :INT00007-DEPT-NBR                                      
+W34517                 ,:INT00007-SUB-CL-NBR                                    
+W34517                 ,:INT00007-SLS-RTL-AMT                                   
+W34517                 ,:INT00007-MKDN-RTL-AMT                                  
+W34517                 ,:INT00007-MKUP-RTL-AMT                                  
+W34517                 ,:INT00007-XFER-IN-RTL-AMT                               
+W34517                 ,:INT00007-XFER-OUT-RTL-AMT                              
+W34517                 ,:INT00007-RCPT-RTL-AMT                                  
+W34517                 ,:INT00007-PADJ-RTL-AMT                                  
+W34517                 ,:INT00007-END-INV-RTL-AMT                               
+OCFSFS                 ,:INT00007-STR-PARL-SHIP-RTL-AMT                         
+W34517                 ,:INT00007-CTOFF-END-INV-AMT                             
+W34517                 ,:INT00007-STR-EXPTED-RTL-AMT                            
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = ZERO                                               
+843633            CONTINUE                                                      
+              WHEN SQLCODE = +100                                               
+W34517           SET PS-END-OF-INVLDGR-CSR TO TRUE                              
+              WHEN OTHER                                                        
+W34517           MOVE '8600-FETCH-INVLDGR-CSR' TO PV-PARAGRAPH-NAME             
+W34517           MOVE 'FETCH INVLDGR-CSR'     TO PV-DB2-OPER-ATTEMPTED          
+                 PERFORM 9999-SQL-ABEND                                         
+           END-EVALUATE.                                                        
+      *-----------------------------------------------------------------        
+W34517 8700-CLOSE-INVLDGR-CSR.                                                  
+      *-----------------------------------------------------------------        
+           EXEC SQL                                                             
+W34517        CLOSE INVLDGR-CSR                                                 
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = ZERO                                               
+                 CONTINUE                                                       
+              WHEN OTHER                                                        
+W34517           MOVE '8700-CLOSE-INVLDGR-CSR' TO PV-PARAGRAPH-NAME             
+W34517           MOVE 'CLOSE INVLDGR-CSR'     TO PV-DB2-OPER-ATTEMPTED          
+                 PERFORM 9999-SQL-ABEND                                         
+           END-EVALUATE.                                                        
+      *-----------------------------------------------------------------        
+       8900-GET-DATE-ATTRIBUTES.                                                
+      *-----------------------------------------------------------------        
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRY-COUNT FROM 1 BY 1                               
+                 UNTIL (PV-RETRY-COUNT > PC-MAX-RETRIES)                        
+                    OR (SQLCODE         = +000)                                 
+                    OR (SQLCODE         = +100)                                 
+                                                                                
+               EXEC SQL                                                         
+                    SELECT                                                      
+                        FSCL_MN_BEG_DTE                                         
+                       ,FSCL_MN_END_DTE                                         
+                       ,FSCL_MN_NBR                                             
+                    INTO                                                        
+                        :DTATTR-FSCL-MN-BEG-DTE                                 
+                       ,:DTATTR-FSCL-MN-END-DTE                                 
+                       ,:DTATTR-FSCL-MN-NBR                                     
+                    FROM                                                        
+                        TDTATTR                                                 
+                    WHERE                                                       
+                        KY_DTE = :PV-DTATTR-KEY-DTE                             
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE        = +000                                   
+                      DISPLAY 'MT BEG DTE ' DTATTR-FSCL-MN-BEG-DTE              
+                      DISPLAY 'MT END DTE ' DTATTR-FSCL-MN-END-DTE              
+                   WHEN SQLCODE        = -904                                   
+                   WHEN SQLCODE        = -911                                   
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       DISPLAY 'PV-DTATTR-KEY-DTE: ' PV-DTATTR-KEY-DTE          
+                       MOVE    '8000-GET-DATE-ATTRIBUTES'                       
+                                                TO PV-PARAGRAPH-NAME            
+                       MOVE    'SELECT ROW FROM TDTATTR'                        
+                                                TO PV-DB2-OPER-ATTEMPTED        
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+                                                                                
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-RETRY-COUNT > PC-MAX-RETRIES                                  
+               DISPLAY '** MAX RETRIES EXCEEDED ON TDTATTR **'                  
+               MOVE    '8000-GET-DATE-ATTRIBUTES'                               
+                                                TO PV-PARAGRAPH-NAME            
+               MOVE    'SELECT ROW FROM TDTATTR'                                
+                                                TO PV-DB2-OPER-ATTEMPTED        
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *-----------------------------------------------------------------        
+       9000-EOJ-ROUTINE.                                                        
+      *-----------------------------------------------------------------        
+                                                                                
+           CLOSE  CONTROL-DATE-FILE                                             
+                  ADJUSTMENT-EXTRACT                                            
+                  OUTPUT-FILE.                                                  
+                                                                                
+           MOVE PV-STR-COUNT  TO PV-STR-COUNT-X.                                
+                                                                                
+           DISPLAY 'LOCATIONS : ' PV-STR-COUNT-X.                               
+           DISPLAY 'FILE READS: ' PV-READ-COUNT.                                
+           DISPLAY 'DB SELECTS: ' PV-SEL-COUNT.                                 
+           DISPLAY 'WRITES:     ' PV-WRITE-COUNT.                               
+                                                                                
+      *-----------------------------------------------------------------        
+       9999-SQL-ABEND.                                                          
+      *-----------------------------------------------------------------        
+           DISPLAY '** ABEND **         ** = SQLERROR'.                         
+           DISPLAY '** PROGRAM          ** = INKUT264'.                         
+           DISPLAY '** PARAGRAPH        ** = ' PV-PARAGRAPH-NAME.               
+           DISPLAY '** OPERATION        ** = ' PV-DB2-OPER-ATTEMPTED.           
+                                                                                
+      *    THE FOLLOWING COPYBOOK UTILIZES THE DB2 ABEND MODULE                 
+      *    DSNTIAR TO CONVERT SQLCA INTO UNDERSTANDABLE VERBAGE.                
+                                                                                
+           COPY DPPD004.                                                        
+                                                                                
+           CALL 'ILBOABN0'  USING PV-ABEND-CODE.                                

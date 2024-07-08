@@ -1,0 +1,1139 @@
+       IDENTIFICATION DIVISION.                                                 
+       PROGRAM-ID.           DAKUT314.                                          
+       AUTHOR.               RICH KELLEN.                                       
+       INSTALLATION.         KOHLS DEPARTMENT STORES.                           
+       DATE-WRITTEN          06/15/2006.                                        
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *   DAKUT314 - DEBIT ALLOWANCE OFF-INVOICE DEBIT EXTRACT.        *        
+      *              THIS PROGRAM EXTRACTS DATA FROM THE               *        
+      *              DAT_AVL_VND_FUND ORACLE TABLE FOR THOSE ROWS THAT *        
+      *              HAVE RMNG_AVL_COST_AMT > 0 AND WHOSE BEG EFF DT < *        
+      *              THE FISCAL DATE FROM THE INPUT CONTROL            *        
+      *              CARD.  THIS DATA IS PASSED TO PROGRAM DAKUT315 TO *        
+      *              BE USED AS A DRIVER FILE TO EXTRACT DEBIT         *        
+      *              ALLOWANCE AMOUNTS.  THIS IS ALL DONE TO CREATE THE*        
+      *              MONTHLY PROFIT ASSISTANCE / CO-OP STATEMENT IN    *        
+      *              DAKRP114.                                         *        
+      *              THE ORACLE TABLES USED IN THIS PROGRAM ARE:       *        
+      *              DAT_AVL_VND_FUND - DEBIT ALLOW AVAIL FUNDS TABLE  *        
+      *              XMT_VND - VENDOR TABLE                            *        
+      *              TMDSEAR - MERCHANDISE HIERARCHY TABLE             *        
+      *              TRSPBAR - MERCHANDISE RESPONSIBILY TABLE          *        
+      *              TDACDE  - DEBIT ALLOWANCE CODE TABLE              *        
+      *              THE FISCAL DAY OF THE WEEK COMES IN ON THE CONTROL*        
+      *              CARD AND IS CHECKED AGAINST THE CDE_VAL_CDE WHERE *        
+      *              CDE_TYP_DESC = 'FISCAL CLOSE', WHEN THEY ARE EQUAL*        
+      *              THE PROGRAM PROCESSES NORMALLY, ELSE, THE PROGRAM *        
+      *              ENDS WITH A RETURN CODE OF 4095 AND DOES NO       *        
+      *              PROCESSING.                                       *        
+      ******************** HISTORY OF CHANGES **************************        
+      * CHG ID/                                                        *        
+      * WR/PROJ  DATE        DESCRIPTION OF CHANGES                    *        
+      * -------  ----------  ----------------------------------------  *        
+      * WR30812  07/11/2006  INITIAL IMPLEMENTATION                    *        
+      * WR30812  08/22/2006  CHG TO NOT LIMIT ON END EFF DT AND TO     *        
+      *                      CHECK FSCL DAY AGAINT FSCL CLOSE DAY ON   *        
+      *                      TDACDE TABLE.                             *        
+      * WR30812  09/27/2006  CHG TO CALCULATE THE TOTAL AVAIL QTY      *        
+      *                      USING ALL OPEN ROWS INSTEAD OF JUST THE   *        
+      *                      CURRENTLY EFFECTIVE ROW.  ALSO, ADD 2 NEW *        
+      *                      FIELDS TO THE OUTPUT FILE TO ALLOW        *        
+      *                      DAKUT315 TO FIND THE DEBIT ALLOWANCES     *        
+      *                      CORRECTLY.                                *        
+      * WR30812  10/17/2006  CHG TO CALCULATE THE TOTAL AVAIL QTY      *        
+      *                      USING THE SUM OF RMNG_AVL_COST_AMT FROM   *        
+      *                      ALL OPEN ROWS.                            *        
+      * 8613F    07/17/2015  RMS 9 REMEDIATION. CHANGED FROM           *        
+      *                      AUTO LOGON TO EXTERNAL SIGN ON                     
+208057* CHG0208057 9/7/2018  JIM HUNTER MAINFRAME REFACTORING -        *        
+208057*                                 REMOVE MLWS502, MLLS502 AND    *        
+208057*                                 MLPD502 COPYBOOKS WHICH GET THE*        
+208057*                                 JOB NAME SINCE THE JOB NAME IS *        
+208057*                                 NOT USED.                      *        
+      ******************************************************************        
+                                                                                
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+                                                                                
+       CONFIGURATION SECTION.                                                   
+                                                                                
+       SOURCE-COMPUTER. IBM-3090.                                               
+       OBJECT-COMPUTER. IBM-3090.                                               
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+       FILE-CONTROL.                                                            
+           SELECT CONTROL-CARD-FILE                                             
+               ASSIGN TO INP01.                                                 
+                                                                                
+           SELECT DEBIT-ALLOWANCE-FILE                                          
+               ASSIGN TO OUT01.                                                 
+                                                                                
+8613F      SELECT ORACLE-LOGIN-FILE                                             
+8613F          ASSIGN TO ORALOGON.                                              
+                                                                                
+                                                                                
+                                                                                
+       DATA DIVISION.                                                           
+                                                                                
+       FILE SECTION.                                                            
+       FD  CONTROL-CARD-FILE                                                    
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  CONTROL-CARD-RECORD             PIC X(80).                           
+                                                                                
+       FD  DEBIT-ALLOWANCE-FILE                                                 
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  DEBIT-ALLOWANCE-RECORD          PIC X(188).                          
+                                                                                
+8613F  FD  ORACLE-LOGIN-FILE                                                    
+8613F      RECORDING MODE IS F                                                  
+8613F      LABEL RECORDS ARE STANDARD                                           
+8613F      BLOCK CONTAINS 0 RECORDS                                             
+8613F      DATA RECORD IS ORACLE-LOGIN-REC.                                     
+8613F  01  ORACLE-LOGIN-REC.                                                    
+8613F      05  FILLER                  PIC X(80).                               
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+8613F  01  CC-ORACLE-CONNECTION.                                                
+8613F      05  CC-ORACLE-USERID           PIC X(40).                            
+8613F          88 CC-AUTO-LOGON                           VALUE '/'.            
+8613F      05  CC-ORACLE-PASSWORD         PIC X(40).                            
+                                                                                
+      ****************************************************************          
+      * RECORD LAYOUT FOR CONTROL CARD FILE.                                    
+      ****************************************************************          
+       01  CC-CONTROL-CARD.                                                     
+           05  FILLER                      PIC X(01)       VALUE SPACES.        
+               88  CC-COMMENT                              VALUE '*'.           
+               88  CC-NOT-COMMENT                          VALUE SPACES.        
+           05  CC-PROCESS-DTE              PIC X(10)       VALUE SPACES.        
+           05  FILLER                      PIC X(01)       VALUE SPACES.        
+           05  FILLER                      PIC X(04)       VALUE SPACES.        
+           05  FILLER                      PIC X(01)       VALUE SPACES.        
+           05  FILLER                      PIC X(08)       VALUE SPACES.        
+           05  FILLER                      PIC X(01)       VALUE SPACES.        
+           05  FILLER                      PIC 9(02)       VALUE ZEROES.        
+           05  FILLER                      PIC X(01)       VALUE SPACES.        
+           05  FILLER                      PIC X(08)       VALUE SPACES.        
+           05  FILLER                      PIC X(01)       VALUE SPACES.        
+           05  FILLER                      PIC 9(02)       VALUE ZEROES.        
+           05  FILLER                      PIC X(01)       VALUE SPACES.        
+           05  CC-FISCAL-DOW               PIC X(01)       VALUE ZEROES.        
+           05  FILLER                      PIC X(38)       VALUE SPACES.        
+                                                                                
+      *****************************************************************         
+      *  KOHLS CALENDAR ROUTINE COPYBOOK                              *         
+      *****************************************************************         
+      *01  DP500-KOHLS-CALENDAR-ROUTINE.                                        
+      *01  DPG51.                                                               
+      *01  DPG52.                                                               
+      *01  DPG53.                                                               
+      *01  DPG54.                                                               
+      *01  DPG55.                                                               
+      *01  DPG56.                                                               
+           COPY DPWS500.                                                        
+                                                                                
+      *****************************************************************         
+      * DEBIT ALLOWANCE OFF INVOICE EXTRACT LAYOUT                              
+      *****************************************************************         
+           COPY DARD109.                                                        
+                                                                                
+      *****************************************************************         
+      *  PROGRAM'S ACCUMULATORS                                       *         
+      *****************************************************************         
+       01  PA-PROGRAM-ACCUMULATORS.                                             
+           05  PA-ROWS-FETCHED             PIC 9(09)       VALUE ZEROES.        
+           05  PA-DA-ALLWNC-RECORDS-WRITE  PIC 9(09)       VALUE ZEROES.        
+                                                                                
+      *****************************************************************         
+      *  PROGRAM'S CONSTANTS                                          *         
+      *****************************************************************         
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-MAX-DEADLOCKS            PIC S9(04)      VALUE +3.            
+           05  PC-COMMIT-COUNT             PIC 9(03)       VALUE 50.            
+           05  PC-PROGRAM-NAME             PIC X(08)       VALUE                
+               'DAKUT314'.                                                      
+           05  PC-ORACLE-PROD-ID           PIC X(1)        VALUE '/'.           
+           05  PC-ORACLE-PROD-ID-LGTH      PIC 9(02)       VALUE 1.             
+           05  PC-PROCESS-STAT-CDE         PIC X(02)       VALUE '60'.          
+                                                                                
+           05  PC-CURR-TIME                PIC 9(08)       VALUE ZEROES.        
+           05  PC-AFTR-TIME                PIC 9(08)       VALUE ZEROES.        
+           05  PC-TIME-DIFF                PIC 9(08)       VALUE ZEROES.        
+8613F      05  PC-AUTO-LOGON               PIC X(01)       VALUE '/'.           
+      *****************************************************************         
+      *  PROGRAM'S SWITCHES                                           *         
+      *****************************************************************         
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-END-OF-DEBIT-ALLWNC-SW   PIC X(01)       VALUE 'N'.           
+               88  PS-END-OF-DEBIT-ALLWNC                  VALUE 'Y'.           
+               88  PS-NOT-END-OF-DEBIT-ALLWNC              VALUE 'N'.           
+           05  PS-END-OF-CONTROL-CARDS-SW  PIC X(01)       VALUE 'N'.           
+               88  PS-END-OF-CONTROL-CARDS                 VALUE 'Y'.           
+               88  PS-NOT-END-OF-CONTROL-CARDS             VALUE 'N'.           
+           05  PS-END-OF-DATE-CTRL-CARDS-SW PIC X(01)      VALUE 'N'.           
+               88  PS-END-OF-DATE-CTRL-CARDS               VALUE 'Y'.           
+               88  PS-NOT-END-OF-DATE-CTRL-CARDS           VALUE 'N'.           
+8613F      05  PS-ORACLE-LOGIN-EOF-SW      PIC  X          VALUE 'N'.           
+8613F          88  ORACLE-LOGIN-EOF                       VALUE 'Y'.            
+                                                                                
+      *****************************************************************         
+      *  PROGRAM'S VARIABLES                                          *         
+      *****************************************************************         
+       01  PV-PROGRAM-VARIABLES.                                                
+           05  PV-RETURN-CODE             PIC S9(04)  VALUE ZEROS               
+                                                      COMP SYNC.                
+           05  PV-TEMP-FIRST-NAME          PIC X(30)       VALUE SPACES.        
+           05  PV-TEMP-LAST-NAME           PIC X(30)       VALUE SPACES.        
+           05  PV-FSCL-MN-NAME             PIC X(19)       VALUE SPACES.        
+           05  PV-ENT-ID                   PIC 9(10).                           
+           05  PV-PREV-ENT-ID              PIC 9(10).                           
+           05  PV-DEPT-NBR                 PIC 9(4).                            
+           05  PV-PREV-BUYER-NBR           PIC X(3)        VALUE SPACE.         
+           05  PV-DMM-NAME                 PIC X(30)       VALUE SPACES.        
+           05  PV-DMM-WORKER-NBR           PIC S9(6)V      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-DMM-USER-ID              PIC X(08)       VALUE SPACES.        
+           05  PV-FSCL-YR-NBR              PIC X(04)       VALUE SPACES.        
+           05  PV-FSCL-MN-NBR              PIC X(02)       VALUE SPACES.        
+           05  PV-FSCL-MN-END-DTE          PIC X(10)       VALUE SPACES.        
+           05  PV-FSCL-MN-NM               PIC X(09)       VALUE SPACES.        
+           05  PV-TOT-TTL-AVL-COST-AMT     PIC S9(11)V9(2) VALUE ZERO.          
+           05  PV-TOT-RMNG-AVL-COST-AMT    PIC S9(11)V9(2) VALUE ZERO.          
+           05  PV-BUYER-NAME               PIC X(30)       VALUE SPACES.        
+           05  PV-BUYER-WORKER-NBR         PIC S9(6)V      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-BUYER-USER-ID            PIC X(08)       VALUE SPACES.        
+           05  PV-JOBNAME                  PIC X(08)       VALUE SPACES.        
+           05  FILLER REDEFINES PV-JOBNAME.                                     
+               10  PV-JOBNAME-APPL         PIC X(02).                           
+                   88  PV-PROD-JOBS                        VALUES ARE           
+                       'DA' 'IN' 'MJ' 'ML'.                                     
+               10  FILLER                  PIC X(06).                           
+           05  PV-LAST-COMMIT-RECORD       PIC 9(09)       VALUE ZEROES.        
+           05  PV-RETRY-COUNT              PIC S9(04)      VALUE ZEROES.        
+           05  PV-PARAGRAPH-NAME           PIC X(40)       VALUE SPACES.        
+           05  PV-NULL-RETURN              PIC S9(04)      VALUE ZEROES         
+                               COMP.                                            
+           05  PV-SYMBOLIC-FOUND           PIC S9(04)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PV-NET-CST-AMT              PIC -ZZ,ZZZ,ZZZ,ZZ9.99.              
+           05  PV-NET-CST-AMT-X REDEFINES PV-NET-CST-AMT                        
+                                           PIC X(18).                           
+           05  PV-EFF-FSCL-DATE-TEXT       PIC X(18)       VALUE SPACES.        
+           05  PV-EFF-FSCL-MONTH-NAME      PIC X(10)       VALUE SPACES.        
+           05  PV-FSCL-MONTH-NBR           PIC X(02)       VALUE SPACES.        
+           05  PV-FSCL-YEAR-NBR            PIC X(04)       VALUE SPACES.        
+           05  PV-BEG-FSCL-DATE            PIC X(10)       VALUE SPACES.        
+           05  PV-END-FSCL-DATE            PIC X(10)       VALUE SPACES.        
+           05  PV-EFF-FSCL-MONTH-NAME-ABBR PIC X(03)       VALUE SPACES.        
+           05  PV-EFF-FSCL-MONTH-END-DTE   PIC X(10)       VALUE SPACES.        
+           05  FILLER REDEFINES PV-EFF-FSCL-MONTH-END-DTE.                      
+               10  PV-EFF-FSCL-MONTH-END-YYYY                                   
+                                           PIC X(04).                           
+               10  FILLER                  PIC X(01).                           
+               10  PV-EFF-FSCL-MONTH-END-MM                                     
+                                           PIC X(02).                           
+               10  FILLER                  PIC X(01).                           
+               10  PV-EFF-FSCL-MONTH-END-DD                                     
+                                           PIC X(02).                           
+           05  PV-EFF-FSCL-MONTH-BEG-DTE   PIC X(10)       VALUE SPACES.        
+           05  FILLER REDEFINES PV-EFF-FSCL-MONTH-BEG-DTE.                      
+               10  PV-EFF-FSCL-MONTH-BEG-YYYY                                   
+                                           PIC X(04).                           
+               10  FILLER                  PIC X(01).                           
+               10  PV-EFF-FSCL-MONTH-BEG-MM                                     
+                                           PIC X(02).                           
+               10  FILLER                  PIC X(01).                           
+               10  PV-EFF-FSCL-MONTH-BEG-DD                                     
+                                           PIC X(02).                           
+           05  PV-CURR-FSCL-QTR-BEG.                                            
+               10  PV-CURR-BEG-DTE         PIC X(10)       VALUE SPACES.        
+               10  PV-CURR-BEG-TIME        PIC X(09)       VALUE                
+                   '-00.00.00'.                                                 
+           05  PV-CURR-FSCL-QTR-END.                                            
+               10  PV-CURR-END-DTE         PIC X(10)       VALUE SPACES.        
+               10  PV-CURR-END-TIME        PIC X(09)       VALUE                
+                   '-23.59.59'.                                                 
+8613F      05  PV-ORACLE-USERID-LEN        PIC S9(04)      VALUE ZEROS.         
+8613F      05  PV-ORACLE-PASSWORD-LEN      PIC S9(04)      VALUE ZEROS.         
+                                                                                
+       01  PV-ABEND-CODE                   PIC S9(04)      VALUE ZEROES         
+                               COMP SYNC.                                       
+           88  ABEND-4001-INV-WRITE-KEY                    VALUE +4001.         
+           88  ABEND-4002-INV-READ-KEY                     VALUE +4002.         
+           88  ABEND-4003-CNTL-CARD-ERRORS                 VALUE +4003.         
+           88  ABEND-4004-INTERNAL-ERROR                   VALUE +4004.         
+           88  ABEND-4005-OPEN-FILE-ERROR                  VALUE +4005.         
+           88  ABEND-4006-CLOSE-FILE-ERROR                 VALUE +4006.         
+           88  ABEND-4007-SEQUENCE-ERROR                   VALUE +4007.         
+           88  ABEND-4009-INVALID-DATA                     VALUE +4009.         
+           88  ABEND-4012-BAD-INTR-SORT                    VALUE +4012.         
+           88  ABEND-4013-DB-ERROR                         VALUE +4013.         
+                                                                                
+                                                                                
+       01  WS-MSG-TEXT                     PIC X(512)      VALUE SPACES.        
+       01  WS-MAX-SIZE                     PIC S9(09)      VALUE +512           
+                               COMP.                                            
+       01  WS-MSG-LENGTH                   PIC S9(09)      VALUE ZEROES         
+                               COMP.                                            
+                                                                                
+      ******************************************************************        
+      *    ORACLE DECLARE SECTION                                               
+      ******************************************************************        
+           EXEC SQL BEGIN DECLARE SECTION END-EXEC.                             
+                                                                                
+       01  USERNAME                        PIC X(10)      VARYING.              
+       01  PASSWD                          PIC X(10)      VARYING.              
+                                                                                
+      ******************************************************************        
+      * COBOL DECLARATION FOR DEBIT ALLOWANCE AVAIL VENDOR FUND TABLE           
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE DAT00002                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      ******************************************************************        
+      * COBOL DECLARATION FOR DEBIT ALLOWANCE CODE DESCRIPTION TABLE            
+      ******************************************************************        
+      *    EXEC SQL                                                             
+      *        INCLUDE TDACDE                                                   
+      *    END-EXEC.                                                            
+      ******************************************************************        
+      * COBOL DECLARATION FOR TABLE TDACDE                             *        
+      ******************************************************************        
+       01  DCLTDACDE.                                                           
+           10  DACDE-CDE-TYP-DESC          PIC X(26).                           
+           10  DACDE-CDE-VAL-CDE           PIC X(2).                            
+           10  DACDE-CDE-DESC              PIC X(30).                           
+           10  DACDE-ACTV-IND              PIC X(1).                            
+                                                                                
+      ******************************************************************        
+      * COBOL DECLARATION FOR DB2 XMT_VND TABLE                                 
+      ******************************************************************        
+      *    EXEC SQL                                                             
+      *        INCLUDE XMT00000                                                 
+      *    END-EXEC.                                                            
+       01  DCLXMT00000.                                                         
+           10 XMT00000-ENT-ID               PIC  S9(9) COMP.                    
+           10 XMT00000-PRIM-VND-NM          PIC   X(30).                        
+           10 XMT00000-VND-NBR              PIC   X(9).                         
+           10 XMT00000-STAT-CDE             PIC   X(1).                         
+           10 XMT00000-VND-CRE-TMST         PIC   X(26).                        
+           10 XMT00000-VND-LAST-UPD-TMST    PIC   X(26).                        
+           10 XMT00000-PRTNR-TYP-CDE        PIC   X(2).                         
+                                                                                
+      ******************************************************************        
+      * COBOL DECLARATION FOR DB2 MERCHANDISE HEIRARCHY TABLE                   
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TMDSEAR                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      * COBOL DECLARATION FOR DB2 RESPONSIBILITY TABLE                          
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TRSPBAR                                                  
+           END-EXEC.                                                            
+                                                                                
+                                                                                
+      ******************************************************************        
+      * DEBIT ALLOWANCE  CURSOR TO FIND DEBIT ALLOWANCE FUNDING.                
+      ******************************************************************        
+           EXEC SQL                                                             
+           DECLARE DEBIT_ALLWNC CURSOR FOR                                      
+             SELECT  DAT_AVL_VND_FUND.ENT_ID                                    
+                    ,DAT_AVL_VND_FUND.DEPT_NBR                                  
+                    ,TMDSEAR.GMA_NBR                                            
+                    ,TMDSEAR.DMA_NBR                                            
+                    ,TMDSEAR.BYR_NBR                                            
+                    ,SUM(DAT_AVL_VND_FUND.TTL_AVL_COST_AMT)                     
+                                                                                
+             FROM   DAT_AVL_VND_FUND                                            
+                   ,TMDSEAR                                                     
+             WHERE  TMDSEAR.DEPT_NBR = DAT_AVL_VND_FUND.DEPT_NBR                
+               AND  TMDSEAR.MDSELV_CDE = 'DPT'                                  
+               AND  TO_CHAR(TMDSEAR.STRT_DTE,'YYYY-MM-DD')                      
+                    <= :PV-EFF-FSCL-MONTH-BEG-DTE                               
+               AND  (TO_CHAR(TMDSEAR.END_DTE,'YYYY-MM-DD')                      
+                    >= :PV-EFF-FSCL-MONTH-END-DTE                               
+                    OR TMDSEAR.END_DTE IS NULL)                                 
+      *THIS SUBSELECT INSURES THAT AT LEAST ONE ROW WILL HAVE A POSITVE         
+      * REMAINING COST AMOUNT.                                                  
+       AND CONCAT(DAT_AVL_VND_FUND.ENT_ID,DAT_AVL_VND_FUND.DEPT_NBR) IN         
+          (SELECT CONCAT(A.ENT_ID,A.DEPT_NBR)                                   
+              FROM   DAT_AVL_VND_FUND A                                         
+              WHERE  A.RMNG_AVL_COST_AMT > 0)                                   
+             GROUP BY  DAT_AVL_VND_FUND.ENT_ID                                  
+                      ,DAT_AVL_VND_FUND.DEPT_NBR                                
+                      ,TMDSEAR.GMA_NBR                                          
+                      ,TMDSEAR.DMA_NBR                                          
+                      ,TMDSEAR.BYR_NBR                                          
+             ORDER BY DAT_AVL_VND_FUND.ENT_ID                                   
+                     ,TMDSEAR.BYR_NBR                                           
+                     ,DAT_AVL_VND_FUND.DEPT_NBR                                 
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL END DECLARE SECTION END-EXEC.                               
+      *                                                                         
+      * ORA COMMUNICATION AREA                                                  
+      *                                                                         
+        01       SQLCA.                                                         
+                 05  SQLCAID               PIC X(8).                            
+                 05  SQLCABC               PIC S9(9) COMPUTATIONAL.             
+                 05  SQLCODE               PIC S9(9) COMPUTATIONAL.             
+                 05  SQLERRM.                                                   
+                     49 SQLERRML           PIC S9(4) COMPUTATIONAL.             
+                     49 SQLERRMC           PIC X(70).                           
+                 05  SQLERRP               PIC X(8).                            
+                 05  SQLERRD OCCURS 6 TIMES                                     
+                                           PIC S9(9) COMPUTATIONAL.             
+                 05  SQLWARN.                                                   
+                     10 SQLWARN0           PIC X(1).                            
+                     10 SQLWARN1           PIC X(1).                            
+                     10 SQLWARN2           PIC X(1).                            
+                     10 SQLWARN3           PIC X(1).                            
+                     10 SQLWARN4           PIC X(1).                            
+                     10 SQLWARN5           PIC X(1).                            
+                     10 SQLWARN6           PIC X(1).                            
+                     10 SQLWARN7           PIC X(1).                            
+                 05  SQLEXT                PIC X(8).                            
+      ******************************************************************        
+      * ORA COMMUNICATION AREA2                                                 
+           COPY SQLCA2.                                                         
+                                                                                
+       LINKAGE SECTION.                                                         
+                                                                                
+       PROCEDURE DIVISION.                                                      
+                                                                                
+      ******************************************************************        
+      *    MAINLINE LOGIC                                              *        
+      ******************************************************************        
+                                                                                
+       0000-MAINLINE.                                                           
+                                                                                
+           PERFORM 1000-INITIALIZATION.                                         
+                                                                                
+           IF PV-RETURN-CODE > 0                                                
+             CONTINUE                                                           
+           ELSE                                                                 
+             PERFORM 8000-OPEN-DEBIT-ALLWNC-CSR                                 
+             PERFORM 8200-FETCH-DEBIT-ALLWNC-CSR                                
+             PERFORM 2000-PROCESS-DEBIT-ALLWNC                                  
+                 UNTIL PS-END-OF-DEBIT-ALLWNC                                   
+             PERFORM 8100-CLOSE-DEBIT-ALLWNC-CSR                                
+           END-IF.                                                              
+                                                                                
+           PERFORM 9900-EOJ-LOGIC.                                              
+                                                                                
+           GOBACK.                                                              
+                                                                                
+      ******************************************************************        
+      *    LOGON TO ORACLE, AND DECLARE THE ORACLE CURSORS.            *        
+      ******************************************************************        
+       1000-INITIALIZATION.                                                     
+                                                                                
+           INITIALIZE DPG51                                                     
+                      DPG52                                                     
+                      DPG53                                                     
+                      DPG54                                                     
+                      DPG55                                                     
+                      DPG56.                                                    
+                                                                                
+           SET DPG51-FISCAL-454-CALENDAR TO TRUE.                               
+           SET DPG52-LK-DTE-ISO-FMT      TO TRUE.                               
+                                                                                
+           OPEN INPUT  CONTROL-CARD-FILE                                        
+8613F                  ORACLE-LOGIN-FILE                                        
+                OUTPUT DEBIT-ALLOWANCE-FILE.                                    
+                                                                                
+           PERFORM 7000-READ-CONTROL-CARD-FILE.                                 
+           PERFORM 7000-READ-CONTROL-CARD-FILE                                  
+                   UNTIL PS-END-OF-CONTROL-CARDS                                
+                       OR CC-NOT-COMMENT.                                       
+                                                                                
+           IF PS-END-OF-CONTROL-CARDS                                           
+               DISPLAY '** ABEND **'                                            
+               DISPLAY '** PROGRAM ' PC-PROGRAM-NAME ' **'                      
+               DISPLAY '** CONTROL CARD DATE EMPTY'                             
+               SET ABEND-4003-CNTL-CARD-ERRORS TO TRUE                          
+               PERFORM 9999-ABEND                                               
+           ELSE                                                                 
+               DISPLAY ' EXECUTING WITH THIS CONTROL CARD:'                     
+               DISPLAY ' ----+----1----+----2----+----3----+----4'              
+                       '----+----5----+----6----+----7'                         
+               DISPLAY ' ' CC-CONTROL-CARD                                      
+           END-IF.                                                              
+                                                                                
+           PERFORM 1100-LOGON-TO-ORACLE.                                        
+                                                                                
+           PERFORM 8300-GET-FSCL-CLOSE-DOW.                                     
+           DISPLAY 'TDACDE FISCAL CLOSE DAY - ' DACDE-CDE-VAL-CDE.              
+           IF CC-FISCAL-DOW = DACDE-CDE-VAL-CDE                                 
+                                                                                
+             MOVE CC-PROCESS-DTE        TO DPG52-DB2-ISO-DATE-FMT               
+             CALL DP500-KOHLS-CALENDAR-ROUTINE                                  
+                 USING DPG51 DPG52 DPG53 DPG54 DPG55 DPG56                      
+             IF DPG54-NO-ERROR                                                  
+                 MOVE DPG56-FISCAL-PERIOD-NAME                                  
+                     TO PV-EFF-FSCL-MONTH-NAME                                  
+                 MOVE DPG56-FISCAL-PERIOD-NAME-ABBR3                            
+                     TO PV-EFF-FSCL-MONTH-NAME-ABBR                             
+                 MOVE DPG56-FIRST-FP-DB2-ISO-FMT                                
+                     TO PV-EFF-FSCL-MONTH-BEG-DTE                               
+                        PV-BEG-FSCL-DATE                                        
+                 MOVE DPG56-LAST-FP-DB2-ISO-FMT                                 
+                     TO PV-EFF-FSCL-MONTH-END-DTE                               
+                        PV-END-FSCL-DATE                                        
+             MOVE DPG56-FISCAL-PERIOD-NBR TO PV-FSCL-MONTH-NBR                  
+             MOVE DPG56-FIRST-FD-DB2-ISO-FMT-YR TO PV-FSCL-YEAR-NBR             
+                 DISPLAY 'FSCL DATE - ' PV-FSCL-MONTH-NBR                       
+                                  ' - ' PV-FSCL-YEAR-NBR                        
+                                  ' - ' PV-EFF-FSCL-MONTH-BEG-DTE               
+                                  ' - ' PV-EFF-FSCL-MONTH-END-DTE               
+             ELSE                                                               
+                 DISPLAY '** ABEND **'                                          
+                 DISPLAY '** PROGRAM ' PC-PROGRAM-NAME ' **'                    
+                 DISPLAY '** CALENDAR CALL ROUTINE FAIL FOR '                   
+                         'EFF-DTE OF ' CC-PROCESS-DTE                           
+                 SET ABEND-4009-INVALID-DATA     TO TRUE                        
+                 PERFORM 9999-ABEND                                             
+             END-IF                                                             
+           ELSE                                                                 
+             DISPLAY 'FISCAL DAY DOES NOT MATCH FISCAL CLOSE DAY -'             
+             CC-FISCAL-DOW ' - ' DACDE-CDE-VAL-CDE                              
+             'NO PROCESSING DONE' UPON CONSOLE                                  
+             MOVE 4095 TO PV-RETURN-CODE                                        
+                          RETURN-CODE                                           
+           END-IF.                                                              
+                                                                                
+           DISPLAY ' '.                                                         
+                                                                                
+                                                                                
+      ****************************************************************          
+      * LOGON                                                        *          
+      ****************************************************************          
+       1100-LOGON-TO-ORACLE.                                                    
+                                                                                
+           DISPLAY '**------ LOGGING ON TO ORACLE ------**'.                    
+                                                                                
+8613F      MOVE '1100-LOGON-TO-ORACLE'   TO PV-PARAGRAPH-NAME.                  
+8613F                                                                           
+8613F      READ ORACLE-LOGIN-FILE INTO CC-ORACLE-CONNECTION                     
+8613F         AT END                                                            
+8613F            SET ORACLE-LOGIN-EOF      TO TRUE.                             
+8613F                                                                           
+8613F      IF CC-AUTO-LOGON                                                     
+8613F         DISPLAY PC-PROGRAM-NAME ' - AUTO LOGON TO ORACLE'                 
+8613F         EXEC SQL                                                          
+8613F              CONNECT :PC-AUTO-LOGON                                       
+8613F         END-EXEC                                                          
+8613F      ELSE                                                                 
+8613F         INITIALIZE PV-ORACLE-USERID-LEN                                   
+8613F                    PV-ORACLE-PASSWORD-LEN                                 
+8613F         INSPECT CC-ORACLE-USERID                                          
+8613F                 TALLYING PV-ORACLE-USERID-LEN                             
+8613F                 FOR CHARACTERS BEFORE INITIAL SPACE                       
+8613F         INSPECT CC-ORACLE-PASSWORD                                        
+8613F                 TALLYING PV-ORACLE-PASSWORD-LEN                           
+8613F                 FOR CHARACTERS BEFORE INITIAL SPACE                       
+8613F         MOVE CC-ORACLE-USERID (1:PV-ORACLE-USERID-LEN)     TO             
+8613F                 USERNAME-ARR                                              
+8613F         MOVE PV-ORACLE-USERID-LEN    TO USERNAME-LEN                      
+8613F         MOVE CC-ORACLE-PASSWORD (1:PV-ORACLE-PASSWORD-LEN) TO             
+8613F                 PASSWD-ARR                                                
+8613F         MOVE PV-ORACLE-PASSWORD-LEN  TO PASSWD-LEN                        
+8613F         MOVE CC-ORACLE-PASSWORD (1:PV-ORACLE-PASSWORD-LEN) TO             
+8613F              PASSWD-ARR                                                   
+8613F         MOVE PV-ORACLE-PASSWORD-LEN  TO PASSWD-LEN                        
+8613F         MOVE CC-ORACLE-USERID (1:PV-ORACLE-USERID-LEN)     TO             
+8613F              USERNAME-ARR                                                 
+8613F         MOVE PV-ORACLE-USERID-LEN    TO USERNAME-LEN                      
+8613F         MOVE CC-ORACLE-PASSWORD (1:PV-ORACLE-PASSWORD-LEN) TO             
+8613F              PASSWD-ARR                                                   
+8613F         MOVE PV-ORACLE-PASSWORD-LEN  TO PASSWD-LEN                        
+8613F         DISPLAY PC-PROGRAM-NAME  ' - LOGON TO ORACLE AS USER '            
+8613F              USERNAME-ARR                                                 
+8613F         EXEC SQL                                                          
+8613F              CONNECT :USERNAME IDENTIFIED BY :PASSWD                      
+8613F         END-EXEC                                                          
+8613F         INITIALIZE CC-ORACLE-PASSWORD                                     
+8613F                    PASSWD                                                 
+8613F      END-IF.                                                              
+8613F                                                                           
+8613F      IF (SQLCODE NOT = 0)                                                 
+8613F          PERFORM 9990-SQL-ERROR                                           
+8613F      END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *    2000-PROCESS-DEBIT-ALLWNC                                   *        
+      *      THIS IS PERFORMED ONLY VIA THE 0000-MAINLINE              *        
+      *      PURPOSE: FETCH A ROW FROM THE DEBIT ALLOWANCE CURSOR,     *        
+      *               GET DA TOTALS, MANAGER AND BUYER AGREEMENT       *        
+      *               AND WRITE A FILE WITH THIS INFO.                 *        
+      ******************************************************************        
+       2000-PROCESS-DEBIT-ALLWNC.                                               
+                                                                                
+           MOVE ENT-ID                TO PV-ENT-ID.                             
+           MOVE DEPT-NBR              TO PV-DEPT-NBR.                           
+           MOVE PV-FSCL-MONTH-NBR        TO DA109-FSCL-MN-NBR.                  
+           MOVE PV-FSCL-YEAR-NBR         TO DA109-FSCL-YR-NBR.                  
+           MOVE PV-BEG-FSCL-DATE         TO DA109-BEG-FISCAL-DATE.              
+           MOVE PV-END-FSCL-DATE         TO DA109-END-FISCAL-DATE.              
+           MOVE PV-ENT-ID                TO DA109-ENTITY-ID.                    
+           MOVE PV-DEPT-NBR              TO DA109-DEPT-NBR.                     
+      * GET THE BEGINNING EFF DATE BASED ON KEYS RETRIEVED BY THE               
+      * CURSOR WHICH DRIVES THIS PROCESS.                                       
+           MOVE 0                        TO RMNG-AVL-COST-AMT.                  
+           PERFORM 8900-GET-MIN-EFF-BEG-DTE.                                    
+      * IF THESE DATES ARE EQUAL, THERE IS ONLY 1 ROW FOR THIS                  
+      * ENT_ID/DEPT_NBR. DAKRP114 NEEDS TO KNOW THIS WHEN COMPUTING             
+      * OPENING BALANCE.                                                        
+           IF EFF-END-DTE > PV-BEG-FSCL-DATE                                    
+           OR PV-BEG-FSCL-DATE = EFF-BEG-DTE                                    
+             MOVE 0                        TO DA109-PREV-BAL                    
+             MOVE 'N'                      TO DA109-PREV-PERIOD-IND             
+           ELSE                                                                 
+             MOVE 'Y'                      TO DA109-PREV-PERIOD-IND             
+             MOVE RMNG-AVL-COST-AMT        TO DA109-PREV-BAL                    
+           END-IF.                                                              
+           MOVE EFF-BEG-DTE (1:4)        TO DA109-BEG-FSCL-YR-NBR.              
+           MOVE EFF-BEG-DTE (6:2)        TO DA109-BEG-FSCL-MN-NBR.              
+      * TOTAL REMAINING FOR ALL OPEN PERIODS                                    
+           MOVE TTL-AVL-COST-AMT         TO DA109-TTL-AVL-COST-AMT-TOT.         
+      * REMAINING FOR CURRENT PERIOD                                            
+           PERFORM 8800-GET-RMNG-TOT.                                           
+           MOVE RMNG-AVL-COST-AMT        TO DA109-RMNG-AVL-COST-AMT-TOT.        
+           PERFORM 8400-GET-VENDOR.                                             
+           MOVE XMT00000-PRIM-VND-NM     TO DA109-VENDOR-NM.                    
+           MOVE XMT00000-VND-NBR         TO DA109-VENDOR-NBR.                   
+           MOVE MDSEAR-DMA-NBR           TO DA109-DMM-NBR.                      
+           MOVE MDSEAR-BYR-NBR           TO DA109-BUYER-NBR.                    
+                                                                                
+           PERFORM 8550-GET-DMM-INFO.                                           
+           MOVE PV-DMM-NAME              TO DA109-DMM-NM.                       
+           PERFORM 8575-GET-BUYER-INFO.                                         
+           MOVE PV-BUYER-NAME            TO DA109-BUYER-NM.                     
+                                                                                
+           PERFORM 7200-WRITE-DEBIT-ALLWCE-FILE.                                
+                                                                                
+           PERFORM 8200-FETCH-DEBIT-ALLWNC-CSR.                                 
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  READ CONTROL CARD FILE                                        *        
+      ******************************************************************        
+       7000-READ-CONTROL-CARD-FILE.                                             
+                                                                                
+           READ CONTROL-CARD-FILE INTO CC-CONTROL-CARD                          
+               AT END SET PS-END-OF-CONTROL-CARDS TO TRUE.                      
+                                                                                
+      ******************************************************************        
+      *  WRITE THE OUTPUT OF THE DEBIT ALLWCE FILE.                    *        
+      ******************************************************************        
+       7200-WRITE-DEBIT-ALLWCE-FILE.                                            
+                                                                                
+           ADD +1                    TO PA-DA-ALLWNC-RECORDS-WRITE.             
+                                                                                
+           WRITE DEBIT-ALLOWANCE-RECORD FROM DA109-AVL-VND-FUND-REC.            
+                                                                                
+      ******************************************************************        
+      *  OPEN DEBIT ALLOWANCE CURSOR                                   *        
+      ******************************************************************        
+       8000-OPEN-DEBIT-ALLWNC-CSR.                                              
+                                                                                
+           MOVE '8000-OPEN-DEBIT-ALLWNC-CSR' TO PV-PARAGRAPH-NAME.              
+                                                                                
+           EXEC SQL                                                             
+               OPEN DEBIT_ALLWNC                                                
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = 0                                                 
+                   SET PS-NOT-END-OF-DEBIT-ALLWNC TO TRUE                       
+               WHEN SQLCODE = 1403                                              
+                   SET PS-END-OF-DEBIT-ALLWNC     TO TRUE                       
+               WHEN OTHER                                                       
+                   PERFORM 9990-SQL-ERROR                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  CLOSE DEBIT ALLOWANCE CURSOR                                  *        
+      ******************************************************************        
+       8100-CLOSE-DEBIT-ALLWNC-CSR.                                             
+                                                                                
+           MOVE '8100-CLOSE-DEBIT-ALLWNC-CSR ' TO PV-PARAGRAPH-NAME.            
+                                                                                
+           EXEC SQL                                                             
+               CLOSE DEBIT_ALLWNC                                               
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = 0                                                 
+                   CONTINUE                                                     
+               WHEN OTHER                                                       
+                   PERFORM 9990-SQL-ERROR                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  FETCH THE NEXT ROW                                            *        
+      ******************************************************************        
+       8200-FETCH-DEBIT-ALLWNC-CSR.                                             
+                                                                                
+           MOVE '8200-FETCH-DEBIT-ALLWNC-CSR' TO PV-PARAGRAPH-NAME.             
+                                                                                
+           EXEC SQL                                                             
+               FETCH DEBIT_ALLWNC                                               
+               INTO                                                             
+                    :ENT-ID                                                     
+                   ,:DEPT-NBR                                                   
+                   ,:MDSEAR-GMA-NBR                                             
+                   ,:MDSEAR-DMA-NBR                                             
+                   ,:MDSEAR-BYR-NBR                                             
+                   ,:TTL-AVL-COST-AMT                                           
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = 0                                                 
+                   ADD +1                      TO PA-ROWS-FETCHED               
+               WHEN SQLCODE = 1403                                              
+                   SET PS-END-OF-DEBIT-ALLWNC  TO TRUE                          
+               WHEN OTHER                                                       
+                   PERFORM 9990-SQL-ERROR                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  GET FISCAL CLOSE DAY OF WEEK                                  *        
+      ******************************************************************        
+       8300-GET-FSCL-CLOSE-DOW.                                                 
+                                                                                
+           MOVE '8300-GET-FSCL-CLOSE-DOW' TO PV-PARAGRAPH-NAME.                 
+                                                                                
+           EXEC SQL                                                             
+               SELECT  CDE_VAL_CDE                                              
+               INTO    :DACDE-CDE-VAL-CDE                                       
+               FROM    TDACDE                                                   
+               WHERE   TDACDE.CDE_TYP_DESC = 'FISCAL CLOSE'                     
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = 0                                                 
+                   CONTINUE                                                     
+               WHEN OTHER                                                       
+                 PERFORM 9990-SQL-ERROR                                         
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  GET VENDOR INFORMATION                                        *        
+      ******************************************************************        
+       8400-GET-VENDOR.                                                         
+                                                                                
+           MOVE '8400-GET-VENDOR     ' TO PV-PARAGRAPH-NAME.                    
+                                                                                
+           EXEC SQL                                                             
+               SELECT                                                           
+                       PRIM_VND_NM                                              
+                      ,VND_NBR                                                  
+                 INTO                                                           
+                      :XMT00000-PRIM-VND-NM                                     
+                     ,:XMT00000-VND-NBR                                         
+                 FROM                                                           
+                       XMT_VND                                                  
+                 WHERE                                                          
+                       ENT_ID = :PV-ENT-ID                                      
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = 0                                                 
+                   CONTINUE                                                     
+               WHEN SQLCODE = 1403                                              
+                 DISPLAY '  *** COULD NOT FIND VENDOR INFO WITH '               
+                         PV-ENT-ID                                              
+                         ' AS PV-ENT-ID'                                        
+                 MOVE SPACE TO XMT00000-VND-NBR                                 
+                 STRING 'VENDOR NOT FOUND-ID=' DELIMITED BY SIZE                
+                       , PV-ENT-ID             DELIMITED BY SIZE                
+                 INTO XMT00000-PRIM-VND-NM                                      
+               WHEN OTHER                                                       
+                   PERFORM 9995-GET-SQL-MSG                                     
+                   IF WS-MSG-LENGTH > ZEROES                                    
+                       DISPLAY '   *** SQL CODE: ' SQLCODE                      
+                               ' MESSAGE: ' WS-MSG-TEXT(1:WS-MSG-LENGTH)        
+                   END-IF                                                       
+                   MOVE SPACES             TO XMT00000-PRIM-VND-NM              
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  GET GMA AND DMA NUMBERS                                       *        
+      ******************************************************************        
+      *8500-GET-GMA-DMA.                                                        
+      *                                                                         
+      *    MOVE '8500-GET-GMA-DMA    ' TO PV-PARAGRAPH-NAME.                    
+      *                                                                         
+      *    EXEC SQL                                                             
+      *        SELECT                                                           
+      *                GMA_NBR                                                  
+      *               ,DMA_NBR                                                  
+      *               ,BYR_NBR                                                  
+      *          INTO                                                           
+      *               :MDSEAR-GMA-NBR                                           
+      *              ,:MDSEAR-DMA-NBR                                           
+      *              ,:MDSEAR-BYR-NBR                                           
+      *          FROM                                                           
+      *                TMDSEAR A                                                
+      *          WHERE                                                          
+      *                A.DEPT_NBR   = :DEPT-NBR                                 
+      *            AND A.MDSELV_CDE = 'DPT'                                     
+      *            AND TO_CHAR(A.STRT_DTE,'YYYY-MM-DD')                         
+      *                <= :PV-EFF-FSCL-MONTH-END-DTE                            
+      *            AND (TO_CHAR(A.END_DTE,'YYYY-MM-DD')                         
+      *                >= :PV-EFF-FSCL-MONTH-END-DTE                            
+      *                OR A.END_DTE IS NULL)                                    
+      *    END-EXEC.                                                            
+      *                                                                         
+      *    EVALUATE TRUE                                                        
+      *        WHEN SQLCODE = 0                                                 
+      *            CONTINUE                                                     
+      *        WHEN OTHER                                                       
+      *            DISPLAY '  *** COULD NOT FIND GMA/DMA FOR DEPT '             
+      *                    DEPT-NBR                                             
+      *                    ' WITH DATE '                                        
+      *                    PV-EFF-FSCL-MONTH-END-DTE                            
+      *            PERFORM 9995-GET-SQL-MSG                                     
+      *            IF WS-MSG-LENGTH > ZEROES                                    
+      *                DISPLAY '   *** SQL CODE: ' SQLCODE                      
+      *                        ' MESSAGE: ' WS-MSG-TEXT(1:WS-MSG-LENGTH)        
+      *            END-IF                                                       
+      *            MOVE '??'              TO MDSEAR-GMA-NBR                     
+      *                                      MDSEAR-DMA-NBR                     
+      *    END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  GET DMM'S NAME AND USER-ID                                    *        
+      ******************************************************************        
+       8550-GET-DMM-INFO.                                                       
+                                                                                
+           MOVE '8550-GET-DMM-INFO   ' TO PV-PARAGRAPH-NAME.                    
+                                                                                
+           MOVE 'DMA'               TO MDSEAR-MDSELV-CDE.                       
+           PERFORM 8600-GET-MDSEAR.                                             
+           MOVE 'DMM'               TO RSPBAR-RSPLVL-CDE.                       
+           PERFORM 8700-GET-RSPBAR.                                             
+           IF RSPBAR-WORKER-NBR = ZEROES                                        
+               MOVE SPACES                 TO PV-DMM-NAME                       
+               MOVE ZEROES                 TO PV-DMM-WORKER-NBR                 
+           ELSE                                                                 
+               MOVE RSPBAR-WORKER-FIR-NAME TO PV-TEMP-FIRST-NAME                
+               MOVE RSPBAR-WORKER-LAST-NAME TO PV-TEMP-LAST-NAME                
+               MOVE RSPBAR-WORKER-NBR      TO PV-DMM-WORKER-NBR                 
+               MOVE SPACES TO PV-DMM-NAME                                       
+               STRING PV-TEMP-FIRST-NAME                                        
+                   DELIMITED BY '  '                                            
+                      ' '                                                       
+                   DELIMITED BY SIZE                                            
+                      PV-TEMP-LAST-NAME                                         
+                   DELIMITED BY '  '                                            
+                   INTO PV-DMM-NAME                                             
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  GET BUYER'S NAME AND USER-ID                                  *        
+      ******************************************************************        
+       8575-GET-BUYER-INFO.                                                     
+                                                                                
+           MOVE '8575-GET-BUYER-INFO ' TO PV-PARAGRAPH-NAME.                    
+                                                                                
+           MOVE 'DPT'               TO MDSEAR-MDSELV-CDE.                       
+           PERFORM 8600-GET-MDSEAR.                                             
+           MOVE 'BYR'               TO RSPBAR-RSPLVL-CDE.                       
+           PERFORM 8700-GET-RSPBAR.                                             
+           IF RSPBAR-WORKER-NBR = ZEROES                                        
+               MOVE SPACES                 TO PV-BUYER-NAME                     
+               MOVE ZEROES                 TO PV-BUYER-WORKER-NBR               
+           ELSE                                                                 
+               MOVE RSPBAR-WORKER-FIR-NAME TO PV-TEMP-FIRST-NAME                
+               MOVE RSPBAR-WORKER-LAST-NAME TO PV-TEMP-LAST-NAME                
+               MOVE SPACES TO PV-BUYER-NAME                                     
+               STRING PV-TEMP-FIRST-NAME                                        
+                   DELIMITED BY '  '                                            
+                      ' '                                                       
+                   DELIMITED BY SIZE                                            
+                      PV-TEMP-LAST-NAME                                         
+                   DELIMITED BY '  '                                            
+                   INTO PV-BUYER-NAME                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  GET MDSEAR KEY                                                *        
+      ******************************************************************        
+       8600-GET-MDSEAR.                                                         
+                                                                                
+           MOVE '8600-GET-MDSEAR     ' TO PV-PARAGRAPH-NAME.                    
+                                                                                
+           EXEC SQL                                                             
+               SELECT                                                           
+                       MDSEAR_DKEY                                              
+                 INTO                                                           
+                      :MDSEAR-DKEY                                              
+                 FROM                                                           
+                       TMDSEAR A                                                
+                 WHERE                                                          
+                       ((A.GMA_NBR    = :MDSEAR-GMA-NBR AND                     
+                         :MDSEAR-MDSELV-CDE = 'GMA') OR                         
+                        (A.DMA_NBR    = :MDSEAR-DMA-NBR AND                     
+                         :MDSEAR-MDSELV-CDE = 'DMA') OR                         
+                        (A.DEPT_NBR   = :DEPT-NBR AND                           
+                         :MDSEAR-MDSELV-CDE = 'DPT'))                           
+                   AND A.MDSELV_CDE = :MDSEAR-MDSELV-CDE                        
+                   AND TO_CHAR(A.STRT_DTE,'YYYY-MM-DD')                         
+                       <= :PV-EFF-FSCL-MONTH-END-DTE                            
+                   AND (TO_CHAR(A.END_DTE,'YYYY-MM-DD')                         
+                       >= :PV-EFF-FSCL-MONTH-END-DTE                            
+                       OR A.END_DTE IS NULL)                                    
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = 0                                                 
+                   CONTINUE                                                     
+               WHEN OTHER                                                       
+                   IF MDSEAR-MDSELV-CDE = 'DMA'                                 
+                       DISPLAY '  *** COULD NOT FIND DMA '                      
+                               MDSEAR-DMA-NBR                                   
+                               ' FOR DATE '                                     
+                               PV-EFF-FSCL-MONTH-END-DTE                        
+                   ELSE                                                         
+                       DISPLAY '  *** COULD NOT FIND DEPT '                     
+                               DEPT-NBR                                         
+                               ' FOR DATE '                                     
+                               PV-EFF-FSCL-MONTH-END-DTE                        
+                   END-IF                                                       
+                   PERFORM 9995-GET-SQL-MSG                                     
+                   IF WS-MSG-LENGTH > ZEROES                                    
+                       DISPLAY '   *** SQL CODE: ' SQLCODE                      
+                               ' MESSAGE: ' WS-MSG-TEXT(1:WS-MSG-LENGTH)        
+                   END-IF                                                       
+                   MOVE ZEROES            TO MDSEAR-DKEY                        
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  GET RESPONSIBILITY PERSON'S NAME                              *        
+      ******************************************************************        
+       8700-GET-RSPBAR.                                                         
+                                                                                
+           MOVE '8700-GET-RSPBAR     ' TO PV-PARAGRAPH-NAME.                    
+                                                                                
+           IF MDSEAR-DKEY = ZEROES                                              
+               MOVE SPACES            TO RSPBAR-WORKER-FIR-NAME                 
+                                         RSPBAR-WORKER-LAST-NAME                
+               MOVE ZEROES            TO RSPBAR-WORKER-NBR                      
+           ELSE                                                                 
+               EXEC SQL                                                         
+                   SELECT                                                       
+                           B.WORKER_FIR_NAME                                    
+                          ,B.WORKER_LAST_NAME                                   
+                          ,B.WORKER_NBR                                         
+                     INTO                                                       
+                          :RSPBAR-WORKER-FIR-NAME                               
+                         ,:RSPBAR-WORKER-LAST-NAME                              
+                         ,:RSPBAR-WORKER-NBR                                    
+                     FROM                                                       
+                           TRSPBAR B                                            
+                     WHERE                                                      
+                           B.MDSEAR_DKEY = :MDSEAR-DKEY                         
+                       AND B.RSPLVL_CDE = :RSPBAR-RSPLVL-CDE                    
+                       AND TO_CHAR(B.WORKER_STRT_DTE,'YYYY-MM-DD')              
+                           <= :PV-EFF-FSCL-MONTH-END-DTE                        
+                       AND (TO_CHAR(B.WORKER_END_DTE,'YYYY-MM-DD')              
+                           >= :PV-EFF-FSCL-MONTH-END-DTE                        
+                           OR B.WORKER_END_DTE IS NULL)                         
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       DISPLAY '  *** COULD NOT FIND '                          
+                               RSPBAR-RSPLVL-CDE                                
+                               ' NAME WITH DKEY '                               
+                               MDSEAR-DKEY                                      
+                               ' FOR DATE '                                     
+                               PV-EFF-FSCL-MONTH-END-DTE                        
+                       PERFORM 9995-GET-SQL-MSG                                 
+                       IF WS-MSG-LENGTH > ZEROES                                
+                           DISPLAY '   *** SQL CODE: ' SQLCODE                  
+                                   ' MESSAGE: '                                 
+                                   WS-MSG-TEXT(1:WS-MSG-LENGTH)                 
+                       END-IF                                                   
+                       MOVE SPACES            TO RSPBAR-WORKER-FIR-NAME         
+                                                 RSPBAR-WORKER-LAST-NAME        
+                       MOVE ZEROES            TO RSPBAR-WORKER-NBR              
+               END-EVALUATE                                                     
+           END-IF.                                                              
+                                                                                
+      * CHECK TO SEE IF THE FIRST NAME CONTAINED NOT ASSIGNED LITERAL           
+           MOVE ZEROES                TO PV-SYMBOLIC-FOUND.                     
+           INSPECT RSPBAR-WORKER-FIR-NAME                                       
+               TALLYING PV-SYMBOLIC-FOUND                                       
+               FOR ALL 'OPEN' 'MISCELLANEOUS'.                                  
+      * THERE IS AT LEAST ONE OCCURRENCE                                        
+           IF PV-SYMBOLIC-FOUND > ZEROES                                        
+               DISPLAY '  *** FOUND MISC/OPEN IN FIRST-NAME: '                  
+                       RSPBAR-WORKER-FIR-NAME                                   
+               MOVE SPACES            TO RSPBAR-WORKER-FIR-NAME                 
+                                         RSPBAR-WORKER-LAST-NAME                
+               MOVE ZEROES            TO RSPBAR-WORKER-NBR                      
+           END-IF.                                                              
+                                                                                
+      * CHECK TO SEE IF THE LAST NAME CONTAINED NOT ASSIGNED LITERAL            
+           MOVE ZEROES                TO PV-SYMBOLIC-FOUND.                     
+           INSPECT RSPBAR-WORKER-LAST-NAME                                      
+               TALLYING PV-SYMBOLIC-FOUND                                       
+               FOR ALL 'OPEN' 'MISCELLANEOUS'.                                  
+      * THERE IS AT LEAST ONE OCCURRENCE                                        
+           IF PV-SYMBOLIC-FOUND > ZEROES                                        
+               DISPLAY '  *** FOUND MISC/OPEN IN LAST-NAME: '                   
+                       RSPBAR-WORKER-LAST-NAME                                  
+               MOVE SPACES            TO RSPBAR-WORKER-FIR-NAME                 
+                                         RSPBAR-WORKER-LAST-NAME                
+               MOVE ZEROES            TO RSPBAR-WORKER-NBR                      
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  GET REMAINING TOTL (CURR PERIOD ONLY)                         *        
+      ******************************************************************        
+       8800-GET-RMNG-TOT.                                                       
+                                                                                
+           MOVE '8800-GET-RMNG-TOT   ' TO PV-PARAGRAPH-NAME.                    
+                                                                                
+           EXEC SQL                                                             
+             SELECT  DAT_AVL_VND_FUND.ENT_ID                                    
+                    ,DAT_AVL_VND_FUND.DEPT_NBR                                  
+                    ,SUM(DAT_AVL_VND_FUND.RMNG_AVL_COST_AMT)                    
+             INTO   :PV-ENT-ID                                                  
+                   ,:PV-DEPT-NBR                                                
+                   ,:RMNG-AVL-COST-AMT                                          
+             FROM   DAT_AVL_VND_FUND                                            
+             WHERE  DAT_AVL_VND_FUND.ENT_ID   = :PV-ENT-ID                      
+               AND  DAT_AVL_VND_FUND.DEPT_NBR = :PV-DEPT-NBR                    
+             GROUP BY DAT_AVL_VND_FUND.ENT_ID                                   
+                     ,DAT_AVL_VND_FUND.DEPT_NBR                                 
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = 0                                                 
+                   CONTINUE                                                     
+               WHEN SQLCODE = +1403                                             
+                 CONTINUE                                                       
+               WHEN OTHER                                                       
+                 DISPLAY 'ERROR GETTING RMNG TOT- ' PV-ENT-ID                   
+                                              ' - ' PV-DEPT-NBR                 
+                                  ' - '  PV-EFF-FSCL-MONTH-BEG-DTE              
+                 PERFORM 9990-SQL-ERROR                                         
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  GET REMAINING TOTL (CURR PERIOD ONLY)                         *        
+      ******************************************************************        
+       8900-GET-MIN-EFF-BEG-DTE.                                                
+                                                                                
+           MOVE '8900-GET-MIN-EFF-BEG-DTE' TO PV-PARAGRAPH-NAME.                
+                                                                                
+      * THE SUBSELECT FINDS THE EARLIEST EFF_BEG_DTE FOR ENT_ID/DEPT            
+           EXEC SQL                                                             
+             SELECT RMNG_AVL_COST_AMT                                           
+                   ,TO_CHAR((A.EFF_BEG_DTE),'YYYY-MM-DD')                       
+                   ,TO_CHAR((A.EFF_END_DTE),'YYYY-MM-DD')                       
+             INTO :RMNG-AVL-COST-AMT                                            
+                 ,:EFF-BEG-DTE                                                  
+                 ,:EFF-END-DTE                                                  
+             FROM   DAT_AVL_VND_FUND A                                          
+             WHERE  A.ENT_ID  = :ENT-ID                                         
+               AND  A.DEPT_NBR = :DEPT-NBR                                      
+               AND  TO_CHAR((A.EFF_BEG_DTE),'YYYY-MM-DD') =                     
+              (SELECT                                                           
+                   TO_CHAR(MIN(B.EFF_BEG_DTE),'YYYY-MM-DD')                     
+               FROM   DAT_AVL_VND_FUND B                                        
+               WHERE  B.ENT_ID   = :ENT-ID                                      
+                 AND  B.DEPT_NBR = :DEPT-NBR)                                   
+           END-EXEC.                                                            
+                                                                                
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = 0                                                 
+                   CONTINUE                                                     
+               WHEN SQLCODE = +1403                                             
+               WHEN SQLCODE = +1405                                             
+                   CONTINUE                                                     
+               WHEN OTHER                                                       
+                   PERFORM 9990-SQL-ERROR                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *    9900-EOJ-LOGIC.                                             *        
+      *      THIS IS PERFORMED AT END OF DRIVING CURSOR                *        
+      *      PURPOSE: CLOSE INPUT FILE AND DISPLAY RECORD COUNTS       *        
+      ******************************************************************        
+       9900-EOJ-LOGIC.                                                          
+           CLOSE CONTROL-CARD-FILE                                              
+                 DEBIT-ALLOWANCE-FILE.                                          
+                                                                                
+           DISPLAY ' '.                                                         
+           DISPLAY 'DA RECORDS  WRITTEN ' PA-DA-ALLWNC-RECORDS-WRITE.           
+           DISPLAY '**------ END ' PC-PROGRAM-NAME ' ------**'.                 
+                                                                                
+                                                                                
+      ******************************************************************        
+      * DISPLAYS ERRORS ENCOUNTERED ON SQL REQUEST                              
+      ******************************************************************        
+       9990-SQL-ERROR.                                                          
+                                                                                
+           MOVE SQLCODE    TO SQLCODE2.                                         
+           MOVE SQLERRD(3) TO SQLERRD3.                                         
+           DISPLAY '** ABEND **       ** = SQLERROR'.                           
+           DISPLAY '** PROGRAM        ** = ' PC-PROGRAM-NAME.                   
+           DISPLAY '** PARAGRAPH      ** = ' PV-PARAGRAPH-NAME.                 
+           DISPLAY '** SQLCODE        ** = ' SQLCODE2.                          
+           DISPLAY '** ROWS PROCESSED ** = ' SQLERRD3.                          
+           DISPLAY '** SQLERRM        ** = ' SQLERRM.                           
+           DISPLAY '** SQLERRMC       ** = ' SQLERRMC.                          
+           DISPLAY '** SQLERRD(5)     ** = ' SQLERRD(5).                        
+                                                                                
+           PERFORM 9995-GET-SQL-MSG.                                            
+           IF WS-MSG-LENGTH > ZEROES                                            
+               DISPLAY ' ** MESSAGE TEXT      ** = '                            
+                       WS-MSG-TEXT(1:WS-MSG-LENGTH)                             
+           END-IF.                                                              
+           SET ABEND-4013-DB-ERROR  TO TRUE.                                    
+                                                                                
+           PERFORM 9999-ABEND.                                                  
+                                                                                
+      ******************************************************************        
+      * GET ORACLE SQL ERROR MESSAGE                                            
+      ******************************************************************        
+       9995-GET-SQL-MSG.                                                        
+                                                                                
+           MOVE SPACES TO WS-MSG-TEXT.                                          
+                                                                                
+           CALL 'SQLGLM' USING WS-MSG-TEXT,                                     
+                               WS-MAX-SIZE,                                     
+                               WS-MSG-LENGTH.                                   
+                                                                                
+      ******************************************************************        
+      * PROGRAM ABEND PARAGRAPH                                                 
+      ******************************************************************        
+       9999-ABEND.                                                              
+                                                                                
+           CALL 'ILBOABN0'  USING PV-ABEND-CODE.                                
+                                                                                
+                                                                                
+      ******************************************************************        
+      *    END OF SOURCE CODE FOR DAKUT314                            *         
+      ******************************************************************        

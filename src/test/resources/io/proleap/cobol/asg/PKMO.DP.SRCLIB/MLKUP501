@@ -1,0 +1,1179 @@
+       IDENTIFICATION DIVISION.                                                 
+                                                                                
+       PROGRAM-ID.    MLKUP501                                                  
+       AUTHOR.        JAN BLAZICH.                                              
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+       DATE-WRITTEN.  5/20/04.                                                  
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *    MLKUP501 - GROSS MARGIN UPDATE PROGRAM                      *        
+      *             - INSERT/UPDATE DAILY GROSS MARGIN TABLE           *        
+      *             - (MLT_DLY_DEPT_SLS)                               *        
+      ******************************************************************        
+                                                                                
+W27261******************************************************************        
+W27261* 27261    07-13-2004 J.M. DRAWS - REMOVE THE STATS REPORT AND            
+W27261*          DISPLAY THE STATS IN SYSOUT INSTEAD. THIS RESULTS IN           
+W27261*          NOT NEEDING THE BEGIN & END DATES IN THE CONTROL CARD          
+W27261*          CLEANUP COMPILE WARNINGS                                       
+W27261******************************************************************        
+R27261* 27261    08-03-2004 J.M. DRAWS - ADD CODE TO ALLOW THE PROGRAM          
+R27261*          TO BACKOUT TRANSACTIONS BY CHANGING THE SIGN OF THE            
+R27261*          TRANSATION AMOUNT BEFORE IT IS USED FOR UDATE.                 
+R27261*          DONE IN PARAGRAPH 7100-UPDATE-DLYDPT-ROW.                      
+R27261******************************************************************        
+      ******************************************************************        
+      * 27261    08-05-2004 S. ASEN    - CHG READ OF CONSOLIDATED FILE          
+      *          IN PARA 4000- TO REMOVE PERIOD IN MIDDLE OF IF STMNT           
+      *          IF MORE INPUT RECORDS EXIST.  WILL CORRECTLY COUNT             
+      *          NUMBER OF INPUT RECORDS.                                       
+      ******************************************************************        
+      ******************************************************************        
+      * 11762    09-14-2012 COGNIZANT - CHANGES MADE TO DISPLAY THE             
+      *          RESTART INFORMATION ACCURATELY ON RESTART.                     
+      ******************************************************************        
+0124RM******************************************************************        
+0124RM*          01-10-2024 MCASEY - UDPATE PC-JOB-NAME TO CURRENT JOB          
+0124RM*          AND CREATE A CHECKPOINT RESTART ROW IN TCKRSTCNTL              
+0124RM*          AND REMOVE LOGIC TO INS AND DEL NEW CHCKPT RESART ROW          
+0124RM******************************************************************        
+       ENVIRONMENT DIVISION.                                                    
+                                                                                
+       CONFIGURATION SECTION.                                                   
+       SOURCE-COMPUTER.        IBM-3090.                                        
+       OBJECT-COMPUTER.        IBM-3090.                                        
+       INPUT-OUTPUT SECTION.                                                    
+       FILE-CONTROL.                                                            
+           SELECT CONSOLIDATED-EXTR                                             
+               ASSIGN TO INP01.                                                 
+                                                                                
+           SELECT CONTROL-CARD-FILE                                             
+               ASSIGN TO INP02.                                                 
+                                                                                
+       DATA DIVISION.                                                           
+       FILE SECTION.                                                            
+                                                                                
+       FD  CONSOLIDATED-EXTR                                                    
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  CONSOL-EXTR-REC             PIC X(150).                              
+      *                                                                         
+       FD  CONTROL-CARD-FILE                                                    
+           RECORDING  MODE IS F.                                                
+       01  CONTROL-CARD-REC            PIC X(80).                               
+      *                                                                         
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  ABEND-CODE                  PIC S9(04)  VALUE ZERO COMP SYNC.        
+                                                                                
+       01  CC-CONTROL-CARD.                                                     
+           05  FILLER                          PIC X(1).                        
+           05  CC-FISCAL-WEEK                  PIC X(1).                        
+           05  FILLER                          PIC X(1).                        
+           05  CC-PRCG-DTE                     PIC X(10).                       
+           05  FILLER     REDEFINES CC-PRCG-DTE.                                
+               10  FILLER                      PIC X(2).                        
+               10  CC-PRCG-YY                  PIC X(2).                        
+               10  FILLER                      PIC X(1).                        
+               10  CC-PRCG-MM                  PIC X(2).                        
+               10  FILLER                      PIC X(1).                        
+               10  CC-PRCG-DD                  PIC X(2).                        
+           05  FILLER                          PIC X(1).                        
+           05  CC-PROCESSING-MODE              PIC X(04).                       
+               88  CC-PROCESSING-MODE-VALID    VALUE 'ML'  'INV' 'BOTH'.        
+               88  CC-PROCESSING-MODE-ML       VALUE 'ML'  'BOTH'.              
+               88  CC-PROCESSING-MODE-ML-ONLY  VALUE 'ML'.                      
+               88  CC-PROCESSING-MODE-INV      VALUE 'INV' 'BOTH'.              
+               88  CC-PROCESSING-MODE-INV-ONLY VALUE 'INV'.                     
+           05  FILLER                          PIC X.                           
+           05  CC-CHECK-INV-DATES-SW           PIC X.                           
+               88  CC-CHECK-INV-DATES-SW-VALID VALUE 'Y' 'N'.                   
+               88  CC-CHECK-INV-DATES          VALUE 'Y'.                       
+               88  CC-DONT-CHECK-INV-DATES     VALUE 'N'.                       
+           05  FILLER                          PIC X(01).                       
+      ******************************************************************        
+      * CC-DAILY-CUTOFF-IND IS SET TO "Y" DURING CUTOFF WEEK RUNS               
+      ******************************************************************        
+           05  CC-DAILY-CUTOFF-IND             PIC X(01).                       
+               88  CC-DAILY-CUTOFF-IND-IS-VALID VALUE 'Y' 'N'.                  
+           05  FILLER                          PIC X(01).                       
+      *================================================================*02162000
+      * CC-DGM-RUN-IND IS USED TO REQUEST A DAILY GROSS MARGIN RUN. WHEN02163000
+      * SET TO 'Y' CC-DGM-PROCESSING-DATE MUST BE PROVIDED.                     
+      *================================================================*02162000
+           05  CC-DGM-RUN-IND                  PIC X(01).                       
+R27261     05  FILLER                          PIC X(01).                       
+R27261     05  CC-BACKOUT-IND                  PIC X(01).                       
+R27261     05  FILLER                          PIC X(54).                       
+                                                                                
+       01  PC-PROGRAM-CONSTANTS.                                                
+      * JOB NAME IN THE RESTART RECORD WILL CONTAIN THE PROCESSING DTE          
+0124RM*    05  PC-JOB-NAME             PIC  X(08)    VALUE 'MLK042'.            
+0124RM*--GOING FORWARD THE JOB-NAME WILL REMAIN MLK041                          
+0124RM     05  PC-JOB-NAME             PIC  X(08)    VALUE 'MLK041'.            
+           05  PC-PROGRAM-NAME         PIC  X(08)    VALUE 'MLKUP501'.          
+           05  PC-MAX-DEADLOCKS        PIC S9(03) VALUE +10.                    
+                                                                                
+       01  PE-PROGRAM-ERROR-MESSAGES.                                           
+           05  PE-MSG-01                       PIC X(54) VALUE                  
+                'ATTEMPT TO SELECT ROW FOR UPDATE/INSERT FAILED   '.            
+           05  PE-MSG-02                       PIC X(54) VALUE                  
+               'ATTEMPT TO UPDATE ROW ON TABLE MLT_DLY_DEPT_SLS FAILED'.        
+           05  PE-MSG-03                       PIC X(54) VALUE                  
+               'ATTEMPT TO INSERT ROW ON TABLE MLT_DLY_DEPT_SLS FAILED'.        
+           05  PE-MSG-04                       PIC X(54) VALUE                  
+                'ERROR IN SELECT ''STATUS CODE'' FROM TCKRSCNTL  '.             
+           05  PE-MSG-05                       PIC X(54) VALUE                  
+                'UPDATE TO ''WORK_STRG_DESC'' ON TCKRSTINF FAILED '.            
+           05  PE-MSG-06                       PIC X(54) VALUE                  
+                'PROGRAM ABENDED WHILE TRYING TO PERFORM A COMMIT '.            
+           05  PE-MSG-07                       PIC X(54) VALUE                  
+                'PROGRAM MAXIMUM DEADLOCK COUNT HAS BEEN EXCEEDED'.             
+           05  PE-MSG-08                       PIC X(54) VALUE                  
+                'SELECT OF CHECKPOINT RESTART INFO FROM TCKRSTINF'.             
+           05  PE-MSG-09                       PIC X(54) VALUE                  
+                'SET HOLD TIMESTAMP EQUAL TO CURRENT TIMESTAMP  '.              
+           05  PE-MSG-10                       PIC X(54) VALUE                  
+                'UPDATE OF STATUS CODE ON TCKRSTCNTL UNSUCCESSFUL'.             
+           05  PE-MSG-11                       PIC X(54) VALUE                  
+                'ATTEMPT TO READ TCKRSTCNTL '.                                  
+           05  PE-MSG-12                       PIC X(54) VALUE                  
+                'CONTROL CARD MISSING - START FROM BEGINNING     '.             
+           05  PE-MSG-13                       PIC X(54) VALUE                  
+                'ATTEMPT TO SUM SALES AND MARKDOWN AMOUNTS       '.             
+           05  PE-MSG-14                       PIC X(54) VALUE                  
+                'ML100-FIN-LIAB-DTE DOES NOT MATCH CONTROL CARD  '.             
+           05  PE-MSG-15                       PIC X(54) VALUE                  
+                'DEPARTMENT NUMBER IS NOT NUMERIC                '.             
+           05  PE-MSG-16                       PIC X(54) VALUE                  
+                'DELETE OF TCKRSTINF UNSUCCESSFUL'.                             
+           05  PE-MSG-17                       PIC X(54) VALUE                  
+                'DELETE OF TCKRSTCNTL UNSUCCESSFUL'.                            
+      *                                                                         
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-EXTR-EOF-SW               PIC  X        VALUE 'N'.            
+               88  PS-MORE-INPUT-RECORDS                  VALUE 'N'.            
+               88  PS-NO-MORE-INPUT-RECORDS               VALUE 'Y'.            
+           05  PS-CONTROL-EOF-SW            PIC  X        VALUE 'N'.            
+               88  PS-END-OF-CONTROL-FILE                 VALUE 'Y'.            
+           05  PS-EMPTY-FILE-SW             PIC  X        VALUE 'N'.            
+               88  PS-EMPTY-INPUT-FILE                    VALUE 'Y'.            
+           05  PS-WKDPT-CURSOR-EOF-SW       PIC  X        VALUE 'N'.            
+               88  PS-END-OF-TABLE-RECS                   VALUE 'Y'.            
+           05  PS-FIRST-COMMIT-SW           PIC X         VALUE 'N'.            
+               88  PS-FIRST-COMMIT                        VALUE 'Y'.            
+           05  PS-DEADLOCK-RESTART-SW       PIC X         VALUE 'N'.            
+               88  PS-PROGRAM-DEADLOCKED                  VALUE 'Y'.            
+           05  PS-PROCESSING-OPTIONS        PIC X         VALUE 'P'.            
+               88  PS-UPDATE-DLYDPT-ROW                   VALUE 'U'.            
+               88  PS-INSERT-DLYDPT-ROW                   VALUE 'I'.            
+      *                                                                         
+       01  PROGRAM-VARIABLES.                                                   
+           05  PV-DEADLOCK-COUNT               PIC S9(04) VALUE +0.             
+           05  PV-PARAGRAPH-NAME               PIC  X(30) VALUE SPACES.         
+           05  PV-ABEND-MESSAGE                PIC  X(75) VALUE SPACES.         
+           05  PV-OPERATION-ATTEMPTED          PIC  X(50) VALUE SPACES.         
+           05  PV-CURRENT-TIMESTAMP            PIC  X(26) VALUE SPACES.         
+           05  PV-COMMIT-TIMESTAMP             PIC  X(26).                      
+           05  FILLER REDEFINES PV-COMMIT-TIMESTAMP.                            
+               10  PV-DATE                     PIC 9999B99B99.                  
+               10  PV-DATE-R REDEFINES PV-DATE.                                 
+                   15  FILLER                  PIC 9999.                        
+                   15  PV-DASH1                PIC X.                           
+                   15  FILLER                  PIC 99.                          
+                   15  PV-DASH2                PIC X.                           
+                   15  FILLER                  PIC 99.                          
+               10  PV-DASH3                    PIC X.                           
+               10  PV-TIME                     PIC X(8).                        
+               10  PV-TIME-R REDEFINES PV-TIME.                                 
+                   15  FILLER                  PIC 99.                          
+                   15  PV-DOT1                 PIC X.                           
+                   15  FILLER                  PIC 99.                          
+                   15  PV-DOT2                 PIC X.                           
+                   15  FILLER                  PIC 99.                          
+               10  PV-DOT3                     PIC X.                           
+               10  PV-MICROSECS                PIC 9(6).                        
+      *                                                                         
+       01  PA-PROGRAM-ACCUMULATORS.                                             
+           05  PA-RECORD-COUNTS.                                                
+               10  PA-INPUT-COUNT              PIC  9(9)  VALUE ZEROES.         
+               10  PA-UPDATE-COUNT             PIC  9(9)  VALUE ZEROES.         
+               10  PA-INSERT-COUNT             PIC  9(9)  VALUE ZEROES.         
+               10  PA-DEPTS-PROCESSED          PIC  9(9)  VALUE ZEROES.         
+               10  PA-COMMIT-COUNT             PIC  9(9)  VALUE ZEROES.         
+               10  PA-DELAY-COUNTER            PIC  9(9)  VALUE ZEROES.         
+      *                                                                         
+       01  SAVE-AREA.                                                           
+           05  SV-PRIMARY-KEY.                                                  
+               10  SV-PRCG-DTE           PIC X(10)         VALUE SPACES.        
+               10  SV-STR-NBR            PIC S9(4) COMP    VALUE +0.            
+               10  SV-DEPT-NBR           PIC X(03)         VALUE SPACES.        
+      ******************************************************************        
+      *  MLRD100.                                                               
+      ******************************************************************        
+      *                                                                         
+           COPY MLRD100.                                                        
+      *                                                                         
+      ******************************************************************        
+      *  MISCELLANEOUS WORK AREAS                                               
+      ******************************************************************        
+       01  WK-AREAS.                                                            
+           05  WK-DEPT-NBR                 PIC X(3).                            
+           05  WK-DEPT-NBR-9               REDEFINES WK-DEPT-NBR                
+                                           PIC 9(3).                            
+           05  WK-DEPT-NBR-PKD             PIC S9(4)V  COMP-3.                  
+           05  WK-STR-NBR                  PIC 9(8).                            
+           05  WK-PRCG-INFO.                                                    
+               10  WK-PRCG-YY              PIC X(2).                            
+               10  WK-PRCG-MM              PIC X(2).                            
+               10  WK-PRCG-DD              PIC X(2).                            
+               10  WK-PRCG-RUN-ID          PIC X(1).                            
+               10  FILLER                  PIC X(1)   VALUE SPACE.              
+           05  WK-COMMIT-INTERVAL          PIC 9(5)   VALUE ZERO.               
+           05  WK-COMMIT-REMAINDER         PIC 9(5)   VALUE ZERO.               
+           05  WK-CONTROL-TOTALS.                                               
+               10  CTL-SLS-RTL-AMT      PIC S9(13)V99   COMP-3 VALUE +0.        
+               10  CTL-MKDN-RTL-AMT     PIC S9(13)V99   COMP-3 VALUE +0.        
+               10  PST-SLS-RTL-AMT      PIC S9(13)V99   COMP-3 VALUE +0.        
+               10  PST-MKDN-RTL-AMT     PIC S9(13)V99   COMP-3 VALUE +0.        
+      *                                                                         
+      ******************************************************************        
+      *  TOTALS LINE                                                            
+      ******************************************************************        
+       01  PRINT-LINE.                                                          
+           05  FILLER          PIC X.                                           
+           05  T-HDR-1         PIC X(20).                                       
+           05  T-AMT-1         PIC Z,ZZZ,ZZZ,ZZZ,ZZ9.99-.                       
+           05  T-AMT-1-0       REDEFINES T-AMT-1                                
+                               PIC ZZZZ,ZZZ,ZZZ,ZZZ,ZZ9-.                       
+           05  FILLER          PIC X.                                           
+           05  T-HDR-2         PIC X(13).                                       
+           05  T-AMT-2         PIC Z,ZZZ,ZZZ,ZZZ,ZZ9.99-.                       
+W27261     05  FILLER          PIC X(3).                                        
+                                                                                
+       01  DETAIL-LINE         REDEFINES PRINT-LINE.                            
+W27261     05  FILLER          PIC X.                                           
+           05  P-PART-1        PIC X(30).                                       
+           05  P-PART-2        PIC ZZZ9.                                        
+W27261     05  P-PART-3        PIC X(45).                                       
+       01  MESSAGE-LINE        REDEFINES PRINT-LINE.                            
+W27261     05  FILLER          PIC X.                                           
+W27261     05  M-PART-1        PIC X(79).                                       
+                                                                                
+      *                                                                         
+      ******************************************************************        
+      *  DB2 ERROR MESSAGES FORMAT AREA.                                        
+      ******************************************************************        
+           COPY DPWS004.                                                        
+      *                                                                         
+      ******************************************************************        
+      *  USED FOR DB2 ERRORS                                                    
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+      *                                                                         
+      ******************************************************************        
+      * MLT_DLY_DEPT_SALES - M/L DAILY GROSS MARGIN TABLE                       
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE MLT00001                                                 
+           END-EXEC.                                                            
+      *                                                                         
+      *****************************************************************         
+      * DB2 CHECKPOINT RESTART CONTROL TABLE AND RESTART INFO TABLE             
+      *****************************************************************         
+           EXEC SQL                                                             
+               INCLUDE TCKRSTCN                                                 
+           END-EXEC.                                                            
+      *                                                                         
+           EXEC SQL                                                             
+               INCLUDE TCKRSTIN                                                 
+           END-EXEC.                                                            
+      *                                                                         
+      ******************************************************************        
+      * CHECKPOINT RESTART VARIABLES AND PREV COMMIT VARIABLES.        *        
+      ******************************************************************        
+       01  CR-CHECKPOINT-RESTART-AREA.                                          
+           05  CR-AREA-LEN                  PIC S9(04) VALUE +73  COMP.         
+           05  CR-CHECKPOINT-RESTART-VAR.                                       
+               10  CR-PREV-DTL-KEY          PIC  X(27) VALUE SPACES.            
+               10  FILLER REDEFINES CR-PREV-DTL-KEY.                            
+                   15  CR-FISCAL-NBR        PIC  X(02).                         
+                   15  CR-FISCAL-WK-END-DTE PIC  X(10).                         
+                   15  CR-PRCG-DTE          PIC  X(10).                         
+                   15  CR-STR-NBR           PIC  S9(4) COMP.                    
+                   15  CR-DEPT-NBR          PIC  S9(4) COMP-3.                  
+               10  FILLER                   PIC  X(01) VALUE SPACES.            
+               10  CR-INPUT-READ-COUNT      PIC  9(09) VALUE ZEROES.            
+               10  CR-UPDATE-COUNT          PIC  9(09) VALUE ZEROES.            
+               10  CR-INSERT-COUNT          PIC  9(09) VALUE ZEROES.            
+               10  CR-DEPTS-PROCESSED       PIC  9(09) VALUE ZEROES.            
+               10  CR-COMMIT-COUNT          PIC  9(09) VALUE ZEROES.            
+      *                                                                         
+       01  CK-CHECKPOINT-SAVE-AREA.                                             
+           05  CK-SAVE-PREV-KEY         PIC  X(27) VALUE SPACES.                
+           05  FILLER REDEFINES CK-SAVE-PREV-KEY.                               
+               10  CK-FISCAL-NBR        PIC  X(02).                             
+               10  CK-FISCAL-WK-END-DTE PIC  X(10).                             
+               10  CK-PRCS-DTE          PIC  X(10).                             
+               10  CK-STR-NBR           PIC  S9(4) COMP.                        
+               10  CK-DEPT-NBR          PIC  S9(4) COMP-3.                      
+      *                                                                         
+      *                                                                         
+      *                                                                         
+      *                                                                         
+       LINKAGE SECTION.                                                         
+      *-------------------*                                                     
+       PROCEDURE DIVISION.                                                      
+      *-------------------*                                                     
+                                                                                
+       0000-MAIN-MODULE.                                                        
+                                                                                
+           PERFORM 1000-INITIALIZATION.                                         
+      *                                                                         
+           PERFORM 2000-PROCESS-INPUT                                           
+                UNTIL PS-NO-MORE-INPUT-RECORDS.                                 
+      *                                                                         
+           PERFORM 8000-EOJ-ROUTINE.                                            
+           CLOSE CONSOLIDATED-EXTR                                              
+                 CONTROL-CARD-FILE.                                             
+                                                                                
+           STOP RUN.                                                            
+      *                                                                         
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * OPEN INPUT FILE , INITIALIZE COUNTERS , READ FIRST INPUT RECORD         
+      * PREPARE CHECKPOINT RESTART TABLES FOR PROCESSING / RESTART              
+      *  TCKRSTCNTL-CKPT-STAT-CODE = '9' INDICATES A RESTART CONDITION          
+      ******************************************************************        
+      *                                                                         
+       1000-INITIALIZATION.                                                     
+      *                                                                         
+           OPEN INPUT CONSOLIDATED-EXTR                                         
+                      CONTROL-CARD-FILE.                                        
+           PERFORM 5000-PROCESS-CONTROL-CARD.                                   
+      *                                                                         
+           PERFORM 7400-INIT-CHECKPOINT-SELECT.                                 
+      *                                                                         
+           IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                                   
+                PERFORM 7500-SELECT-RESTART-INFO                                
+                IF CR-PRCG-DTE = CC-PRCG-DTE                                    
+                    MOVE CR-PREV-DTL-KEY      TO CK-SAVE-PREV-KEY               
+                ELSE                                                            
+      * ABNORMAL RESTART, ABEND                                                 
+                   MOVE '*******DATES DO NOT MATCH FOR RESTART MODE AND         
+      -                'THERE IS DATA ON THE TABLE FOR THE PRCG DATE'           
+                       TO PRINT-LINE                                            
+                   PERFORM 8500-PRINT-REPORT                                    
+                   MOVE CR-CHECKPOINT-RESTART-VAR TO PRINT-LINE                 
+                   PERFORM 8500-PRINT-REPORT                                    
+                   PERFORM 9999-SQL-ABEND                                       
+           ELSE                                                                 
+               SET PS-FIRST-COMMIT TO TRUE                                      
+               INITIALIZE CR-CHECKPOINT-RESTART-VAR                             
+0124RM*-- SHOULD NOT INSERT NEW CHECKPOINT RESTART ROW                          
+0124RM*        PERFORM 7850-ISRT-CHKPT                                          
+           END-IF.                                                              
+      *                                                                         
+                                                                                
+      *    PERFORM 11000-GET-CUTOFF-TOTALS                                      
+      *        MOVE SPACES  TO PRINT-LINE                                       
+      *        PERFORM 8500-PRINT-REPORT                                        
+      *        MOVE 'OPENING SALES = '    TO T-HDR-1                            
+      *        MOVE MLT00001-SLS-RTL-AMT  TO T-AMT-1                            
+      *        MOVE 'MARKDOWNS = '        TO T-HDR-2                            
+      *        MOVE MLT00001-PROMO-MKDN-RTL-AMT TO T-AMT-2                      
+      *        PERFORM 8500-PRINT-REPORT                                        
+                                                                                
+      * NORMALLY THIS WILL JUST GET THE FIRST RECORD                            
+      * ON RESTART, IT WILL READ UNTIL THE RIGHT RECORD IS READ                 
+           PERFORM 4000-READ-EXTR UNTIL                                         
+               PA-INPUT-COUNT > CR-INPUT-READ-COUNT                             
+            OR PS-NO-MORE-INPUT-RECORDS.                                        
+      *                                                                         
+      * IF PROGRAM IN RESTART MODE, BUT NO RECORDS EXIST                        
+      * AFTER LAST CKPT, MOVE RESTART COUNTS TO PA-FIELDS                       
+      * FOR ACCURATE DISPLAY AT EOJ                                             
+      *                                                                         
+           IF PS-NO-MORE-INPUT-RECORDS                                          
+               IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                               
+                   MOVE CR-INPUT-READ-COUNT     TO PA-INPUT-COUNT               
+                   MOVE CR-COMMIT-COUNT         TO PA-COMMIT-COUNT              
+                   MOVE CR-UPDATE-COUNT         TO PA-UPDATE-COUNT              
+                   MOVE CR-INSERT-COUNT         TO PA-INSERT-COUNT              
+                   MOVE CR-DEPTS-PROCESSED      TO PA-DEPTS-PROCESSED           
+                   MOVE '** RESTARTING **'      TO PRINT-LINE                   
+                   PERFORM 8500-PRINT-REPORT                                    
+               ELSE                                                             
+                   MOVE '** NO RECORDS ON INPUT FILE **' TO PRINT-LINE          
+                   PERFORM 8500-PRINT-REPORT                                    
+           ELSE                                                                 
+               PERFORM 7300-GET-COMMIT-TIMESTAMP                                
+               MOVE  'COMMITS WILL BE TAKEN EVERY ' TO P-PART-1                 
+               MOVE   TCKRSTCNTL-CKPT-FRQNCY-QTY    TO P-PART-2                 
+               MOVE  ' SECONDS.'                    TO P-PART-3                 
+               PERFORM 8500-PRINT-REPORT                                        
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      * PROCESS THE SORTED/CONSOLIDATED FILE - UPD/INS AS NEEDED                
+      ******************************************************************        
+       2000-PROCESS-INPUT.                                                      
+      *                                                                         
+           MOVE 'N' TO PS-DEADLOCK-RESTART-SW.                                  
+      *                                                                         
+           PERFORM 7000-SELECT-DB-ROW.                                          
+      *                                                                         
+           EVALUATE TRUE                                                        
+               WHEN PS-UPDATE-DLYDPT-ROW                                        
+                   PERFORM 7100-UPDATE-DLYDPT-ROW                               
+               WHEN PS-INSERT-DLYDPT-ROW                                        
+                   PERFORM 7200-INSERT-DLYDPT-ROW                               
+               WHEN OTHER                                                       
+                   MOVE '7000-SELECT-DB-ROW'   TO PV-PARAGRAPH-NAME             
+                   MOVE PE-MSG-01 TO PV-OPERATION-ATTEMPTED                     
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+      *                                                                         
+           IF NOT PS-PROGRAM-DEADLOCKED                                         
+               PERFORM 7700-PREPARE-COMMIT                                      
+               IF PS-MORE-INPUT-RECORDS                                         
+                  PERFORM 4000-READ-EXTR.                                       
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * READS THE CONSOLIDATED FILE INTO THE MLRD100 LAYOUT                     
+      ******************************************************************        
+       4000-READ-EXTR.                                                          
+            READ CONSOLIDATED-EXTR INTO ML100-UPDATE-REC                        
+               AT END MOVE 'Y' TO PS-EXTR-EOF-SW.                               
+      *                                                                         
+      * CALCULATE THE INCOMING TOTALS                                           
+            IF PS-MORE-INPUT-RECORDS                                            
+                COMPUTE CTL-SLS-RTL-AMT = CTL-SLS-RTL-AMT                       
+                                        + ML100-SLS-RTL-AMT                     
+                COMPUTE CTL-MKDN-RTL-AMT = CTL-MKDN-RTL-AMT                     
+                                        + ML100-MKDN-RTL-AMT                    
+                ADD 1                        TO PA-INPUT-COUNT                  
+                PERFORM 4100-EDIT-INPUT-REC.                                    
+                                                                                
+                                                                                
+      ******************************************************************        
+      * EDITS THE FIELDS ON THE CONSOLIDATED FILE                               
+      ******************************************************************        
+       4100-EDIT-INPUT-REC.                                                     
+           MOVE ML100-DEPT-NBR               TO WK-DEPT-NBR                     
+           IF WK-DEPT-NBR-9 NUMERIC                                             
+               MOVE WK-DEPT-NBR-9            TO WK-DEPT-NBR-PKD                 
+           ELSE                                                                 
+               DISPLAY '*4100-EDIT-INPUT-REC*'                                  
+               DISPLAY PE-MSG-15 .                                              
+                                                                                
+           MOVE ML100-STR-NBR  TO WK-STR-NBR.                                   
+      *                                                                         
+      ******************************************************************        
+      * READS THE PROCESSING DATE CONTROL CARD                                  
+      ******************************************************************        
+       5000-PROCESS-CONTROL-CARD.                                               
+           READ CONTROL-CARD-FILE INTO CC-CONTROL-CARD                          
+               AT END MOVE 'Y' TO PS-CONTROL-EOF-SW.                            
+                                                                                
+           IF PS-END-OF-CONTROL-FILE                                            
+               MOVE '5000-PROCESS-CONTROL-CARD'  TO PV-PARAGRAPH-NAME           
+               MOVE PE-MSG-12 TO PV-OPERATION-ATTEMPTED                         
+               PERFORM 9999-SQL-ABEND.                                          
+                                                                                
+            MOVE CC-PRCG-YY              TO WK-PRCG-YY.                         
+            MOVE CC-PRCG-MM              TO WK-PRCG-MM.                         
+            MOVE CC-PRCG-DD              TO WK-PRCG-DD.                         
+            IF CC-DAILY-CUTOFF-IND = 'Y'                                        
+                MOVE 'C'                 TO WK-PRCG-RUN-ID                      
+            ELSE                                                                
+                MOVE 'D'                 TO WK-PRCG-RUN-ID                      
+            END-IF.                                                             
+0124RM*--DO NOT CHANGE THE PC-JOB-NAME - NEEDS TO REMAIN MLK041                 
+0124RM*--TO MAINTAIN THE CORRESPONDING CHECKPOINT RESTART TABLE ROW             
+0124RM*     MOVE WK-PRCG-INFO            TO PC-JOB-NAME.                        
+            MOVE CC-CONTROL-CARD         TO PRINT-LINE.                         
+            PERFORM 8500-PRINT-REPORT.                                          
+      *                                                                         
+      ******************************************************************        
+      * SELECT A ROW FROM THE DAILY GM TABLE THAT MATCHES INPUT KEY             
+      *   SQLCODE FROM 'SELECT' IS EVALUATED IN 2000-PROCESS-INPUT              
+      ******************************************************************        
+       7000-SELECT-DB-ROW.                                                      
+           MOVE '*7000-SELECT-DB-ROW*' TO PV-PARAGRAPH-NAME.                    
+      *                                                                         
+           EXEC SQL                                                             
+               SELECT SLS_RTL_AMT                                               
+                     ,PROMO_MKDN_RTL_AMT                                        
+                 INTO :MLT00001-SLS-RTL-AMT                                     
+                     ,:MLT00001-PROMO-MKDN-RTL-AMT                              
+               FROM MLT_DLY_DEPT_SLS                                            
+              WHERE   PRCG_DTE            = :CC-PRCG-DTE                        
+                AND   STR_NBR             = :ML100-STR-NBR                      
+                AND   DEPT_NBR            = :WK-DEPT-NBR-PKD                    
+           END-EXEC.                                                            
+                                                                                
+      *                                                                         
+           EVALUATE SQLCODE                                                     
+               WHEN 0                                                           
+                   SET PS-UPDATE-DLYDPT-ROW       TO TRUE                       
+               WHEN +100                                                        
+                   SET PS-INSERT-DLYDPT-ROW       TO TRUE                       
+               WHEN OTHER                                                       
+                   MOVE '7000-SELECT-DB-ROW'   TO PV-PARAGRAPH-NAME             
+                   MOVE PE-MSG-01 TO PV-OPERATION-ATTEMPTED                     
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+      *                                                                         
+      *                                                                         
+      *****************************************************************         
+      * THE INPUT RECORD FOUND A MATCHING ROW BASED ON FSCL INFO, DEPT          
+      *   CURRENT TABLE VALUES UPDATED TO INCLUDE VALUES FROM INPUT REC         
+      *****************************************************************         
+       7100-UPDATE-DLYDPT-ROW.                                                  
+           MOVE '*7100-UPDATE-DLYDPT-ROW*' TO PV-PARAGRAPH-NAME.                
+      *                                                                         
+      * ADD DB2 TABLE ROW VALUES TO CURRENT INPUT VALUES                        
+      *                                                                         
+R27261     IF CC-BACKOUT-IND = 'Y'                                              
+R27261         COMPUTE ML100-SLS-RTL-AMT = (ML100-SLS-RTL-AMT * -1)             
+R27261         COMPUTE ML100-MKDN-RTL-AMT = (ML100-MKDN-RTL-AMT * -1)           
+R27261     END-IF.                                                              
+                                                                                
+           COMPUTE MLT00001-SLS-RTL-AMT       =                                 
+               MLT00001-SLS-RTL-AMT + ML100-SLS-RTL-AMT.                        
+      *                                                                         
+           COMPUTE MLT00001-PROMO-MKDN-RTL-AMT =                                
+               MLT00001-PROMO-MKDN-RTL-AMT   + ML100-MKDN-RTL-AMT.              
+      *                                                                         
+           EXEC SQL                                                             
+            UPDATE MLT_DLY_DEPT_SLS                                             
+                SET SLS_RTL_AMT         = :MLT00001-SLS-RTL-AMT                 
+                  , PROMO_MKDN_RTL_AMT  = :MLT00001-PROMO-MKDN-RTL-AMT          
+            WHERE   PRCG_DTE            = :CC-PRCG-DTE                          
+              AND   STR_NBR             = :ML100-STR-NBR                        
+              AND   DEPT_NBR            = :WK-DEPT-NBR-PKD                      
+           END-EXEC.                                                            
+      *                                                                         
+           EVALUATE SQLCODE                                                     
+               WHEN 0                                                           
+                  ADD 1 TO PA-UPDATE-COUNT                                      
+                  COMPUTE PST-SLS-RTL-AMT = PST-SLS-RTL-AMT                     
+                                          + ML100-SLS-RTL-AMT                   
+                  COMPUTE PST-MKDN-RTL-AMT = PST-MKDN-RTL-AMT                   
+                                          + ML100-MKDN-RTL-AMT                  
+               WHEN -911                                                        
+                   MOVE ZERO TO PA-DELAY-COUNTER                                
+                   DISPLAY 'BEFORE DELAY = ' FUNCTION CURRENT-DATE              
+                   PERFORM 7975-DELAY-PROCESSING                                
+                     UNTIL PA-DELAY-COUNTER > 5000000                           
+                   DISPLAY 'AFTER DELAY = ' FUNCTION CURRENT-DATE               
+                   ADD +1             TO PV-DEADLOCK-COUNT                      
+                   IF PV-DEADLOCK-COUNT > PC-MAX-DEADLOCKS                      
+                       PERFORM 9000-DEADLOCK-ERROR                              
+                   END-IF                                                       
+               WHEN OTHER                                                       
+                   MOVE '7100-UPDATE-DLYDPT-ROW' TO PV-PARAGRAPH-NAME           
+                   MOVE PE-MSG-02           TO PV-OPERATION-ATTEMPTED           
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+      *                                                                         
+           IF PS-PROGRAM-DEADLOCKED                                             
+               CONTINUE                                                         
+           ELSE                                                                 
+               ADD 1 TO PA-DEPTS-PROCESSED.                                     
+      *                                                                         
+      *                                                                         
+      *****************************************************************         
+      * THERE WAS NO MATCHING ROW ON THE DAILY GM TABLE. INITIAL      *         
+      * - ENTRY FOR THIS ENTITY IS INSERTED AS A 'NEW' ROW            *         
+      * - CALCULATED FIELDS ARE INITIALLY SET TO 0 AND UPDATED IN RECALC        
+      *****************************************************************         
+       7200-INSERT-DLYDPT-ROW.                                                  
+           MOVE '*7200-INSERT-DLYDPT-ROW*' TO PV-PARAGRAPH-NAME.                
+**TEMP***** FOR CHECKPOINT RESTART TESTING                                      
+**TEMP*    IF PA-INPUT-COUNT > 500000                                           
+**TEMP*        PERFORM 9999-SQL-ABEND                                           
+**TEMP*    END-IF.                                                              
+      *                                                                         
+      *                                                                         
+           EXEC SQL                                                             
+               INSERT INTO MLT_DLY_DEPT_SLS                                     
+                   (   PRCG_DTE                                                 
+                     , STR_NBR                                                  
+                     , DEPT_NBR                                                 
+                     , SLS_RTL_AMT                                              
+                     , PROMO_MKDN_RTL_AMT )                                     
+               VALUES                                                           
+                   (   :CC-PRCG-DTE                                             
+                     , :ML100-STR-NBR                                           
+                     , :WK-DEPT-NBR-PKD                                         
+                     , :ML100-SLS-RTL-AMT                                       
+                     , :ML100-MKDN-RTL-AMT     )                                
+           END-EXEC.                                                            
+      *                                                                         
+                                                                                
+           EVALUATE SQLCODE                                                     
+               WHEN 0                                                           
+                  COMPUTE PST-SLS-RTL-AMT = PST-SLS-RTL-AMT                     
+                                          + ML100-SLS-RTL-AMT                   
+                  COMPUTE PST-MKDN-RTL-AMT = PST-MKDN-RTL-AMT                   
+                                          + ML100-MKDN-RTL-AMT                  
+               WHEN -911                                                        
+                   MOVE ZERO TO PA-DELAY-COUNTER                                
+                   DISPLAY 'BEFORE DELAY = ' FUNCTION CURRENT-DATE              
+                   PERFORM 7975-DELAY-PROCESSING                                
+                     UNTIL PA-DELAY-COUNTER > 1000000                           
+                   DISPLAY 'AFTER DELAY = ' FUNCTION CURRENT-DATE               
+                   ADD +1             TO PV-DEADLOCK-COUNT                      
+                   IF PV-DEADLOCK-COUNT > PC-MAX-DEADLOCKS                      
+                       PERFORM 9000-DEADLOCK-ERROR                              
+                   END-IF                                                       
+               WHEN OTHER                                                       
+                   MOVE PE-MSG-03              TO PV-OPERATION-ATTEMPTED        
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE                                                         
+      *                                                                         
+           IF PS-PROGRAM-DEADLOCKED                                             
+               CONTINUE                                                         
+           ELSE                                                                 
+               ADD 1 TO PA-INSERT-COUNT                                         
+                        PA-DEPTS-PROCESSED.                                     
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * 7300-GET-COMMIT-TIMESTAMP.                                     *        
+      * PROCESSES: GET THE COMMIT TIMESTAMP FROM THE CHECKPOINT        *        
+      *            CONTROL TABLE                                       *        
+      ******************************************************************        
+       7300-GET-COMMIT-TIMESTAMP.                                               
+           MOVE '*7300-GET-COMMIT-TIMESTAMP*'  TO PV-PARAGRAPH-NAME.            
+                                                                                
+           EXEC SQL                                                             
+      * CHECKPOINT TAKEN BASED ON CHEKPOINT RESTART CICSP1 PANEL                
+             SELECT (CURRENT TIMESTAMP + CKPT_FRQNCY_QTY SECONDS)               
+               INTO :PV-COMMIT-TIMESTAMP                                        
+               FROM TCKRSTCNTL                                                  
+              WHERE JOB_NAME  = :PC-JOB-NAME                                    
+                AND PLAN_NAME = :PC-PROGRAM-NAME                                
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = 0                                                 
+                   CONTINUE                                                     
+               WHEN SQLCODE NOT EQUAL ZERO                                      
+                   MOVE '7300-GET-COMMIT-TIMESTAMP' TO PV-PARAGRAPH-NAME        
+                   MOVE PE-MSG-11             TO PV-OPERATION-ATTEMPTED         
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * 7400-INIT-CHECKPOINT-SELECT                                    *        
+      * PROCESSES: SELECTS FROM THE CHECKPOINT RESTART CONTROL TABLE   *        
+      *            IF WE ARE IN A RESTART CONDITION.                   *        
+      ******************************************************************        
+       7400-INIT-CHECKPOINT-SELECT.                                             
+           MOVE '*7400-INIT-CHECKPOINT-SELECT*' TO PV-PARAGRAPH-NAME.           
+                                                                                
+           EXEC SQL                                                             
+             SELECT  CKPT_STAT_CODE                                             
+                    ,CKPT_FRQNCY_QTY                                            
+               INTO  :TCKRSTCNTL-CKPT-STAT-CODE                                 
+                    ,:TCKRSTCNTL-CKPT-FRQNCY-QTY                                
+               FROM  TCKRSTCNTL                                                 
+              WHERE  JOB_NAME  = :PC-JOB-NAME                                   
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                               
+           END-EXEC.                                                            
+                                                                                
+                                                                                
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+           IF SQLCODE = +100                                                    
+0124RM*--DO NOT INSERT A NEW ROW - THE CHKPT ROW SHOULD BE PRESENT              
+0124RM*--ABEND IF NOT PRESENT                                                   
+0124RM*        MOVE ZEROS            TO PV-COMMIT-TIMESTAMP                     
+0124RM*        ACCEPT PV-DATE      FROM DATE YYYYMMDD                           
+0124RM*        MOVE '-'  TO PV-DASH1  PV-DASH2  PV-DASH3                        
+0124RM*        MOVE '.'  TO PV-DOT1   PV-DOT2   PV-DOT3                         
+0124RM*        PERFORM 7450-ISRT-CHKPT-STATUS                                   
+0124RM*    ELSE                                                                 
+               MOVE PE-MSG-04             TO PV-OPERATION-ATTEMPTED             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      * 7450-ISRT-CHKPT-STATUS                                                  
+      * PROCESSES: INSERTS THE STATUS ON THE CHKPT CONTROL TABLE                
+      *                                                                         
+      ******************************************************************        
+0124RM*7450-ISRT-CHKPT-STATUS.                                                  
+0124RM*    MOVE '*7450-ISRT-CHKPT-STATUS*' TO PV-PARAGRAPH-NAME.                
+0124RM*                                                                         
+0124RM*    EXEC SQL                                                             
+0124RM*      INSERT  INTO TCKRSTCNTL                                            
+0124RM*            ( JOB_NAME                                                   
+0124RM*             ,PLAN_NAME                                                  
+0124RM*             ,CKPT_STAT_CODE                                             
+0124RM*             ,CKPT_CNTL_CODE                                             
+0124RM*             ,CKPT_TYPE_CODE                                             
+0124RM*             ,CKPT_FRQNCY_QTY                                            
+0124RM*             ,TRANS_QTY                                                  
+0124RM*             ,PREP_TMESTP                                                
+0124RM*             ,CKPT_TAKEN_QTY                                             
+0124RM*             ,TRANS_PRCSD_QTY                                            
+0124RM*             ,RST_QTY                                                    
+0124RM*             ,PRCSD_TMESTP                                               
+0124RM*             ,CKPT_DURATION_TIME )                                       
+0124RM*       VALUES ( :PC-JOB-NAME                                             
+0124RM*               ,:PC-PROGRAM-NAME                                         
+0124RM*               , '0'                                                     
+0124RM*               , ' '                                                     
+0124RM*               , ' '                                                     
+0124RM*               ,5                                                        
+0124RM*               ,0                                                        
+0124RM*               ,:PV-COMMIT-TIMESTAMP                                     
+0124RM*               ,0                                                        
+0124RM*               ,0                                                        
+0124RM*               ,0                                                        
+0124RM*               ,:PV-COMMIT-TIMESTAMP                                     
+0124RM*               ,:PV-TIME )                                               
+0124RM*    END-EXEC.                                                            
+0124RM*                                                                         
+0124RM*    IF SQLCODE = 0                                                       
+0124RM*        PERFORM 7875-COMMIT-CHANGES                                      
+0124RM*        PERFORM 7999-INIT-CHECKPOINT-SELECT                              
+0124RM*    ELSE                                                                 
+0124RM*        MOVE '7450-ISRT-CHKPT-STATUS' TO PV-PARAGRAPH-NAME               
+0124RM*        MOVE PE-MSG-10                TO PV-OPERATION-ATTEMPTED          
+0124RM*        PERFORM 9999-SQL-ABEND                                           
+0124RM*    END-IF.                                                              
+                                                                                
+      *                                                                         
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * 7500-SELECT-RESTART-INFO                                       *        
+      * PROCESSES: SELECTS FROM THE CHECKPOINT RESTART INFORMATION     *        
+      *            TABLE TO OBTAIN THE PROGRAMS SAVED VARIABLES.       *        
+      ******************************************************************        
+       7500-SELECT-RESTART-INFO.                                                
+           MOVE '*7500-SELECT-RESTART-INFO*' TO PV-PARAGRAPH-NAME.              
+                                                                                
+           EXEC SQL                                                             
+             SELECT  WORK_STRG_DESC                                             
+               INTO  :TCKRSTINF-WORK-STRG-DESC                                  
+               FROM  TCKRSTINF                                                  
+              WHERE  JOB_NAME  = :PC-JOB-NAME                                   
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                               
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+                                                                                
+               DISPLAY '****RESTARTING USING CHECKPOINT INFO ****'              
+P11762         MOVE TCKRSTINF-WORK-STRG-DESC-TEXT TO                            
+P11762                                        CR-CHECKPOINT-RESTART-VAR         
+               DISPLAY  CR-CHECKPOINT-RESTART-VAR                               
+               MOVE '****RESTARTING USING CHECKPOINT INFO ****' TO              
+                   PRINT-LINE                                                   
+               PERFORM 8500-PRINT-REPORT                                        
+               MOVE CR-CHECKPOINT-RESTART-VAR TO PRINT-LINE                     
+               PERFORM 8500-PRINT-REPORT                                        
+           ELSE                                                                 
+               MOVE '*7500-SELECT-RESTART-INFO*' TO PV-PARAGRAPH-NAME           
+               MOVE PE-MSG-08             TO PV-OPERATION-ATTEMPTED             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * 7600-SET-CURRENT-TIMESTAMP.                                    *        
+      * PROCESSES: GET THE CURRENT TIMESTAMP FROM DB2.                 *        
+      ******************************************************************        
+       7600-SET-CURRENT-TIMESTAMP.                                              
+           MOVE '*7600-SET-CURRENT-TIMESTAMP*'  TO PV-PARAGRAPH-NAME.           
+                                                                                
+           EXEC SQL                                                             
+                SET :PV-CURRENT-TIMESTAMP = CURRENT TIMESTAMP                   
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE '*7600-SET-CURRENT-TIMESTAMP*' TO PV-PARAGRAPH-NAME         
+               MOVE PE-MSG-09             TO PV-OPERATION-ATTEMPTED             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * 7700-PREPARE-COMMIT.                                           *        
+      * PROCESSES: CHECK IF WE NEED TO TAKE A COMMIT.                  *        
+      *          PREPARE CHECKPOINT RECORD FOR UPDATE OF WORK_STRG_DESC*        
+      ******************************************************************        
+       7700-PREPARE-COMMIT.                                                     
+           MOVE '*7700-PREPARE-COMMIT*'       TO PV-PARAGRAPH-NAME.             
+                                                                                
+           PERFORM 7600-SET-CURRENT-TIMESTAMP.                                  
+      *                                                                         
+           IF PV-CURRENT-TIMESTAMP > PV-COMMIT-TIMESTAMP                        
+           OR PS-NO-MORE-INPUT-RECORDS                                          
+      *        PREPARE COMMIT RECORD FOR UPDATE                                 
+               ADD 1                          TO PA-COMMIT-COUNT                
+               MOVE ML100-FSCL-WK-NBR         TO CR-FISCAL-NBR                  
+               MOVE ML100-FSCL-WK-END-DTE     TO CR-FISCAL-WK-END-DTE           
+               MOVE CC-PRCG-DTE               TO CR-PRCG-DTE                    
+               MOVE ML100-STR-NBR             TO CR-STR-NBR                     
+               MOVE WK-DEPT-NBR-PKD           TO CR-DEPT-NBR                    
+               MOVE PA-COMMIT-COUNT           TO CR-COMMIT-COUNT                
+               MOVE PA-INPUT-COUNT            TO CR-INPUT-READ-COUNT            
+               MOVE PA-UPDATE-COUNT           TO CR-UPDATE-COUNT                
+               MOVE PA-INSERT-COUNT           TO CR-INSERT-COUNT                
+               MOVE PA-DEPTS-PROCESSED        TO CR-DEPTS-PROCESSED             
+      *        MOVE COMMIT INFO TO WORKING STORAGE ROW                          
+               MOVE CR-CHECKPOINT-RESTART-AREA TO                               
+                                             TCKRSTINF-WORK-STRG-DESC           
+               IF PS-FIRST-COMMIT                                               
+                   MOVE '9' TO TCKRSTCNTL-CKPT-STAT-CODE                        
+                   PERFORM 7900-UPDATE-CHECKPOINT-STATUS                        
+                   MOVE 'N' TO PS-FIRST-COMMIT-SW                               
+               END-IF                                                           
+               PERFORM 7800-UPDT-CHKPT                                          
+               PERFORM 7875-COMMIT-CHANGES                                      
+               PERFORM 7300-GET-COMMIT-TIMESTAMP                                
+           END-IF.                                                              
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * 7800-UPDT-CHKPT.                                                        
+      *   PERFORM UPDATE OF CHECKPOINT INFORMATION TABLE. TAKE A COMMIT         
+      ******************************************************************        
+       7800-UPDT-CHKPT.                                                         
+           MOVE '*7800-UPDT-CHKPT*' TO PV-PARAGRAPH-NAME.                       
+                                                                                
+**TEMP*    DISPLAY '7800-UPDATE TCKRSTINF'                                      
+**TEMP*    DISPLAY 'JOB  ' PC-JOB-NAME                                          
+**TEMP*    DISPLAY 'PLAN ' PC-PROGRAM-NAME                                      
+**TEMP*    DISPLAY 'DESC ' TCKRSTINF-WORK-STRG-DESC                             
+           EXEC SQL                                                             
+             UPDATE TCKRSTINF                                                   
+                SET WORK_STRG_DESC = :TCKRSTINF-WORK-STRG-DESC                  
+              WHERE JOB_NAME       = :PC-JOB-NAME                               
+                AND PLAN_NAME      = :PC-PROGRAM-NAME                           
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+               PERFORM 7875-COMMIT-CHANGES                                      
+           ELSE                                                                 
+0124RM*--DO NOT ATTEMPT TO INSERT A NEW CHCKPT-RESTART ROW                      
+0124RM*    IF SQLCODE = +100                                                    
+0124RM*       PERFORM 7850-ISRT-CHKPT                                           
+0124RM*    ELSE                                                                 
+               MOVE PE-MSG-05                  TO PV-OPERATION-ATTEMPTED        
+               MOVE  '* 7800-UPDT-CHKPT *' TO PV-PARAGRAPH-NAME                 
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *                                                                         
+      ******************************************************************        
+      * 7850-ISRT-CHKPT.                                                        
+      *   PERFORM INSERT OF CHECKPOINT INFORMATION TABLE. TAKE A COMMIT         
+      ******************************************************************        
+       7850-ISRT-CHKPT.                                                         
+           MOVE '*7850-ISRT-CHKPT*' TO PV-PARAGRAPH-NAME.                       
+                                                                                
+           EXEC SQL                                                             
+             INSERT INTO TCKRSTINF                                              
+                   ( JOB_NAME                                                   
+                    ,PLAN_NAME                                                  
+                    ,RST_TRANS_SEQ_NMBR                                         
+                    ,SEQ_NMBR                                                   
+                    ,WORK_STRG_DESC )                                           
+              VALUES ( :PC-JOB-NAME                                             
+                      ,:PC-PROGRAM-NAME                                         
+                      , 0                                                       
+                      , 0                                                       
+                      ,:TCKRSTINF-WORK-STRG-DESC )                              
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+               PERFORM 7875-COMMIT-CHANGES                                      
+           ELSE                                                                 
+               MOVE PE-MSG-05              TO PV-OPERATION-ATTEMPTED            
+               MOVE  '* 7850-ISRT-CHKPT *' TO PV-PARAGRAPH-NAME                 
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *                                                                         
+      ******************************************************************        
+      * COMMIT THE CHECKPOINT INFORMATION                                       
+      ******************************************************************        
+       7875-COMMIT-CHANGES.                                                     
+           MOVE '*7875-COMMIT-CHANGES*' TO PV-PARAGRAPH-NAME.                   
+                                                                                
+           EXEC SQL                                                             
+               COMMIT                                                           
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE PE-MSG-06                  TO PV-OPERATION-ATTEMPTED        
+               MOVE  '* 7875-COMMIT-CHANGES *' TO PV-PARAGRAPH-NAME             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      * 7900-UPDATE-CHECKPOINT-STATUS                                           
+      * PROCESSES: UPDATES THE STATUS ON THE CHECKPOINT CONTROL TABLE           
+      *                                                                         
+      ******************************************************************        
+       7900-UPDATE-CHECKPOINT-STATUS.                                           
+           MOVE '*7900-UPDATE-CHECKPOINT-STATUS*' TO PV-PARAGRAPH-NAME.         
+                                                                                
+           EXEC SQL                                                             
+             UPDATE  TCKRSTCNTL                                                 
+                SET  CKPT_STAT_CODE = :TCKRSTCNTL-CKPT-STAT-CODE                
+              WHERE  JOB_NAME  = :PC-JOB-NAME                                   
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                               
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+0124RM*-- DO NOT INSERT A CHCKPT RESTART ROW                                    
+0124RM*    IF SQLCODE = +100                                                    
+0124RM*        PERFORM 7450-ISRT-CHKPT-STATUS                                   
+0124RM*        IF SQLCODE = 0                                                   
+0124RM*           CONTINUE                                                      
+0124RM*        ELSE                                                             
+0124RM*            MOVE PE-MSG-10              TO PV-OPERATION-ATTEMPTED        
+0124RM*            PERFORM 9999-SQL-ABEND                                       
+0124RM*        END-IF                                                           
+0124RM*    ELSE                                                                 
+               MOVE PE-MSG-10                  TO PV-OPERATION-ATTEMPTED        
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+           EJECT                                                                
+                                                                                
+0124RM*7950-DELETE-CHECKPT-RECS.                                                
+0124RM*    MOVE '*7950-DELETE-CHECKPT-RECS*' TO PV-PARAGRAPH-NAME.              
+0124RM*                                                                         
+0124RM* DELETE THE CHECKPOINT INFORMATION RECORD                                
+0124RM*    EXEC SQL                                                             
+0124RM*      DELETE  FROM TCKRSTINF                                             
+0124RM*       WHERE  JOB_NAME  = :PC-JOB-NAME                                   
+0124RM*         AND  PLAN_NAME = :PC-PROGRAM-NAME                               
+0124RM*    END-EXEC.                                                            
+0124RM*    IF SQLCODE = 0  OR +100                                              
+0124RM*        NEXT SENTENCE                                                    
+0124RM*    ELSE                                                                 
+0124RM*        MOVE '7950-DELETE-CHECKPT-RECS' TO PV-PARAGRAPH-NAME             
+0124RM*        MOVE PE-MSG-16                  TO PV-OPERATION-ATTEMPTED        
+0124RM*        PERFORM 9999-SQL-ABEND                                           
+0124RM*    END-IF.                                                              
+0124RM* NOW DELETE THE CHECKPOINT CONTROL RECORD                                
+0124RM*    EXEC SQL                                                             
+0124RM*      DELETE  FROM TCKRSTCNTL                                            
+0124RM*       WHERE  JOB_NAME  = :PC-JOB-NAME                                   
+0124RM*         AND  PLAN_NAME = :PC-PROGRAM-NAME                               
+0124RM*    END-EXEC.                                                            
+0124RM*                                                                         
+0124RM*    IF SQLCODE = 0                                                       
+0124RM*        NEXT SENTENCE                                                    
+0124RM*    ELSE                                                                 
+0124RM*        MOVE '7950-DELETE-CHECKPT-RECS' TO PV-PARAGRAPH-NAME             
+0124RM*        MOVE PE-MSG-17                  TO PV-OPERATION-ATTEMPTED        
+0124RM*        PERFORM 9999-SQL-ABEND                                           
+0124RM*    END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      ******************************************************************        
+       7975-DELAY-PROCESSING.                                                   
+                                                                                
+            ADD 1    TO PA-DELAY-COUNTER.                                       
+                                                                                
+                                                                                
+      *                                                                         
+      ******************************************************************        
+      * 7999-INIT-CHECKPOINT-SELECT                                    *        
+      * PROCESSES: SELECTS FROM THE CHECKPOINT RESTART CONTROL TABLE   *        
+      *            AFTER AN INSERT AND CHECKPOINT.                     *        
+      ******************************************************************        
+       7999-INIT-CHECKPOINT-SELECT.                                             
+           MOVE '*7999-INIT-CHECKPOINT-SELECT*' TO PV-PARAGRAPH-NAME.           
+                                                                                
+           EXEC SQL                                                             
+             SELECT  CKPT_STAT_CODE                                             
+                    ,CKPT_FRQNCY_QTY                                            
+               INTO  :TCKRSTCNTL-CKPT-STAT-CODE                                 
+                    ,:TCKRSTCNTL-CKPT-FRQNCY-QTY                                
+               FROM  TCKRSTCNTL                                                 
+              WHERE  JOB_NAME  = :PC-JOB-NAME                                   
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                               
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE PE-MSG-04             TO PV-OPERATION-ATTEMPTED             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      *  RESET STATUS CODE, DISPLAY FINAL COUNTS , CLOSE INPUT FILE    *        
+      ******************************************************************        
+       8000-EOJ-ROUTINE.                                                        
+      *                                                                         
+           PERFORM 7875-COMMIT-CHANGES.                                         
+           MOVE '0' TO TCKRSTCNTL-CKPT-STAT-CODE.                               
+           PERFORM 7900-UPDATE-CHECKPOINT-STATUS.                               
+      *                                                                         
+           MOVE SPACES                 TO PRINT-LINE.                           
+           PERFORM 8500-PRINT-REPORT                                            
+           MOVE 'INPUT RECORDS   '     TO T-HDR-1.                              
+           MOVE PA-INPUT-COUNT         TO T-AMT-1-0.                            
+           PERFORM 8500-PRINT-REPORT                                            
+           MOVE 'UPDATE COUNT    '     TO T-HDR-1.                              
+           MOVE PA-UPDATE-COUNT        TO T-AMT-1-0.                            
+           PERFORM 8500-PRINT-REPORT                                            
+           MOVE 'INSERT COUNT    '     TO T-HDR-1.                              
+           MOVE PA-INSERT-COUNT        TO T-AMT-1-0.                            
+           PERFORM 8500-PRINT-REPORT                                            
+           MOVE 'DEPTS PROCESSED '     TO T-HDR-1.                              
+           MOVE PA-DEPTS-PROCESSED     TO T-AMT-1-0.                            
+           PERFORM 8500-PRINT-REPORT                                            
+           MOVE SPACES                 TO PRINT-LINE.                           
+           PERFORM 8500-PRINT-REPORT                                            
+           MOVE 'COMMITS TAKEN   '     TO T-HDR-1.                              
+           MOVE PA-COMMIT-COUNT        TO T-AMT-1-0.                            
+           PERFORM 8500-PRINT-REPORT.                                           
+      *                                                                         
+           MOVE SPACES  TO PRINT-LINE                                           
+           MOVE 'INPUT   SALES = '    TO T-HDR-1                                
+           MOVE CTL-SLS-RTL-AMT       TO T-AMT-1                                
+           MOVE 'MARKDOWNS = '        TO T-HDR-2                                
+           MOVE CTL-MKDN-RTL-AMT      TO T-AMT-2                                
+           PERFORM 8500-PRINT-REPORT                                            
+      *                                                                         
+           MOVE SPACES  TO PRINT-LINE                                           
+           MOVE 'POSTED  SALES = '    TO T-HDR-1                                
+           MOVE PST-SLS-RTL-AMT       TO T-AMT-1                                
+           MOVE 'MARKDOWNS = '        TO T-HDR-2                                
+           MOVE PST-MKDN-RTL-AMT      TO T-AMT-2                                
+           PERFORM 8500-PRINT-REPORT                                            
+                                                                                
+           IF PST-SLS-RTL-AMT = CTL-SLS-RTL-AMT AND                             
+                  PST-MKDN-RTL-AMT = CTL-MKDN-RTL-AMT                           
+               NEXT SENTENCE                                                    
+           ELSE                                                                 
+               MOVE '===>> POSTED AMOUNT NOT EQUAL TO INPUT AMOUNT'             
+                 TO M-PART-1                                                    
+               PERFORM 8500-PRINT-REPORT                                        
+               MOVE ' PROCESSING FOR THIS DATE MUST BE CHECKED !!!'             
+                 TO M-PART-1                                                    
+               PERFORM 8500-PRINT-REPORT                                        
+           END-IF.                                                              
+                                                                                
+           PERFORM 11000-GET-CUTOFF-TOTALS                                      
+           MOVE 'TOTAL SALES = '      TO T-HDR-1                                
+           MOVE MLT00001-SLS-RTL-AMT  TO T-AMT-1                                
+           MOVE 'MARKDOWNS = '        TO T-HDR-2                                
+           MOVE MLT00001-PROMO-MKDN-RTL-AMT TO T-AMT-2                          
+           PERFORM 8500-PRINT-REPORT.                                           
+0124RM*    PERFORM 7950-DELETE-CHECKPT-RECS.                                    
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      *  WRITE REPORT                                                           
+      ******************************************************************        
+       8500-PRINT-REPORT.                                                       
+W27261*    WRITE PRINT-REC FROM PRINT-LINE.                                     
+W27261     DISPLAY '---> ' PRINT-LINE.                                          
+           MOVE SPACES       TO PRINT-LINE.                                     
+                                                                                
+      *                                                                         
+      ******************************************************************        
+      *  PERFROMED BY 7100-UPDATE AND 7200-INSERT                               
+      *  THIS ROUTINE FORCES AN ABEND DUE TO A SQLCODE -911 (3 TIMES)           
+      ******************************************************************        
+       9000-DEADLOCK-ERROR.                                                     
+      *                                                                         
+           MOVE PE-MSG-07             TO PV-OPERATION-ATTEMPTED                 
+      *                                                                         
+           MOVE '** SQLCODE -911 ** TCKRSTINF-LAST CKPT = '                     
+               TO PRINT-LINE.                                                   
+           PERFORM 8500-PRINT-REPORT.                                           
+           MOVE TCKRSTINF-WORK-STRG-DESC TO PRINT-LINE.                         
+           PERFORM 8500-PRINT-REPORT.                                           
+           PERFORM 9999-SQL-ABEND.                                              
+      *                                                                         
+      ******************************************************************        
+      *  STANDARD DB2 ERROR ABEND ROUTINE                                       
+      *  THIS ROUTINE FORCES AN ABEND DUE TO A DB2 PROBLEM.                     
+      ******************************************************************        
+       9999-SQL-ABEND.                                                          
+                                                                                
+P11762     MOVE SPACES                 TO PRINT-LINE.                           
+P11762     PERFORM 8500-PRINT-REPORT                                            
+P11762     MOVE 'INPUT RECORDS   '     TO T-HDR-1.                              
+P11762     MOVE PA-INPUT-COUNT         TO T-AMT-1-0.                            
+P11762     PERFORM 8500-PRINT-REPORT                                            
+P11762     MOVE 'UPDATE COUNT    '     TO T-HDR-1.                              
+P11762     MOVE PA-UPDATE-COUNT        TO T-AMT-1-0.                            
+P11762     PERFORM 8500-PRINT-REPORT                                            
+P11762     MOVE 'INSERT COUNT    '     TO T-HDR-1.                              
+P11762     MOVE PA-INSERT-COUNT        TO T-AMT-1-0.                            
+P11762     PERFORM 8500-PRINT-REPORT                                            
+P11762     MOVE 'COMMITS TAKEN   '     TO T-HDR-1.                              
+P11762     MOVE PA-COMMIT-COUNT        TO T-AMT-1-0.                            
+P11762     PERFORM 8500-PRINT-REPORT.                                           
+           MOVE +4013                 TO ABEND-CODE.                            
+           DISPLAY '**  ABEND     **'.                                          
+           DISPLAY '**  PROGRAM   ** => ' PC-PROGRAM-NAME.                      
+           DISPLAY '**  PARAGRAPH **  = ' PV-PARAGRAPH-NAME.                    
+           DISPLAY '**  OPERATION **  = ' PV-OPERATION-ATTEMPTED.               
+0124RM     DISPLAY '**  RECS READ **  = ' PA-INPUT-COUNT.                       
+           DISPLAY '**  CHECKPOINT ** = ' CR-CHECKPOINT-RESTART-VAR.            
+           MOVE ' ABEND ON ' TO P-PART-1                                        
+           MOVE PV-OPERATION-ATTEMPTED TO P-PART-3.                             
+           PERFORM 8500-PRINT-REPORT.                                           
+           MOVE CR-CHECKPOINT-RESTART-VAR TO PRINT-LINE.                        
+           PERFORM 8500-PRINT-REPORT.                                           
+                                                                                
+      *    THE FOLLOWING COPYBOOK UTILIZES THE DB2 ABEND MODULE                 
+      *    DSNTIAR TO CONVERT SQLCA INTO UNDERSTANDABLE VERBAGE.                
+                                                                                
+           COPY DPPD004.                                                        
+           CALL 'ILBOABN0'  USING ABEND-CODE.                                   
+                                                                                
+      ******************************************************************        
+      *  DISPLAY CUTOFF TOTALS                                                  
+      ******************************************************************        
+                                                                                
+       11000-GET-CUTOFF-TOTALS.                                                 
+           MOVE '*11000-GET-CUTOFF-TOTALS*'    TO PV-PARAGRAPH-NAME.            
+                                                                                
+           EXEC SQL                                                             
+             SELECT SUM (SLS_RTL_AMT)                                           
+                   ,SUM (PROMO_MKDN_RTL_AMT)                                    
+               INTO :MLT00001-SLS-RTL-AMT                                       
+                   ,:MLT00001-PROMO-MKDN-RTL-AMT                                
+               FROM MLT_DLY_DEPT_SLS                                            
+               WHERE PRCG_DTE = :CC-PRCG-DTE                                    
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE NOT = 0                                                   
+               MOVE ZERO   TO                                                   
+                     MLT00001-SLS-RTL-AMT                                       
+                     MLT00001-PROMO-MKDN-RTL-AMT.                               
+                                                                                

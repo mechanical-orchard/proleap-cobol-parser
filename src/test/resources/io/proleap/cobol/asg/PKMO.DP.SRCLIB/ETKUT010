@@ -1,0 +1,622 @@
+       IDENTIFICATION DIVISION.                                                 
+       PROGRAM-ID.    ETKUT010                                                  
+       AUTHOR.        VLADIMIR FILIPOVIC.                                       
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+       DATE-WRITTEN.  07/27/04.                                                 
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *                                                                         
+      * THIS PROGRAM PULLS INFORMATION FOR STORE TO DC RELATIONSHIPS.           
+      * IT FIRST GETS CORPORATE INFORMATION.                                    
+      * IT THEN GETS EACH DC AND THEN STORE INFORMATION FOR EACH                
+      * STORE THAT IS SERVICED BY THE DC OR WILL BE IN THE FUTURE.              
+      *                                                                         
+      * ONLY DCS THAT ARE OPENED OR WILL BE OPENED WITHIN 120 DAYS OF           
+      * THE RUN DATE ARE EXTRACTED.                                             
+      *                                                                         
+      * ONLY STORES THAT ARE OPENED OR ARE OPENED TO RECEIVE WITHIN             
+      * 120 DAYS OF THE RUN DATE ARE EXTRACTED.                                 
+      *                                                                         
+      * THE RUN DATE IS THE CURRENT SYSTEM DATE.  THIS DATE CAN BE              
+      * OVERRIDDEN WITH A CONTROL DATE USING THE CONTROL CARD.                  
+      *                                                                         
+      ******************************************************************        
+      *                                                                         
+      * DATE 07/27/2004                                                         
+      *                                                                         
+      * UPDATED THE PROGRAM TO WORK WITH 4 DIGIT STORE NUMBERS AND              
+      * REPLICATED LOCATION AND DC LOCATION RELATIONSHIP TABLES                 
+      * INSTEAD OF TSTR000 TABLE                                                
+      *                                                                         
+      * MADE BY: VLADIMIR FILIPOVIC          WR/IR #: WR26913                   
+      ******************************************************************        
+      *                                                                         
+      * DATE 06/23/2014                                                         
+      *                                                                         
+      * UPDATED THE PROGRAM TO NOT PULL STORE 6666 FOR 816 EXTRACT              
+      * REPLICATED LOCATION AND DC LOCATION RELATIONSHIP TABLES                 
+      * PROCESS,INCLUDEDA CONDITION IN LOCATION CURSOR FOR THIS.                
+      *                                                                         
+      * MADE BY: COGNIZANT                   WR/IR #: CHG0085322                
+      ******************************************************************        
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+       CONFIGURATION SECTION.                                                   
+       SOURCE-COMPUTER.        IBM-3090.                                        
+       OBJECT-COMPUTER.        IBM-3090.                                        
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+       FILE-CONTROL.                                                            
+           SELECT OUT-LOC-FILE ASSIGN TO OUT01.                                 
+           SELECT OUT-FUT-FILE ASSIGN TO OUT02.                                 
+                                                                                
+       DATA DIVISION.                                                           
+       FILE SECTION.                                                            
+                                                                                
+       FD  OUT-LOC-FILE                                                         
+           LABEL RECORDS ARE STANDARD                                           
+           RECORD CONTAINS 200 CHARACTERS                                       
+           RECORDING  MODE IS F                                                 
+           DATA RECORD IS OUT-LOC-RECORD.                                       
+       01  OUT-LOC-RECORD               PIC X(200).                             
+                                                                                
+       FD  OUT-FUT-FILE                                                         
+           LABEL RECORDS ARE STANDARD                                           
+           RECORD CONTAINS 30 CHARACTERS                                        
+           RECORDING  MODE IS F                                                 
+           DATA RECORD IS OUT-FUT-RECORD.                                       
+       01  OUT-FUT-RECORD               PIC X(30).                              
+                                                                                
+      *****************************************************************         
+      * WORKING STORAGE                                                         
+      *****************************************************************         
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-MAX-RETRIES               PIC S9(03)    VALUE +3              
+                                                          COMP SYNC.            
+           05  PC-STORE-CODE                PIC X(02)                           
+                                            VALUE 'DS'.                         
+           05  PC-DC-CODE                   PIC X(02)                           
+                                            VALUE 'DC'.                         
+           05  PC-CORPORATE                 PIC S9(04)     COMP.                
+                                                                                
+           05  PC-OP-CO-NMBR                PIC X(02)                           
+                                            VALUE '03'.                         
+                                                                                
+       01  PV-PROGRAM-VARIABLES.                                                
+           05  PV-CONTROL-CARD.                                                 
+               10  PV-CONTROL-DATE          PIC X(10)    VALUE SPACES.          
+               10  FILLER                   PIC X(70)    VALUE SPACES.          
+           05  PV-RETRY-COUNT               PIC S9(04)   VALUE +0               
+                                                         COMP.                  
+           05  PV-PARAGRAPH-NAME            PIC X(30)    VALUE SPACE.           
+           05  PV-DB2-OPERATION-ATTEMPTED   PIC X(30)    VALUE SPACE.           
+           05  PV-DC1-RCT-STOP-DATE         PIC X(10)    VALUE SPACES.          
+           05  PV-DC2-RCT-STOP-DATE         PIC X(10)    VALUE SPACES.          
+           05  PV-CUR-DC-STOP-DATE          PIC X(10)    VALUE SPACES.          
+                                                                                
+           05  PV-LOC-STORE-NMBR-TEMP       PIC 9(05) VALUE ZERO COMP.          
+           05  PV-LOC-CUR-DC-NMBR-TEMP      PIC 9(05) VALUE ZEROS COMP.         
+           05  PV-LOC-FUT-DC-NMBR-TEMP      PIC 9(05) VALUE ZEROS COMP.         
+           05  PV-EFF-BEG-DTE-MINUS-ONE     PIC X(10) VALUE SPACES.             
+                                                                                
+       01  SW-SWITCHES.                                                         
+           05  SW-END-OF-DC-CSR-SW          PIC X        VALUE 'N'.             
+               88  SW-END-OF-DC-CSR                      VALUE 'Y'.             
+           05  SW-END-OF-STORE-CSR-SW       PIC X        VALUE 'N'.             
+               88  SW-END-OF-STORE-CSR                   VALUE 'Y'.             
+                                                                                
+       01  ABEND-CODE                     PIC S9(04)     VALUE ZERO             
+                                                         COMP SYNC.             
+                                                                                
+       01  LOC-DETAIL-RECORD.                                                   
+           05  LOC-TYPE-CODE               PIC X(02)     VALUE SPACES.          
+           05  LOC-STORE-NMBR              PIC X(05)     VALUE SPACES.          
+           05  LOC-STORE-NAME              PIC X(25)     VALUE SPACES.          
+           05  LOC-ADDRESS-1               PIC X(25)     VALUE SPACES.          
+           05  LOC-ADDRESS-2               PIC X(25)     VALUE SPACES.          
+           05  LOC-CITY                    PIC X(15)     VALUE SPACES.          
+           05  LOC-STATE                   PIC X(02)     VALUE SPACES.          
+           05  LOC-ZIP-CODE                PIC X(10)     VALUE SPACES.          
+           05  LOC-OPENED-DATE             PIC X(10)     VALUE SPACES.          
+           05  LOC-CLOSED-DATE             PIC X(10)     VALUE SPACES.          
+           05  LOC-CUR-DC-NMBR             PIC X(05)     VALUE SPACES.          
+           05  LOC-CUR-DC-START-DATE       PIC X(10)     VALUE SPACES.          
+           05  LOC-CUR-DC-STOP-DATE        PIC X(10)     VALUE SPACES.          
+           05  LOC-FUT-DC-NMBR             PIC X(05)     VALUE SPACES.          
+           05  LOC-FUT-DC-START-DATE       PIC X(10)     VALUE SPACES.          
+           05  LOC-FUT-DC-STOP-DATE        PIC X(10)     VALUE SPACES.          
+           05  LOC-RUN-DATE                PIC X(10)     VALUE SPACES.          
+           05  FILLER                      PIC X(11)     VALUE SPACES.          
+                                                                                
+       01  CHG-DETAIL-RECORD.                                                   
+           05  FILLER                      PIC X(02)     VALUE 'DC'.            
+           05  CHG-DC-NMBR                 PIC X(05)     VALUE SPACES.          
+           05  CHG-DC-DATE                 PIC X(10)     VALUE SPACES.          
+           05  FILLER                      PIC X(13)     VALUE SPACES.          
+                                                                                
+      *****************************************************************         
+      *  SQL ABEND ROUTINE WORKING STORAGE                                      
+      *****************************************************************         
+                                                                                
+           COPY DPWS004.                                                        
+                                                                                
+      *****************************************************************         
+      * DB2 TABLE DCLGENS NEEDED FOR THIS PROGRAM.                              
+      *****************************************************************         
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE XIT00000                                                 
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE XIT00001                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  LOCATION CURSOR DECLARATION                                            
+      ******************************************************************        
+           EXEC SQL                                                             
+               DECLARE LOCATION_CURSOR CURSOR                                   
+               FOR SELECT LOC_NBR                                               
+                        , LOC_NM                                                
+                        , LNE_1_ADDR                                            
+                        , CASE SUBSTR(LNE_2_ADDR,1,1)                           
+                          WHEN X'00' THEN SPACE(25)                             
+                          ELSE LNE_2_ADDR                                       
+                          END                                                   
+                        , CASE SUBSTR(CTY_NM,1,1)                               
+                          WHEN X'00' THEN SPACE(15)                             
+                          ELSE CTY_NM                                           
+                          END                                                   
+                        , ST_CDE                                                
+                        , ZIP_10_CDE                                            
+                        , OPN_DTE                                               
+                        , CLO_DTE                                               
+                        , LOC_TYP_CDE                                           
+               FROM     XIT_LOC                                                 
+               WHERE    CLO_DTE > :PV-CONTROL-DATE                              
+                 AND    (OPN_DTE - 120 DAYS < :PV-CONTROL-DATE                  
+                  OR     OPN_DTE - 120 DAYS = :PV-CONTROL-DATE)                 
+                 AND    LOC_TYP_CDE IN ('DS','DC')                              
+                 AND    LOC_NBR <> 6666                                         
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  DCREL CURSOR DECLARATION                                               
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               DECLARE DCREL_CURSOR CURSOR                                      
+               FOR SELECT DC_NBR                                                
+                        , EFF_BEG_DTE                                           
+                        , EFF_BEG_DTE - 1 DAY                                   
+               FROM     XIT_DC_LOC_ASGMT                                        
+               WHERE    LOC_NBR = :XIT00000-LOC-NBR                             
+                 AND    EFF_BEG_DTE - 120 DAYS <= :PV-CONTROL-DATE              
+                 ORDER BY EFF_BEG_DTE DESC                                      
+           END-EXEC.                                                            
+                                                                                
+       EJECT                                                                    
+       LINKAGE SECTION.                                                         
+                                                                                
+      ******************************************************************        
+      *  PROCEDURE DIVISION STARTS HERE.                                        
+      ******************************************************************        
+                                                                                
+       PROCEDURE DIVISION.                                                      
+                                                                                
+           MOVE '0090' TO PC-CORPORATE.                                         
+           PERFORM 1000-INITIALIZE THRU 1000-EXIT.                              
+           PERFORM 2000-GET-CORP-INFO THRU 2000-EXIT.                           
+           PERFORM 3000-GET-LOCATION-INFO THRU 3000-EXIT.                       
+           PERFORM 9000-EOJ-ROUTINE THRU 9000-EXIT.                             
+                                                                                
+           GOBACK.                                                              
+                                                                                
+      ******************************************************************        
+      *  INITIALIZATION ROUTINE                                                 
+      ******************************************************************        
+                                                                                
+       1000-INITIALIZE.                                                         
+                                                                                
+           ACCEPT PV-CONTROL-CARD.                                              
+                                                                                
+           IF PV-CONTROL-DATE = 'CURRENT'                                       
+              EXEC SQL                                                          
+                   SET :PV-CONTROL-DATE = CURRENT_DATE                          
+              END-EXEC.                                                         
+                                                                                
+           OPEN OUTPUT OUT-LOC-FILE                                             
+                       OUT-FUT-FILE.                                            
+                                                                                
+       1000-EXIT.                                                               
+           EXIT.                                                                
+                                                                                
+      ******************************************************************        
+      *  GET CORPORATE HEADQUARTER INFORMATION                                  
+      ******************************************************************        
+                                                                                
+       2000-GET-CORP-INFO.                                                      
+                                                                                
+           EXEC SQL                                                             
+                SELECT   LOC_NBR                                                
+                       , LOC_NM                                                 
+                       , LNE_1_ADDR                                             
+                       , LNE_2_ADDR                                             
+                       , CTY_NM                                                 
+                       , ST_CDE                                                 
+                       , ZIP_10_CDE                                             
+                 INTO    :XIT00000-LOC-NBR                                      
+                       , :XIT00000-LOC-NM                                       
+                       , :XIT00000-LNE-1-ADDR                                   
+                       , :XIT00000-LNE-2-ADDR                                   
+                       , :XIT00000-CTY-NM                                       
+                       , :XIT00000-ST-CDE                                       
+                       , :XIT00000-ZIP-10-CDE                                   
+                FROM   XIT_LOC                                                  
+                WHERE  LOC_NBR = :PC-CORPORATE                                  
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+              MOVE XIT00000-LOC-NBR         TO PV-LOC-STORE-NMBR-TEMP           
+              MOVE PV-LOC-STORE-NMBR-TEMP   TO LOC-STORE-NMBR                   
+              MOVE XIT00000-LOC-NM          TO LOC-STORE-NAME                   
+              MOVE XIT00000-LNE-1-ADDR      TO LOC-ADDRESS-1                    
+              MOVE XIT00000-LNE-2-ADDR      TO LOC-ADDRESS-2                    
+              MOVE XIT00000-CTY-NM          TO LOC-CITY                         
+              MOVE XIT00000-ST-CDE          TO LOC-STATE                        
+              MOVE XIT00000-ZIP-10-CDE      TO LOC-ZIP-CODE                     
+              MOVE PV-CONTROL-DATE          TO LOC-RUN-DATE                     
+              WRITE OUT-LOC-RECORD FROM LOC-DETAIL-RECORD                       
+           ELSE                                                                 
+              MOVE '2000-GET-CORP-INFO' TO PV-PARAGRAPH-NAME                    
+              MOVE 'SELECT/XIT_LOC' TO PV-DB2-OPERATION-ATTEMPTED               
+              PERFORM 9999-SQL-ABEND.                                           
+                                                                                
+       2000-EXIT.                                                               
+           EXIT.                                                                
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  GET LOCATION INFO AND THEN ALL STORE INFO FOR THAT DC.                 
+      ******************************************************************        
+                                                                                
+       3000-GET-LOCATION-INFO.                                                  
+                                                                                
+           PERFORM 3100-OPEN-LOCATION-CURSOR THRU 3100-EXIT.                    
+           PERFORM 3300-FETCH-LOCATION-CURSOR THRU 3300-EXIT.                   
+           PERFORM 3200-PROCESS-LOCATION THRU 3200-EXIT                         
+              UNTIL SW-END-OF-DC-CSR.                                           
+           PERFORM 3400-CLOSE-LOCATION-CURSOR THRU 3400-EXIT.                   
+                                                                                
+       3000-EXIT.                                                               
+           EXIT.                                                                
+                                                                                
+       3100-OPEN-LOCATION-CURSOR.                                               
+                                                                                
+           EXEC SQL                                                             
+                OPEN LOCATION_CURSOR                                            
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+              CONTINUE                                                          
+           ELSE                                                                 
+              MOVE '3100-OPEN-LOCATION-CURSOR' TO PV-PARAGRAPH-NAME             
+              MOVE 'OPEN LOCATION CURSOR' TO PV-DB2-OPERATION-ATTEMPTED         
+              PERFORM 9999-SQL-ABEND.                                           
+                                                                                
+       3100-EXIT.                                                               
+           EXIT.                                                                
+                                                                                
+       3200-PROCESS-LOCATION.                                                   
+                                                                                
+           MOVE SPACES TO LOC-DETAIL-RECORD.                                    
+                                                                                
+           MOVE XIT00000-LOC-TYP-CDE       TO LOC-TYPE-CODE.                    
+           MOVE XIT00000-LOC-NBR           TO PV-LOC-STORE-NMBR-TEMP.           
+           MOVE PV-LOC-STORE-NMBR-TEMP     TO LOC-STORE-NMBR.                   
+           MOVE XIT00000-LOC-NM            TO LOC-STORE-NAME.                   
+           MOVE XIT00000-LNE-1-ADDR        TO LOC-ADDRESS-1.                    
+           MOVE XIT00000-LNE-2-ADDR        TO LOC-ADDRESS-2.                    
+           MOVE XIT00000-CTY-NM            TO LOC-CITY.                         
+           MOVE XIT00000-ST-CDE            TO LOC-STATE.                        
+           MOVE XIT00000-ZIP-10-CDE        TO LOC-ZIP-CODE.                     
+                                                                                
+           IF XIT00000-OPN-DTE > PV-CONTROL-DATE AND                            
+              XIT00000-OPN-DTE < '9999-09-09'                                   
+                 MOVE XIT00000-OPN-DTE TO LOC-OPENED-DATE.                      
+                                                                                
+           IF XIT00000-CLO-DTE > PV-CONTROL-DATE AND                            
+              XIT00000-CLO-DTE < '9999-09-09'                                   
+                 MOVE XIT00000-CLO-DTE TO LOC-CLOSED-DATE.                      
+                                                                                
+           MOVE PV-CONTROL-DATE TO LOC-RUN-DATE.                                
+                                                                                
+           MOVE 'N' TO SW-END-OF-STORE-CSR-SW.                                  
+           IF LOC-TYPE-CODE = 'DS'                                              
+              PERFORM 4100-OPEN-DCREL-CURSOR THRU 4100-EXIT                     
+              PERFORM 4300-FETCH-DCREL-CURSOR THRU 4300-EXIT                    
+              PERFORM 4200-PROCESS-DCREL THRU 4200-EXIT                         
+              PERFORM 4400-CLOSE-DCREL-CURSOR THRU 4400-EXIT.                   
+           IF LOC-TYPE-CODE = 'DC'                                              
+              MOVE XIT00000-LOC-NBR TO PV-LOC-CUR-DC-NMBR-TEMP                  
+              MOVE PV-LOC-CUR-DC-NMBR-TEMP TO LOC-CUR-DC-NMBR                   
+              MOVE XIT00000-LOC-NBR TO PV-LOC-FUT-DC-NMBR-TEMP                  
+              MOVE PV-LOC-FUT-DC-NMBR-TEMP TO LOC-FUT-DC-NMBR                   
+              WRITE OUT-LOC-RECORD FROM LOC-DETAIL-RECORD.                      
+                                                                                
+           PERFORM 3300-FETCH-LOCATION-CURSOR THRU 3300-EXIT.                   
+                                                                                
+       3200-EXIT.                                                               
+           EXIT.                                                                
+                                                                                
+                                                                                
+       3300-FETCH-LOCATION-CURSOR.                                              
+                                                                                
+           INITIALIZE PV-RETRY-COUNT.                                           
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+                   UNTIL ((SQLCODE = 0)                                         
+                      OR  (SQLCODE = +100)                                      
+                      OR  (PV-RETRY-COUNT > PC-MAX-RETRIES))                    
+              EXEC SQL                                                          
+                   FETCH LOCATION_CURSOR                                        
+                   INTO  :XIT00000-LOC-NBR                                      
+                       , :XIT00000-LOC-NM                                       
+                       , :XIT00000-LNE-1-ADDR                                   
+                       , :XIT00000-LNE-2-ADDR                                   
+                       , :XIT00000-CTY-NM                                       
+                       , :XIT00000-ST-CDE                                       
+                       , :XIT00000-ZIP-10-CDE                                   
+                       , :XIT00000-OPN-DTE                                      
+                       , :XIT00000-CLO-DTE                                      
+                       , :XIT00000-LOC-TYP-CDE                                  
+              END-EXEC                                                          
+                                                                                
+              EVALUATE SQLCODE                                                  
+                  WHEN 0                                                        
+                       CONTINUE                                                 
+                  WHEN +100                                                     
+                       SET SW-END-OF-DC-CSR TO TRUE                             
+                  WHEN -904                                                     
+                       ADD +1 TO PV-RETRY-COUNT                                 
+                  WHEN -913                                                     
+                       ADD +1 TO PV-RETRY-COUNT                                 
+                  WHEN OTHER                                                    
+                       MOVE '3300-FETCH-LOCATION-CURSOR'                        
+                             TO PV-PARAGRAPH-NAME                               
+                       MOVE 'FETCH' TO PV-DB2-OPERATION-ATTEMPTED               
+                       PERFORM 9999-SQL-ABEND                                   
+              END-EVALUATE                                                      
+                                                                                
+           END-PERFORM.                                                         
+                                                                                
+           IF SQLCODE = -904 OR SQLCODE = -913                                  
+              MOVE '3300-FETCH-LOCATION-CURSOR' TO PV-PARAGRAPH-NAME            
+              MOVE 'FETCH' TO PV-DB2-OPERATION-ATTEMPTED                        
+              PERFORM 9999-SQL-ABEND                                            
+           END-IF.                                                              
+                                                                                
+       3300-EXIT.                                                               
+           EXIT.                                                                
+                                                                                
+                                                                                
+       3400-CLOSE-LOCATION-CURSOR.                                              
+                                                                                
+           EXEC SQL                                                             
+                CLOSE LOCATION_CURSOR                                           
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+              CONTINUE                                                          
+           ELSE                                                                 
+              MOVE '3400-CLOSE-LOCATION-CURSOR' TO PV-PARAGRAPH-NAME            
+              MOVE 'CLOSE CURSOR' TO PV-DB2-OPERATION-ATTEMPTED                 
+              PERFORM 9999-SQL-ABEND.                                           
+                                                                                
+       3400-EXIT.                                                               
+           EXIT.                                                                
+                                                                                
+                                                                                
+       4100-OPEN-DCREL-CURSOR.                                                  
+                                                                                
+           EXEC SQL                                                             
+                OPEN DCREL_CURSOR                                               
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+              CONTINUE                                                          
+           ELSE                                                                 
+              MOVE '4100-OPEN-DCREL-CURSOR' TO PV-PARAGRAPH-NAME                
+              MOVE 'OPEN CURSOR' TO PV-DB2-OPERATION-ATTEMPTED                  
+              PERFORM 9999-SQL-ABEND.                                           
+                                                                                
+       4100-EXIT.                                                               
+           EXIT.                                                                
+                                                                                
+                                                                                
+       4200-PROCESS-DCREL.                                                      
+                                                                                
+      ******************************************************************        
+      *   DETERMINE THE DC THAT IS CURRENTLY SERVICING THE STORE AND            
+      *   THE DC THAT WILL BE SERVICING THE STORE IN THE FUTURE.                
+      ******************************************************************        
+                                                                                
+           IF XIT00001-EFF-BEG-DTE <= PV-CONTROL-DATE                           
+                MOVE XIT00001-DC-NBR TO PV-LOC-CUR-DC-NMBR-TEMP                 
+                                        PV-LOC-FUT-DC-NMBR-TEMP                 
+                MOVE PV-LOC-CUR-DC-NMBR-TEMP TO LOC-CUR-DC-NMBR                 
+                MOVE PV-LOC-FUT-DC-NMBR-TEMP TO LOC-FUT-DC-NMBR                 
+                MOVE XIT00001-EFF-BEG-DTE TO LOC-CUR-DC-START-DATE              
+                                             LOC-FUT-DC-START-DATE              
+                MOVE '9999-09-09' TO LOC-CUR-DC-STOP-DATE                       
+                                     LOC-FUT-DC-STOP-DATE                       
+           ELSE                                                                 
+                MOVE XIT00001-DC-NBR TO PV-LOC-FUT-DC-NMBR-TEMP                 
+                MOVE PV-LOC-FUT-DC-NMBR-TEMP TO LOC-FUT-DC-NMBR                 
+                MOVE XIT00001-EFF-BEG-DTE TO LOC-FUT-DC-START-DATE              
+                MOVE '9999-09-09' TO LOC-FUT-DC-STOP-DATE                       
+                MOVE PV-EFF-BEG-DTE-MINUS-ONE TO LOC-CUR-DC-STOP-DATE           
+                                                                                
+                PERFORM 4300-FETCH-DCREL-CURSOR                                 
+                IF SQLCODE = 0                                                  
+                  IF XIT00001-EFF-BEG-DTE > PV-CONTROL-DATE                     
+                    DISPLAY '> 1 DC RELATIONSHIPS IN 120 DAYS PERIOD'           
+                    DISPLAY  XIT00001-DC-NBR                                    
+                    DISPLAY  XIT00001-EFF-BEG-DTE                               
+                    DISPLAY  PV-EFF-BEG-DTE-MINUS-ONE                           
+                    PERFORM 9999-SQL-ABEND                                      
+                  ELSE                                                          
+                    MOVE XIT00001-DC-NBR TO PV-LOC-CUR-DC-NMBR-TEMP             
+                    MOVE PV-LOC-CUR-DC-NMBR-TEMP TO LOC-CUR-DC-NMBR             
+                    MOVE XIT00001-EFF-BEG-DTE TO LOC-CUR-DC-START-DATE          
+                  END-IF                                                        
+                ELSE IF SQLCODE = +100                                          
+                  MOVE XIT00001-DC-NBR TO PV-LOC-CUR-DC-NMBR-TEMP               
+                  MOVE PV-LOC-CUR-DC-NMBR-TEMP TO LOC-CUR-DC-NMBR               
+                  MOVE XIT00001-EFF-BEG-DTE TO LOC-CUR-DC-START-DATE            
+                  MOVE '9999-09-09' TO LOC-CUR-DC-STOP-DATE                     
+                ELSE                                                            
+                  PERFORM 9999-SQL-ABEND                                        
+                END-IF                                                          
+           END-IF.                                                              
+                                                                                
+           MOVE PV-CONTROL-DATE TO LOC-RUN-DATE.                                
+           WRITE OUT-LOC-RECORD FROM LOC-DETAIL-RECORD.                         
+JF0405*    DISPLAY 'PV-CONTROL-DATE = ' PV-CONTROL-DATE.                        
+JF0405*    DISPLAY 'XIT00001-DC-NBR = ' XIT00001-DC-NBR.                        
+JF0405*    DISPLAY 'XIT00001-EFF-BEG-DTE = ' XIT00001-EFF-BEG-DTE.              
+JF0405*    DISPLAY 'XIT00000-LOC-NBR = ' XIT00000-LOC-NBR.                      
+JF0405*    DISPLAY 'LOC-CUR-DC-NMBR = ' LOC-CUR-DC-NMBR.                        
+JF0405*    DISPLAY 'LOC-CUR-DC-STOP-DATE = ' LOC-CUR-DC-STOP-DATE.              
+JF0405*    DISPLAY 'LOC-FUT-DC-START-DATE = ' LOC-FUT-DC-START-DATE.            
+JF0405*    DISPLAY ' '.                                                         
+      ******************************************************************        
+      *   IF THIS STORE IS CHANGING A DC RELATIONSHIP IN THE FUTURE,            
+      *   WRITE A DC CHANGE RECORD. A RELATIONSHIP IS CHANGING IF THE           
+      *   CURRENT DC RELATIONSHIP IS STOPPING AFTER THE RUN DATE OR             
+      *   A FUTURE RELATIONSHIP IS STARTING AFTER THE RUN DATE.                 
+      *   NOTE:  THE LOC-FUT-DC-START-DATE WILL BE USED FOR THE CHANGE          
+      *   DC DATE BECAUSE THE CHANGE WILL ACTUALLY BE EFF THE DAY AFTER         
+      *   A RELATIONSHIP IS STOPPED.  THE CURRENT DC WILL STILL RECEIVE         
+      *   FOR A STORE THROUGH THE STOP DATE.  IT WILL NOT RECEIVE FOR           
+      *   THAT STORE THE DAY AFTER THE STOP DATE.                               
+      ******************************************************************        
+                                                                                
+           IF LOC-CUR-DC-STOP-DATE > PV-CONTROL-DATE AND                        
+              LOC-CUR-DC-STOP-DATE < '9999-09-09'                               
+                 MOVE LOC-CUR-DC-NMBR TO CHG-DC-NMBR                            
+JF0405           MOVE LOC-FUT-DC-START-DATE TO CHG-DC-DATE                      
+                 WRITE OUT-FUT-RECORD FROM CHG-DETAIL-RECORD.                   
+                                                                                
+           IF LOC-FUT-DC-START-DATE > PV-CONTROL-DATE AND                       
+              LOC-FUT-DC-START-DATE < '9999-09-09'                              
+                 MOVE LOC-FUT-DC-NMBR TO CHG-DC-NMBR                            
+                 MOVE LOC-FUT-DC-START-DATE TO CHG-DC-DATE                      
+                 WRITE OUT-FUT-RECORD FROM CHG-DETAIL-RECORD.                   
+                                                                                
+       4200-EXIT.                                                               
+           EXIT.                                                                
+                                                                                
+                                                                                
+       4300-FETCH-DCREL-CURSOR.                                                 
+                                                                                
+           INITIALIZE PV-RETRY-COUNT.                                           
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+                   UNTIL ((SQLCODE = 0)                                         
+                      OR  (SQLCODE = +100)                                      
+                      OR  (PV-RETRY-COUNT > PC-MAX-RETRIES))                    
+              EXEC SQL                                                          
+                   FETCH DCREL_CURSOR                                           
+                   INTO  :XIT00001-DC-NBR                                       
+                       , :XIT00001-EFF-BEG-DTE                                  
+                       , :PV-EFF-BEG-DTE-MINUS-ONE                              
+              END-EXEC                                                          
+                                                                                
+              EVALUATE SQLCODE                                                  
+                  WHEN 0                                                        
+                       CONTINUE                                                 
+                  WHEN +100                                                     
+                       SET SW-END-OF-STORE-CSR TO TRUE                          
+                  WHEN -904                                                     
+                       ADD +1 TO PV-RETRY-COUNT                                 
+                  WHEN -913                                                     
+                       ADD +1 TO PV-RETRY-COUNT                                 
+                  WHEN OTHER                                                    
+                       MOVE '4300-FETCH-DCREL-CURSOR'                           
+                          TO PV-PARAGRAPH-NAME                                  
+                       MOVE 'FETCH' TO PV-DB2-OPERATION-ATTEMPTED               
+                       PERFORM 9999-SQL-ABEND                                   
+              END-EVALUATE                                                      
+                                                                                
+           END-PERFORM.                                                         
+                                                                                
+           IF SQLCODE = -904 OR SQLCODE = -913                                  
+              MOVE '4300-FETCH-DCREL-CURSOR' TO PV-PARAGRAPH-NAME               
+              MOVE 'FETCH' TO PV-DB2-OPERATION-ATTEMPTED                        
+              PERFORM 9999-SQL-ABEND                                            
+           END-IF.                                                              
+                                                                                
+       4300-EXIT.                                                               
+           EXIT.                                                                
+                                                                                
+                                                                                
+       4400-CLOSE-DCREL-CURSOR.                                                 
+                                                                                
+           EXEC SQL                                                             
+                CLOSE DCREL_CURSOR                                              
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+              CONTINUE                                                          
+           ELSE                                                                 
+              MOVE '4400-CLOSE-DCREL-CURSOR' TO PV-PARAGRAPH-NAME               
+              MOVE 'CLOSE CURSOR' TO PV-DB2-OPERATION-ATTEMPTED                 
+              PERFORM 9999-SQL-ABEND.                                           
+                                                                                
+       4400-EXIT.                                                               
+           EXIT.                                                                
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  END OF JOB ROUTINE.                                           *        
+      ******************************************************************        
+                                                                                
+       9000-EOJ-ROUTINE.                                                        
+                                                                                
+           CLOSE OUT-LOC-FILE                                                   
+                 OUT-FUT-FILE.                                                  
+                                                                                
+       9000-EXIT.                                                               
+           EXIT.                                                                
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  STANDARD DB2 ERROR ABEND ROUTINE                                       
+      *  THIS ROUTINE FORCES AN ABEND DUE TO A DB2 PROBLEM.                     
+      ******************************************************************        
+                                                                                
+       9999-SQL-ABEND.                                                          
+                                                                                
+           MOVE +4013 TO ABEND-CODE.                                            
+           DISPLAY '**  ABEND     **'.                                          
+           DISPLAY '**  PROGRAM   **  =  ETKUT010'.                             
+           DISPLAY '**  PARAGRAPH **  = ' PV-PARAGRAPH-NAME.                    
+           DISPLAY '**  OPERATION **  = ' PV-DB2-OPERATION-ATTEMPTED.           
+                                                                                
+      *    THE FOLLOWING COPYBOOK UTILIZES THE DB2 ABEND MODULE                 
+      *    DSNTIAR TO CONVERT SQLCA INTO UNDERSTANDABLE VERBAGE.                
+                                                                                
+           COPY DPPD004.                                                        
+                                                                                
+           CALL 'ILBOABN0'  USING ABEND-CODE.                                   
+                                                                                

@@ -1,0 +1,326 @@
+        /*  Rexx Exec                                                */         
+        /*                                                          */          
+        /*----------------------------------------------------------*/          
+        /* PURPOSE                                                  */          
+        /*----------------------------------------------------------*/          
+        /* Generate MODIFY STATISTICS utility statements to purge   */          
+        /* unneeded rows from the DB2 catalog history tables.       */          
+        /*                                                          */          
+        /* Statements will be generated based on purge criteria of  */          
+        /* history older than 2 years.                              */          
+        /*                                                          */          
+        /*----------------------------------------------------------*/          
+        /*            INPUT ARGUMENTS                               */          
+        /*                                                          */          
+        /* Argument #1: DB2 subsystem                               */          
+        /*----------------------------------------------------------*/          
+        /*            OUTPUT FILES                                  */          
+        /*                                                          */          
+        /* DDNAME               DESCRIPTION                         */          
+        /* --------             ----------------------------------  */          
+        /* OUTFILE              DB2 MODIFY STATISTICS control cards */          
+        /*----------------------------------------------------------*/          
+        /*                                                           */         
+                                                                                
+      /*  trace(results)  */                                                    
+                                                                                
+          Arg ssid                                                              
+                                                                                
+          PRNTLNE.0 = 1                                                         
+                                                                                
+          ADDRESS TSO "SUBCOM DSNREXX"                                          
+                                                                                
+          If RC then                                                            
+            S_RC = RXSUBCOM('ADD','DSNREXX','DSNREXX')                          
+                                                                                
+                                                                                
+      /* Connect to DB2 subsystem */                                            
+                                                                                
+          Address DSNREXX 'CONNECT' ssid                                        
+          If SQLCODE ^= 0 then do                                               
+           say 'Error on CONNECT to DB2 subsystem'                              
+           Call sqlerror                                                        
+           end                                                                  
+                                                                                
+          sqlstmt1= ,                                                           
+          'SELECT DATE(CURRENT TIMESTAMP - 2 YEARS) ' ,                         
+          ' FROM SYSIBM.SYSDUMMY1 WITH UR '                                     
+                                                                                
+          sqlstmt2= ,                                                           
+          'SELECT DISTINCT DBNAME,TSNAME  ' ,                                   
+          ' FROM SYSIBM.SYSTABLES_HIST    ' ,                                   
+          '  WHERE DATE(STATSTIME) < ?    ' ,                                   
+          'UNION                          ' ,                                   
+          'SELECT DISTINCT DBNAME,TSNAME  ' ,                                   
+          ' FROM SYSIBM.SYSTABLEPART_HIST ' ,                                   
+          '  WHERE DATE(STATSTIME) < ?    ' ,                                   
+          'UNION                          ' ,                                   
+          'SELECT DISTINCT DBNAME,NAME    ' ,                                   
+          'FROM SYSIBM.SYSLOBSTATS_HIST   ' ,                                   
+          '  WHERE DATE(STATSTIME) < ?    ' ,                                   
+          'ORDER BY 1,2  WITH UR          '                                     
+                                                                                
+          sqlstmt3= ,                                                           
+          'SELECT DISTINCT IXCREATOR, IXNAME ' ,                                
+          ' FROM SYSIBM.SYSINDEXPART_HIST    ' ,                                
+          '   WHERE DATE(STATSTIME) < ?      ' ,                                
+          'ORDER BY 1,2  WITH UR             '                                  
+                                                                                
+          sqlstmt4= ,                                                           
+          'SELECT DISTINCT DBNAME, INDEXSPACE ' ,                               
+          ' FROM SYSIBM.SYSINDEXES            ' ,                               
+          '   WHERE CREATOR = ? AND NAME = ?  ' ,                               
+          '     WITH UR                       '                                 
+                                                                                
+          Address DSNREXX 'EXECSQL DECLARE C1 CURSOR FOR S1'                    
+          If SQLCODE ^= 0 then do                                               
+           say 'Error on DECLARE C1 CURSOR'                                     
+           Call sqlerror                                                        
+           end                                                                  
+                                                                                
+          Address DSNREXX 'EXECSQL DECLARE C2 CURSOR FOR S2'                    
+          If SQLCODE ^= 0 then do                                               
+           say 'Error on DECLARE C2 CURSOR'                                     
+           Call sqlerror                                                        
+           end                                                                  
+                                                                                
+          Address DSNREXX 'EXECSQL DECLARE C3 CURSOR FOR S3'                    
+          If SQLCODE ^= 0 then do                                               
+           say 'Error on DECLARE C3 CURSOR'                                     
+           Call sqlerror                                                        
+           end                                                                  
+                                                                                
+          Address DSNREXX 'EXECSQL DECLARE C4 CURSOR FOR S4'                    
+          If SQLCODE ^= 0 then do                                               
+           say 'Error on DECLARE C4 CURSOR'                                     
+           Call sqlerror                                                        
+           end                                                                  
+                                                                                
+          Address DSNREXX                                                       
+            'EXECSQL PREPARE S1 INTO :OUTSQLD1 FROM :sqlstmt1'                  
+          If SQLCODE ^= 0 then do                                               
+           say 'Error on PREPARE of S1'                                         
+           Call sqlerror                                                        
+           end                                                                  
+                                                                                
+          Address DSNREXX                                                       
+            'EXECSQL PREPARE S2 INTO :OUTSQLD2 FROM :sqlstmt2'                  
+          If SQLCODE ^= 0 then do                                               
+           say 'Error on PREPARE of S2'                                         
+           Call sqlerror                                                        
+           end                                                                  
+                                                                                
+          Address DSNREXX                                                       
+            'EXECSQL PREPARE S3 INTO :OUTSQLD3 FROM :sqlstmt3'                  
+          If SQLCODE ^= 0 then do                                               
+           say 'Error on PREPARE of S3'                                         
+           Call sqlerror                                                        
+           end                                                                  
+                                                                                
+          Address DSNREXX                                                       
+            'EXECSQL PREPARE S4 INTO :OUTSQLD4 FROM :sqlstmt4'                  
+          If SQLCODE ^= 0 then do                                               
+           say 'Error on PREPARE of S4'                                         
+           Call sqlerror                                                        
+           end                                                                  
+                                                                                
+      purgerecfound = 'n'                                                       
+                                                                                
+      Call calcpurgedate                                                        
+      Call gentscards                                                           
+      Call genixcards                                                           
+                                                                                
+      if purgerecfound = 'y' then do                                            
+        Call writelastline                                                      
+        end                                                                     
+                                                                                
+  exit                                                                          
+                                                                                
+                                                                                
+ /* Calculate the date 2 years prior to today's date */                         
+                                                                                
+  calcpurgedate:                                                                
+                                                                                
+   EXECSQL 'OPEN C1'                                                            
+   If SQLCODE ^= 0 then do                                                      
+    say 'Error on OPEN C1'                                                      
+    Call sqlerror                                                               
+    end                                                                         
+                                                                                
+   EXECSQL 'FETCH C1 USING DESCRIPTOR :OUTSQLD1'                                
+   select                                                                       
+     when SQLCODE = 0 Then Do                                                   
+       purgedate = OUTSQLD1.1.SQLDATA                                           
+       end                                                                      
+     otherwise                                                                  
+       say 'Error on FETCH C1'                                                  
+       Call sqlerror                                                            
+   end                                                                          
+                                                                                
+   EXECSQL CLOSE C1                                                             
+   If SQLCODE ^= 0 then do                                                      
+    say 'Error on CLOSE of C1'                                                  
+    Call sqlerror                                                               
+    end                                                                         
+                                                                                
+  return                                                                        
+                                                                                
+                                                                                
+ /* Write MODIFY STATISTICS tablespace control cards */                         
+                                                                                
+  gentscards:                                                                   
+                                                                                
+   EXECSQL 'OPEN C2 USING :purgedate, :purgedate, :purgedate'                   
+   If SQLCODE ^= 0 then do                                                      
+    say 'Error on OPEN C2'                                                      
+    Call sqlerror                                                               
+    end                                                                         
+                                                                                
+  Do Until(SQLCODE  ^= 0)                                                       
+    EXECSQL 'FETCH C2 USING DESCRIPTOR :OUTSQLD2'                               
+    select                                                                      
+      when SQLCODE = 0 Then Do                                                  
+        call writetsrec                                                         
+        end                                                                     
+      when SQLCODE = 100 Then Do                                                
+        nop                                                                     
+        end                                                                     
+      otherwise                                                                 
+        say 'Error on FETCH C2'                                                 
+        Call sqlerror                                                           
+    end                                                                         
+  end                                                                           
+                                                                                
+  EXECSQL CLOSE C2                                                              
+  If SQLCODE ^= 0 then do                                                       
+   say 'Error on CLOSE of C2'                                                   
+   Call sqlerror                                                                
+   end                                                                          
+                                                                                
+  return                                                                        
+                                                                                
+                                                                                
+  writetsrec:                                                                   
+                                                                                
+  if purgerecfound = 'n' then do                                                
+    purgerecfound = 'y'                                                         
+    outrec = ' LISTDEF OBJLIST '                                                
+    PRNTLNE.1 = outrec                                                          
+    ADDRESS TSO  "EXECIO " PRNTLNE.0 "DISKW OUTFILE (STEM PRNTLNE."             
+    end                                                                         
+                                                                                
+  database   = OUTSQLD2.1.SQLDATA                                               
+  tspace     = OUTSQLD2.2.SQLDATA                                               
+                                                                                
+  outrec = ' INCLUDE TABLESPACE ' || STRIP(database,'T') || '.' ,               
+           || STRIP(tspace,'T')                                                 
+  PRNTLNE.1 = outrec                                                            
+  ADDRESS TSO  "EXECIO " PRNTLNE.0 "DISKW OUTFILE (STEM PRNTLNE."               
+                                                                                
+return                                                                          
+                                                                                
+                                                                                
+ /* Write MODIFY STATISTICS index control cards */                              
+                                                                                
+  genixcards:                                                                   
+                                                                                
+   EXECSQL 'OPEN C3 USING :purgedate'                                           
+   If SQLCODE ^= 0 then do                                                      
+    say 'Error on OPEN C3'                                                      
+    Call sqlerror                                                               
+    end                                                                         
+                                                                                
+  Do Until(SQLCODE  ^= 0)                                                       
+    EXECSQL 'FETCH C3 USING DESCRIPTOR :OUTSQLD3'                               
+    select                                                                      
+      when SQLCODE = 0 Then Do                                                  
+        call writeixrec                                                         
+        end                                                                     
+      when SQLCODE = 100 Then Do                                                
+        nop                                                                     
+        end                                                                     
+      otherwise                                                                 
+        say 'Error on FETCH C3'                                                 
+        Call sqlerror                                                           
+    end                                                                         
+  end                                                                           
+                                                                                
+  EXECSQL CLOSE C3                                                              
+  If SQLCODE ^= 0 then do                                                       
+   say 'Error on CLOSE of C3'                                                   
+   Call sqlerror                                                                
+   end                                                                          
+                                                                                
+  return                                                                        
+                                                                                
+                                                                                
+  writeixrec:                                                                   
+                                                                                
+  ixcreator  = OUTSQLD3.1.SQLDATA                                               
+  ixname     = OUTSQLD3.2.SQLDATA                                               
+                                                                                
+   EXECSQL 'OPEN C4 using :ixcreator, :ixname'                                  
+   If SQLCODE ^= 0 then do                                                      
+    say 'Error on OPEN C4'                                                      
+    Call sqlerror                                                               
+    end                                                                         
+                                                                                
+   EXECSQL 'FETCH C4 USING DESCRIPTOR :OUTSQLD4'                                
+   select                                                                       
+     when SQLCODE = 0 Then Do                                                   
+       ix_dbname = OUTSQLD4.1.SQLDATA                                           
+       ix_space  = OUTSQLD4.2.SQLDATA                                           
+       end                                                                      
+     otherwise                                                                  
+       say 'Error on FETCH C4'                                                  
+       Call sqlerror                                                            
+   end                                                                          
+                                                                                
+   EXECSQL CLOSE C4                                                             
+   If SQLCODE ^= 0 then do                                                      
+    say 'Error on CLOSE of C4'                                                  
+    Call sqlerror                                                               
+    end                                                                         
+                                                                                
+  if purgerecfound = 'n' then do                                                
+    purgerecfound = 'y'                                                         
+    outrec = ' LISTDEF OBJLIST '                                                
+    PRNTLNE.1 = outrec                                                          
+    ADDRESS TSO  "EXECIO " PRNTLNE.0 "DISKW OUTFILE (STEM PRNTLNE."             
+    end                                                                         
+                                                                                
+  outrec = ' INCLUDE INDEXSPACES INDEXSPACE ' ,                                 
+             || STRIP(ix_dbname,'T') || '.'   ,                                 
+             || STRIP(ix_space,'T')                                             
+  PRNTLNE.1 = outrec                                                            
+  ADDRESS TSO  "EXECIO " PRNTLNE.0 "DISKW OUTFILE (STEM PRNTLNE."               
+                                                                                
+return                                                                          
+                                                                                
+                                                                                
+  writelastline:                                                                
+                                                                                
+  purgeyear  = SUBSTR(purgedate,1,4)                                            
+  purgemonth = SUBSTR(purgedate,6,2)                                            
+  purgeday   = SUBSTR(purgedate,9,2)                                            
+                                                                                
+  outrec = ' '                                                                  
+  PRNTLNE.1 = outrec                                                            
+  ADDRESS TSO  "EXECIO " PRNTLNE.0 "DISKW OUTFILE (STEM PRNTLNE."               
+                                                                                
+  outrec = ' MODIFY STATISTICS LIST OBJLIST'                                    
+  PRNTLNE.1 = outrec                                                            
+  ADDRESS TSO  "EXECIO " PRNTLNE.0 "DISKW OUTFILE (STEM PRNTLNE."               
+                                                                                
+  outrec = '   DELETE ALL DATE(' || purgeyear || purgemonth || ,                
+           purgeday || ')'                                                      
+  PRNTLNE.1 = outrec                                                            
+  ADDRESS TSO  "EXECIO " PRNTLNE.0 "DISKW OUTFILE (STEM PRNTLNE."               
+                                                                                
+  return                                                                        
+                                                                                
+                                                                                
+sqlerror:                                                                       
+                                                                                
+ say 'sqlcode = ' sqlcode                                                       
+ exit rc                                                                        

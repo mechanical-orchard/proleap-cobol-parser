@@ -1,0 +1,710 @@
+000100 IDENTIFICATION DIVISION.                                         00010009
+000200 PROGRAM-ID.         AHKUP031.                                    00020009
+000300 AUTHOR.             NANCY EILBES.                                00030009
+000400 DATE-WRITTEN.       APRIL 2000.                                  00040009
+000500 DATE-COMPILED.                                                   00050009
+000600*************************************************************     00060009
+000700*    COBOL 2 WITH SQL                                       *     00070009
+000800*                                                           *     00080009
+000900*   AHKUP031 - ARCHIVE HISTORY DATA DELETION - TPREQIT      *     00090009
+001000*                                                           *     00100009
+001100*   PROGRAM OVERVIEW:                                       *     00110009
+001200*                                                           *     00120009
+001300*  THIS PROGRAM DELETES "OLD" ROWS FROM DB2 TABLE TPREQIT.  *     00130009
+001400*  ROWS DELETED ARE THOSE PREVIOUSLY - IDENTIFIED/EXTRACTED *     00140009
+001500*  WITHIN THE ARCHIVE/HISTORY SYSTEM.                       *     00150009
+001600*                                                           *     00160009
+001700*  THE EXTRACT FILE USED AS INPUT WILL BE SORTED BY THE     *     00170009
+001800*  CLUSTERING INDEX COLUMNS TO SPEED THE DELETION PROCESS.  *     00180009
+001900*  THESE COLUMNS ARE PO_NBR, PAYT_REQ_SEQ_NBR.              *     00190009
+002000*                                                           *     00200009
+002100*  NOTE THAT CASCADE/DELETE WILL ALSO REMOVE RELATED ROWS   *     00210009
+002200*  FROM THE FOLLOWING TABLES:                               *     00220009
+002300*  - TMIITEM                                                *     00230009
+002400*  - TVNDINV                                                *     00240009
+002500*                                                           *     00250009
+002600*   INPUT:                                                  *     00260009
+002700*                                                           *     00270009
+002800*     1. TPREQIT DELETION FILE  COPYBOOK DCLTPREQIT         *     00280009
+002900*                                                           *     00290009
+003000*   DB2 TABLES:                                             *     00300009
+003100*                                                           *     00310009
+003200*        TPREQIT - PAYMENT REQUEST ITEM TABLE               *     00320009
+003300*        TMIITEM - MDS INVOICE ITEM TABLE                   *     00330009
+003400*        TVNDINV - VENDOR INVOICE DETAIL TABLE              *     00340009
+003500*        TCKRSTIN - CHECKPOINT/RESTART INFO TABLE           *     00350009
+003600*        TCKRSTCN - CHECKPOINT/RESTART CONTROL TABLE        *     00360009
+003700*                                                           *     00370009
+003800*************************************************************     00380009
+003900*                                                           *     00390009
+004000*************************************************************     00400009
+004100 EJECT                                                            00410009
+004200 ENVIRONMENT DIVISION.                                            00420009
+004300 CONFIGURATION SECTION.                                           00430009
+004400 SOURCE-COMPUTER.        IBM-370.                                 00440009
+004500 OBJECT-COMPUTER.        IBM-370.                                 00450009
+004600                                                                  00460009
+004700 INPUT-OUTPUT SECTION.                                            00470009
+004800 FILE-CONTROL.                                                    00480009
+004900     SELECT TPREQIT-EXTRACT-FILE ASSIGN TO INP01.                 00490009
+005000                                                                  00500009
+005100 DATA DIVISION.                                                   00510009
+005200 FILE SECTION.                                                    00520009
+005300 FD  TPREQIT-EXTRACT-FILE                                         00530009
+005400     RECORDING MODE IS F                                          00540009
+005500     LABEL RECORDS ARE STANDARD                                   00550009
+005600     BLOCK CONTAINS 0 RECORDS                                     00560009
+005700     RECORD CONTAINS 20 CHARACTERS                                00570009
+005800     DATA RECORD IS TPREQIT-EXTRACT-DATA.                         00580009
+005900 01  TPREQIT-EXTRACT-DATA       PIC X(20).                        00590009
+006000                                                                  00600009
+006100                                                                  00610009
+006200 EJECT                                                            00620009
+006300 WORKING-STORAGE SECTION.                                         00630009
+006400                                                                  00640009
+006500 01  FILLER                       PIC X(58)     VALUE             00650009
+006600     '************WORKING STORAGE STARTS HERE*******************'.00660009
+006700                                                                  00670009
+006800 01  PV-PROGRAM-VARIABLES.                                        00680009
+006900     05  PV-PROGRAM-NAME          PIC  X(08)    VALUE 'AHKUP031'. 00690009
+007000     05  PV-CKPT-STAT-CODE        PIC X(01)     VALUE SPACE.      00700009
+007100     05  PV-CURRENT-PARAGRAPH     PIC X(50)     VALUE SPACES.     00710009
+007200     05  PV-CURRENT-TMST          PIC X(26)     VALUE SPACES.     00720009
+007300                                                                  00730009
+007400     05  PV-TPREQIT-INPUT-COUNT   PIC 9(09)     VALUE ZERO        00740009
+007500                                                COMP-3.           00750009
+007600     05  PV-TPREQIT-DELETE-COUNT  PIC 9(09)     VALUE ZERO        00760009
+007700                                                COMP-3.           00770009
+007800     05  PV-SQL-DELETE-COUNT      PIC S9(09)    VALUE ZERO        00780009
+007900                                                COMP-3.           00790009
+008000     05  PV-SQLERRD3              PIC S9(09)    VALUE ZERO        00800009
+008100                                                COMP-3.           00810009
+008200     05  PV-DISP-PAYT-REQ-SEQ-NBR PIC X(09)    VALUE SPACES.      00820009
+008300     05  PV-DISP-PAYT-REQ-LNE-NBR PIC X(09)    VALUE SPACES.      00830009
+008400 01  PC-PROGRAM-CONSTANTS.                                        00840009
+008500     05  PC-RETRY-MAX             PIC S9(04)    VALUE +3          00850009
+008600                                                COMP SYNC.        00860009
+008700     05  PC-RETRY-COUNT           PIC S9(04)    VALUE ZEROS.      00870009
+008800     05  PC-IN-PROCESS-CODE       PIC X(01)     VALUE '9'.        00880009
+008900     05  PC-RUN-COMPLETE-CODE     PIC X(01)     VALUE '0'.        00890009
+009000                                                                  00900009
+009100 01  PS-PROGRAM-SWITCHES.                                         00910009
+009200     05  PS-COMMITS-TAKEN-SW      PIC  X(01)    VALUE 'N'.        00920009
+009300         88  COMMITS-TAKEN                      VALUE 'T'.        00930009
+009400         88  NO-COMMITS-TAKEN                   VALUE 'N'.        00940009
+009500     05  PS-END-EXTRACT-SW        PIC  X(01)    VALUE 'M'.        00950009
+009600         88  MORE-EXTRACT                       VALUE 'M'.        00960009
+009700         88  END-OF-EXTRACT                     VALUE 'E'.        00970009
+009800     05  PS-RUN-TYPE-SW           PIC  X(01)    VALUE ' '.        00980009
+009900         88  NORMAL-RUN                         VALUE '0'.        00990009
+010000         88  RESTART-RUN                        VALUE '9'.        01000009
+010100                                                                  01010009
+010200 01  WS-COUNTER.                                                  01020009
+010300     05  WS-HOLD-TMST             PIC X(26)     VALUE SPACES.     01030009
+010400     05  WS-TMST                  PIC X(26)     VALUE SPACES.     01040009
+010500                                                                  01050009
+010600 01  CKPT-RESTART-INFO.                                           01060009
+010700     05  CR-EXTRACT-RECS-WORKED   PIC  9(9)     VALUE ZERO.       01070009
+010800                                                                  01080009
+010900*----------------------------------------------------------------*01090009
+011000*  ABEND DATA AREAS                                              *01100009
+011100*----------------------------------------------------------------*01110009
+011200 01  ABEND-CODE                  PIC S9(04)  VALUE ZEROS          01120009
+011300                                             COMP SYNC.           01130009
+011400     88  AC-BAD-RECEIVE-DATA                 VALUE +4001.         01140009
+011500     88  AC-BAD-DATA                         VALUE +4008.         01150009
+011600     88  AC-DB2-ERROR                        VALUE +4013.         01160009
+011700     88  AC-DATE-ERROR                       VALUE +4019.         01170009
+011800                                                                  01180009
+011900                                                                  01190009
+012000 01  ABEND-AREAS.                                                 01200009
+012100     05  AA-ABEND-LIT            PIC  X(40)  VALUE                01210009
+012200             '*****       ABEND'.                                 01220009
+012300     05  AA-PROGRAM-LIT          PIC  X(40)  VALUE                01230009
+012400             '*****   PROGRAM: AHKUP031'.                         01240009
+012500     05  AA-PARAGRAPH-LIT.                                        01250009
+012600         10  FILLER              PIC  X(17)  VALUE                01260009
+012700             '***** PARAGRAPH: '.                                 01270009
+012800         10  AA-PARAGRAPH-NAME   PIC  X(35)  VALUE SPACES.        01280009
+012900     05  AA-MESSAGE-LINE-1.                                       01290009
+013000         10  FILLER              PIC  X(06)  VALUE '*****'.       01300009
+013100         10  AA-MESSAGE-1        PIC  X(127) VALUE SPACES.        01310009
+013200     05  AA-MESSAGE-LINE-2.                                       01320009
+013300         10  FILLER              PIC  X(06)  VALUE '*****'.       01330009
+013400         10  AA-MESSAGE-2        PIC  X(127) VALUE SPACES.        01340009
+013500     05  AA-DB2-ERROR-LIT        PIC  X(40)  VALUE                01350009
+013600             '*****    DB2 ERROR'.                                01360009
+013700     05  AA-DB2-OPERATION-LIT.                                    01370009
+013800         10  FILLER              PIC  X(17)  VALUE                01380009
+013900             '***** OPERATION: '.                                 01390009
+014000         10  AA-DB2-OPERATION    PIC  X(50)  VALUE SPACES.        01400009
+014100     05  AA-DB2-TABLE            PIC  X(08)  VALUE SPACES.        01410009
+014200     EJECT                                                        01420009
+014300                                                                  01430009
+014400     COPY DPWS004.                                                01440009
+014500     EJECT                                                        01450009
+014600*----------------------------------------------------------------*01460009
+014700*      TPREQIT TABLE LAYOUT                                       01470009
+014800*----------------------------------------------------------------*01480009
+014900         EXEC SQL                                                 01490009
+015000             INCLUDE TPREQIT                                      01500009
+015100         END-EXEC.                                                01510009
+015200                                                                  01520009
+015300*----------------------------------------------------------------*01530009
+015400*      TCKRSTCNTL TABLE LAYOUT                                    01540009
+015500*----------------------------------------------------------------*01550009
+015600         EXEC SQL                                                 01560009
+015700             INCLUDE TCKRSTCN                                     01570009
+015800         END-EXEC.                                                01580009
+015900                                                                  01590009
+016000*----------------------------------------------------------------*01600009
+016100*      TCKRSTINF TABLE LAYOUT                                     01610009
+016200*----------------------------------------------------------------*01620009
+016300         EXEC SQL                                                 01630009
+016400             INCLUDE TCKRSTIN                                     01640009
+016500         END-EXEC.                                                01650009
+016600 EJECT                                                            01660009
+016700*----------------------------------------------------------------*01670009
+016800*  DB2 COMMUNICATION AREA                                         01680009
+016900*----------------------------------------------------------------*01690009
+017000*                                                                 01700009
+017100     EXEC SQL                                                     01710009
+017200         INCLUDE SQLCA                                            01720009
+017300     END-EXEC.                                                    01730009
+017400                                                                  01740009
+017500*----------------------------------------------------------------*01750009
+017600*  DB2 COMMUNICATION AREA2                                        01760009
+017700*----------------------------------------------------------------*01770009
+017800*                                                                 01780009
+017900     COPY SQLCA2.                                                 01790009
+018000     EJECT                                                        01800009
+018100 PROCEDURE DIVISION.                                              01810009
+018200 A100-MAINLINE-ROUTINE.                                           01820009
+018300                                                                  01830009
+018400     PERFORM B100-INITIALIZATION.                                 01840009
+018500                                                                  01850009
+018600     PERFORM B200-TPREQIT-EXTRACT-PROCESS                         01860009
+018700       UNTIL END-OF-EXTRACT.                                      01870009
+018800                                                                  01880009
+018900     PERFORM B300-EOJ-PROCESSING.                                 01890009
+019000                                                                  01900009
+019100     GOBACK.                                                      01910009
+019200 EJECT                                                            01920009
+019300 B100-INITIALIZATION.                                             01930009
+019400                                                                  01940009
+019500     EXEC SQL                                                     01950009
+019600         SET :PV-CURRENT-TMST = CURRENT TIMESTAMP                 01960009
+019700     END-EXEC.                                                    01970009
+019800                                                                  01980009
+019900     PERFORM X300-GET-CHECKPOINT-CNTL.                            01990009
+020000     MOVE PV-CKPT-STAT-CODE TO PS-RUN-TYPE-SW.                    02000009
+020100                                                                  02010009
+020200     OPEN INPUT TPREQIT-EXTRACT-FILE.                             02020009
+020300                                                                  02030009
+020400     IF RESTART-RUN                                               02040009
+020500         PERFORM X200-CHECKPOINT-RESTART                          02050009
+020600     ELSE                                                         02060009
+020700         PERFORM R100-READ-EXTRACT-FILE                           02070009
+020800     END-IF.                                                      02080009
+020900                                                                  02090009
+021000     PERFORM X500-SET-CHECKPOINT-TIME.                            02100009
+021100                                                                  02110009
+021200                                                                  02120009
+021300     EJECT                                                        02130009
+021400 B200-TPREQIT-EXTRACT-PROCESS.                                    02140009
+021500                                                                  02150009
+021600     MOVE PREQIT-PAYT-REQ-SEQ-NBR   TO PV-DISP-PAYT-REQ-SEQ-NBR.  02160009
+021700     MOVE PREQIT-PAYT-REQ-LNE-NBR   TO PV-DISP-PAYT-REQ-LNE-NBR.  02170009
+021800                                                                  02180009
+021900     PERFORM D100-DELETE-TPREQIT.                                 02190009
+022000                                                                  02200009
+022100     PERFORM X100-CHECKPOINT-CHECK.                               02210009
+022200                                                                  02220009
+022300     PERFORM R100-READ-EXTRACT-FILE.                              02230009
+022400     EJECT                                                        02240009
+022500                                                                  02250009
+022600                                                                  02260009
+022700 B300-EOJ-PROCESSING.                                             02270009
+022800                                                                  02280009
+022900     DISPLAY '** AHKUP031 SUMMARY **'.                            02290009
+023000     DISPLAY '** TPREQIT INPUT COUNT = ' PV-TPREQIT-INPUT-COUNT.  02300009
+023100     DISPLAY '** TPREQIT DELETE COUNT = ' PV-TPREQIT-DELETE-COUNT.02310009
+023200     DISPLAY '** SQL DELETE COUNT = ' PV-SQL-DELETE-COUNT.        02320009
+023300                                                                  02330009
+023400     CLOSE  TPREQIT-EXTRACT-FILE.                                 02340009
+023500                                                                  02350009
+023600     MOVE PC-RUN-COMPLETE-CODE TO PV-CKPT-STAT-CODE.              02360009
+023700     PERFORM X600-UPDATE-TCKRSTCNTL.                              02370009
+023800                                                                  02380009
+023900     EJECT                                                        02390009
+024000*----------------------------------------------------------------*02400009
+024100*    DELETES FROM THE TPREQIT TABLE.  CASCADE DELETE WILL ALSO   *02410009
+024200*    CAUSE ROWS TO BE DELETED FROM TMIITEM, TVNDINV AND TEXINVC  *02420009
+024300*    TABLES.                                                     *02430009
+024400*----------------------------------------------------------------*02440009
+024500 D100-DELETE-TPREQIT.                                             02450009
+024600                                                                  02460009
+024700     MOVE 'D100-DELETE-TPREQIT' TO PV-CURRENT-PARAGRAPH.          02470009
+024800                                                                  02480009
+024900     PERFORM WITH TEST AFTER                                      02490009
+025000        VARYING PC-RETRY-COUNT FROM 1 BY 1                        02500009
+025100          UNTIL PC-RETRY-COUNT > PC-RETRY-MAX                     02510009
+025200             OR SQLCODE = ZERO                                    02520009
+025300                                                                  02530009
+025400         EXEC SQL                                                 02540009
+025500              DELETE                                              02550009
+025600                FROM TPREQIT                                      02560009
+025700               WHERE PAYT_REQ_SEQ_NBR  = :PREQIT-PAYT-REQ-SEQ-NBR 02570009
+025800                 AND PAYT_REQ_LNE_NBR  = :PREQIT-PAYT-REQ-LNE-NBR 02580009
+025900         END-EXEC                                                 02590009
+026000                                                                  02600009
+026100         EVALUATE TRUE                                            02610009
+026200             WHEN SQLCODE = ZERO                                  02620009
+026300                 ADD 1 TO PV-TPREQIT-DELETE-COUNT                 02630009
+026400                 MOVE SQLERRD(3) TO PV-SQLERRD3                   02640009
+026500                 ADD PV-SQLERRD3 TO PV-SQL-DELETE-COUNT           02650009
+026600                                                                  02660009
+026700             WHEN SQLCODE = -904                                  02670009
+026800             WHEN SQLCODE = -913                                  02680009
+026900                  CONTINUE                                        02690009
+027000                                                                  02700009
+027100             WHEN SQLCODE = +100                                  02710009
+027200                 MOVE PV-CURRENT-PARAGRAPH                        02720009
+027300                                     TO AA-PARAGRAPH-NAME         02730009
+027400                 DISPLAY '******** PAY REQ SEQ#:'                 02740009
+027500                          PV-DISP-PAYT-REQ-SEQ-NBR                02750009
+027600                 DISPLAY '******** REQ LINE NBR:'                 02760009
+027700                          PV-DISP-PAYT-REQ-LNE-NBR                02770009
+027800                 MOVE 'ROW NOT ON TABLE ********'                 02780009
+027900                          TO AA-MESSAGE-1                         02790009
+028000                 MOVE SPACES TO AA-MESSAGE-2                      02800009
+028100                 MOVE 'UNSUCCESSFUL DELETE'                       02810009
+028200                          TO AA-DB2-OPERATION                     02820009
+028300                 MOVE 'TPREQIT'  TO AA-DB2-TABLE                  02830009
+028400                 PERFORM Z999-DB2-ABEND                           02840009
+028500             WHEN SQLWARN0 NOT = SPACES                           02850009
+028600             WHEN SQLCODE  NOT = ZERO                             02860009
+028700                 MOVE PV-CURRENT-PARAGRAPH                        02870009
+028800                                     TO AA-PARAGRAPH-NAME         02880009
+028900                 DISPLAY '******** PAY REQ SEQ#:'                 02890009
+029000                          PV-DISP-PAYT-REQ-SEQ-NBR                02900009
+029100                 DISPLAY '******** REQ LINE NBR:'                 02910009
+029200                          PV-DISP-PAYT-REQ-LNE-NBR                02920009
+029300                 MOVE SPACES TO AA-MESSAGE-1                      02930009
+029400                                AA-MESSAGE-2                      02940009
+029500                 MOVE 'UNSUCCESSFUL DELETE'                       02950009
+029600                                     TO AA-DB2-OPERATION          02960009
+029700                 MOVE 'TPREQIT'      TO AA-DB2-TABLE              02970009
+029800                 PERFORM Z999-DB2-ABEND                           02980009
+029900         END-EVALUATE                                             02990009
+030000     END-PERFORM.                                                 03000009
+030100                                                                  03010009
+030200     IF PC-RETRY-COUNT > PC-RETRY-MAX                             03020009
+030300         MOVE PV-CURRENT-PARAGRAPH                                03030009
+030400                             TO AA-PARAGRAPH-NAME                 03040009
+030500         DISPLAY '******** PAY REQ SEQ#:'                         03050009
+030600                          PV-DISP-PAYT-REQ-SEQ-NBR                03060009
+030700         DISPLAY '******** REQ LINE NBR :'                        03070009
+030800                          PV-DISP-PAYT-REQ-LNE-NBR                03080009
+030900         MOVE SPACES TO AA-MESSAGE-1                              03090009
+031000                        AA-MESSAGE-2                              03100009
+031100         MOVE 'MAX RETRIES EXCEEDED ON DELETE'                    03110009
+031200                             TO AA-DB2-OPERATION                  03120009
+031300         MOVE 'TPREQIT'      TO AA-DB2-TABLE                      03130009
+031400         PERFORM Z999-DB2-ABEND                                   03140009
+031500     END-IF.                                                      03150009
+031600                                                                  03160009
+031700     EJECT                                                        03170009
+031800 R100-READ-EXTRACT-FILE.                                          03180009
+031900                                                                  03190009
+032000     READ TPREQIT-EXTRACT-FILE                                    03200009
+032100          INTO DCLTPREQIT                                         03210009
+032200          AT END SET END-OF-EXTRACT TO TRUE.                      03220009
+032300                                                                  03230009
+032400     IF MORE-EXTRACT                                              03240009
+032500         ADD 1 TO PV-TPREQIT-INPUT-COUNT                          03250009
+032600     END-IF.                                                      03260009
+032700                                                                  03270009
+032800                                                                  03280009
+032900     EJECT                                                        03290009
+033000*----------------------------------------------------------------*03300009
+033100*    CHECK TO SEE IF A CHECKPOINT SHOULD BE TAKEN.               *03310009
+033200*----------------------------------------------------------------*03320009
+033300 X100-CHECKPOINT-CHECK.                                           03330009
+033400                                                                  03340009
+033500     MOVE 'X100-CHECKPOINT-CHECK' TO PV-CURRENT-PARAGRAPH.        03350009
+033600                                                                  03360009
+033700     EXEC SQL                                                     03370009
+033800       SET :WS-TMST = CURRENT TIMESTAMP                           03380009
+033900     END-EXEC.                                                    03390009
+034000                                                                  03400009
+034100     IF SQLCODE = +0                                              03410009
+034200         CONTINUE                                                 03420009
+034300     ELSE                                                         03430009
+034400         MOVE PV-CURRENT-PARAGRAPH                                03440009
+034500                             TO AA-PARAGRAPH-NAME                 03450009
+034600         MOVE SPACES TO AA-MESSAGE-1                              03460009
+034700                        AA-MESSAGE-2                              03470009
+034800         MOVE 'BAD SET COMMAND'                                   03480009
+034900                             TO AA-DB2-OPERATION                  03490009
+035000         MOVE SPACES             TO AA-DB2-TABLE                  03500009
+035100         PERFORM Z999-DB2-ABEND                                   03510009
+035200     END-IF.                                                      03520009
+035300                                                                  03530009
+035400     IF WS-TMST > WS-HOLD-TMST                                    03540009
+035500         IF NO-COMMITS-TAKEN                                      03550009
+035600             MOVE PC-IN-PROCESS-CODE TO PV-CKPT-STAT-CODE         03560009
+035700             PERFORM X600-UPDATE-TCKRSTCNTL                       03570009
+035800             SET COMMITS-TAKEN TO TRUE                            03580009
+035900         END-IF                                                   03590009
+036000         PERFORM X700-UPDATE-TCKRSTINF                            03600009
+036100         PERFORM Y100-COMMIT                                      03610009
+036200         PERFORM X500-SET-CHECKPOINT-TIME                         03620009
+036300     END-IF.                                                      03630009
+036400                                                                  03640009
+036500 EJECT                                                            03650009
+036600*----------------------------------------------------------------*03660009
+036700*    CHECK TO SEE IF A CHECKPOINT SHOULD BE TAKEN.               *03670009
+036800*----------------------------------------------------------------*03680009
+036900 X200-CHECKPOINT-RESTART.                                         03690009
+037000                                                                  03700009
+037100     MOVE 'X200-CHECKPOINT-RESTART' TO PV-CURRENT-PARAGRAPH.      03710009
+037200                                                                  03720009
+037300     PERFORM X400-GET-CHECKPOINT-INFO.                            03730009
+037400     MOVE TCKRSTINF-WORK-STRG-DESC-TEXT TO CKPT-RESTART-INFO.     03740009
+037500                                                                  03750009
+037600     DISPLAY '** AHKUP031 CHECKPOINT RESTART **'                  03760009
+037700     DISPLAY '** EXTRACT RECS BYPASSED ON RESTART = '             03770009
+037800              CR-EXTRACT-RECS-WORKED.                             03780009
+037900     DISPLAY '***********************************************'    03790009
+038000                                                                  03800009
+038100     PERFORM R100-READ-EXTRACT-FILE                               03810009
+038200         CR-EXTRACT-RECS-WORKED TIMES.                            03820009
+038300     PERFORM R100-READ-EXTRACT-FILE.                              03830009
+038400 EJECT                                                            03840009
+038500*----------------------------------------------------------------*03850009
+038600*    SELECT CHECKPOINT RESTART CONTROL INFO.                     *03860009
+038700*----------------------------------------------------------------*03870009
+038800 X300-GET-CHECKPOINT-CNTL.                                        03880009
+038900                                                                  03890009
+039000     MOVE 'X300-GET-CHECKPOINT-CNTL' TO PV-CURRENT-PARAGRAPH.     03900009
+039100                                                                  03910009
+039200     PERFORM WITH TEST AFTER                                      03920009
+039300             VARYING PC-RETRY-COUNT FROM 1 BY 1                   03930009
+039400             UNTIL   PC-RETRY-COUNT > PC-RETRY-MAX OR             03940009
+039500                     SQLCODE = ZERO                               03950009
+039600                                                                  03960009
+039700             EXEC SQL                                             03970009
+039800              SELECT CKPT_STAT_CODE                               03980009
+039900               INTO :PV-CKPT-STAT-CODE                            03990009
+040000               FROM TCKRSTCNTL                                    04000009
+040100               WHERE PLAN_NAME = :PV-PROGRAM-NAME                 04010009
+040200             END-EXEC                                             04020009
+040300                                                                  04030009
+040400             EVALUATE TRUE                                        04040009
+040500                 WHEN SQLCODE = ZERO                              04050009
+040600                 WHEN SQLCODE = -904                              04060009
+040700                 WHEN SQLCODE = -913                              04070009
+040800                      CONTINUE                                    04080009
+040900                                                                  04090009
+041000                 WHEN SQLWARN0 NOT = SPACES                       04100009
+041100                 WHEN SQLCODE  NOT = ZERO                         04110009
+041200                     MOVE PV-CURRENT-PARAGRAPH                    04120009
+041300                                         TO AA-PARAGRAPH-NAME     04130009
+041400                     DISPLAY '******** PLAN_NAME:'                04140009
+041500                              PV-PROGRAM-NAME                     04150009
+041600                     MOVE SPACES TO AA-MESSAGE-1                  04160009
+041700                                    AA-MESSAGE-2                  04170009
+041800                     MOVE 'UNSUCCESSFUL SELECT'                   04180009
+041900                                         TO AA-DB2-OPERATION      04190009
+042000                     MOVE 'TCKRSTCNTL'   TO AA-DB2-TABLE          04200009
+042100                     PERFORM Z999-DB2-ABEND                       04210009
+042200             END-EVALUATE                                         04220009
+042300     END-PERFORM.                                                 04230009
+042400                                                                  04240009
+042500     IF PC-RETRY-COUNT > PC-RETRY-MAX                             04250009
+042600         MOVE PV-CURRENT-PARAGRAPH                                04260009
+042700                             TO AA-PARAGRAPH-NAME                 04270009
+042800         DISPLAY '******** PLAN_NAME:'                            04280009
+042900                  PV-PROGRAM-NAME                                 04290009
+043000         MOVE SPACES TO AA-MESSAGE-1                              04300009
+043100                        AA-MESSAGE-2                              04310009
+043200         MOVE 'MAX RETRIES EXCEEDED ON SELECT'                    04320009
+043300                             TO AA-DB2-OPERATION                  04330009
+043400         MOVE 'TCKRSTCNTL'   TO AA-DB2-TABLE                      04340009
+043500         PERFORM Z999-DB2-ABEND                                   04350009
+043600     END-IF.                                                      04360009
+043700                                                                  04370009
+043800 EJECT                                                            04380009
+043900*----------------------------------------------------------------*04390009
+044000*    SELECT CHECKPOINT RESTART WORKING STORAGE DESCRIPTION INFO  *04400009
+044100*----------------------------------------------------------------*04410009
+044200 X400-GET-CHECKPOINT-INFO.                                        04420009
+044300                                                                  04430009
+044400     MOVE 'X400-GET-CHECKPOINT-INFO' TO PV-CURRENT-PARAGRAPH.     04440009
+044500                                                                  04450009
+044600     PERFORM WITH TEST AFTER                                      04460009
+044700             VARYING PC-RETRY-COUNT FROM 1 BY 1                   04470009
+044800             UNTIL   PC-RETRY-COUNT > PC-RETRY-MAX OR             04480009
+044900                     SQLCODE = ZERO                               04490009
+045000                                                                  04500009
+045100             EXEC SQL                                             04510009
+045200              SELECT WORK_STRG_DESC                               04520009
+045300               INTO :TCKRSTINF-WORK-STRG-DESC                     04530009
+045400               FROM TCKRSTINF                                     04540009
+045500               WHERE PLAN_NAME = :PV-PROGRAM-NAME                 04550009
+045600             END-EXEC                                             04560009
+045700                                                                  04570009
+045800             EVALUATE TRUE                                        04580009
+045900                 WHEN SQLCODE = ZERO                              04590009
+046000                 WHEN SQLCODE = -904                              04600009
+046100                 WHEN SQLCODE = -913                              04610009
+046200                      CONTINUE                                    04620009
+046300                                                                  04630009
+046400                 WHEN SQLWARN0 NOT = SPACES                       04640009
+046500                 WHEN SQLCODE  NOT = ZERO                         04650009
+046600                     MOVE PV-CURRENT-PARAGRAPH                    04660009
+046700                                         TO AA-PARAGRAPH-NAME     04670009
+046800                     DISPLAY '******** PLAN_NAME:'                04680009
+046900                              PV-PROGRAM-NAME                     04690009
+047000                     MOVE SPACES TO AA-MESSAGE-1                  04700009
+047100                                    AA-MESSAGE-2                  04710009
+047200                     MOVE 'UNSUCCESSFUL SELECT'                   04720009
+047300                                         TO AA-DB2-OPERATION      04730009
+047400                     MOVE 'TCKRSTINF'    TO AA-DB2-TABLE          04740009
+047500                     PERFORM Z999-DB2-ABEND                       04750009
+047600             END-EVALUATE                                         04760009
+047700     END-PERFORM.                                                 04770009
+047800                                                                  04780009
+047900     IF PC-RETRY-COUNT > PC-RETRY-MAX                             04790009
+048000         MOVE PV-CURRENT-PARAGRAPH                                04800009
+048100                             TO AA-PARAGRAPH-NAME                 04810009
+048200         DISPLAY '******** PLAN_NAME:'                            04820009
+048300                  PV-PROGRAM-NAME                                 04830009
+048400         MOVE SPACES TO AA-MESSAGE-1                              04840009
+048500                        AA-MESSAGE-2                              04850009
+048600         MOVE 'MAX RETRIES EXCEEDED ON SELECT'                    04860009
+048700                             TO AA-DB2-OPERATION                  04870009
+048800         MOVE 'TCKRSTINF'    TO AA-DB2-TABLE                      04880009
+048900         PERFORM Z999-DB2-ABEND                                   04890009
+049000     END-IF.                                                      04900009
+049100                                                                  04910009
+049200 EJECT                                                            04920009
+049300*----------------------------------------------------------------*04930009
+049400*    SET THE TIME FOR THE NEXT CHECKPOINT.                       *04940009
+049500*----------------------------------------------------------------*04950009
+049600 X500-SET-CHECKPOINT-TIME.                                        04960009
+049700                                                                  04970009
+049800     MOVE 'X500-SET-CHECKPOINT-TIME' TO PV-CURRENT-PARAGRAPH.     04980009
+049900                                                                  04990009
+050000     PERFORM WITH TEST AFTER                                      05000009
+050100             VARYING PC-RETRY-COUNT FROM 1 BY 1                   05010009
+050200             UNTIL   PC-RETRY-COUNT > PC-RETRY-MAX OR             05020009
+050300                     SQLCODE = ZERO                               05030009
+050400                                                                  05040009
+050500             EXEC SQL                                             05050009
+050600              SELECT (CURRENT TIMESTAMP + CKPT_FRQNCY_QTY SECONDS)05060009
+050700               INTO :WS-HOLD-TMST                                 05070009
+050800               FROM TCKRSTCNTL                                    05080009
+050900               WHERE PLAN_NAME = :PV-PROGRAM-NAME                 05090009
+051000             END-EXEC                                             05100009
+051100                                                                  05110009
+051200             EVALUATE TRUE                                        05120009
+051300                 WHEN SQLCODE = ZERO                              05130009
+051400                 WHEN SQLCODE = -904                              05140009
+051500                 WHEN SQLCODE = -913                              05150009
+051600                      CONTINUE                                    05160009
+051700                                                                  05170009
+051800                 WHEN SQLWARN0 NOT = SPACES                       05180009
+051900                 WHEN SQLCODE  NOT = ZERO                         05190009
+052000                     MOVE PV-CURRENT-PARAGRAPH                    05200009
+052100                                         TO AA-PARAGRAPH-NAME     05210009
+052200                     DISPLAY '******** PLAN_NAME:'                05220009
+052300                              PV-PROGRAM-NAME                     05230009
+052400                     MOVE SPACES TO AA-MESSAGE-1                  05240009
+052500                                    AA-MESSAGE-2                  05250009
+052600                     MOVE 'UNSUCCESSFUL SELECT'                   05260009
+052700                                         TO AA-DB2-OPERATION      05270009
+052800                     MOVE 'TCKRSTCNTL'   TO AA-DB2-TABLE          05280009
+052900                     PERFORM Z999-DB2-ABEND                       05290009
+053000             END-EVALUATE                                         05300009
+053100     END-PERFORM.                                                 05310009
+053200                                                                  05320009
+053300     IF PC-RETRY-COUNT > PC-RETRY-MAX                             05330009
+053400         MOVE PV-CURRENT-PARAGRAPH                                05340009
+053500                             TO AA-PARAGRAPH-NAME                 05350009
+053600         DISPLAY '******** PLAN_NAME:'                            05360009
+053700                  PV-PROGRAM-NAME                                 05370009
+053800         MOVE SPACES TO AA-MESSAGE-1                              05380009
+053900                        AA-MESSAGE-2                              05390009
+054000         MOVE 'MAX RETRIES EXCEEDED ON SELECT'                    05400009
+054100                             TO AA-DB2-OPERATION                  05410009
+054200         MOVE 'TCKRSTCNTL'   TO AA-DB2-TABLE                      05420009
+054300         PERFORM Z999-DB2-ABEND                                   05430009
+054400     END-IF.                                                      05440009
+054500                                                                  05450009
+054600 EJECT                                                            05460009
+054700*----------------------------------------------------------------*05470009
+054800*    UPDATES THE CHECKPOINT RESTART CONTROL TABLE.  THE STATUS   *05480009
+054900*    CODE IS SET TO '9' (RUN IN PROGRESS) OR '0' (RUN COMPLETE). *05490009
+055000*----------------------------------------------------------------*05500009
+055100 X600-UPDATE-TCKRSTCNTL.                                          05510009
+055200                                                                  05520009
+055300     MOVE 'X600-UPDATE-TCKRSTCNTL' TO PV-CURRENT-PARAGRAPH.       05530009
+055400                                                                  05540009
+055500     PERFORM WITH TEST AFTER                                      05550009
+055600             VARYING PC-RETRY-COUNT FROM 1 BY 1                   05560009
+055700             UNTIL   PC-RETRY-COUNT > PC-RETRY-MAX OR             05570009
+055800                     SQLCODE = ZERO                               05580009
+055900                                                                  05590009
+056000             EXEC SQL                                             05600009
+056100                 UPDATE TCKRSTCNTL                                05610009
+056200                 SET CKPT_STAT_CODE = :PV-CKPT-STAT-CODE          05620009
+056300                 WHERE PLAN_NAME      = :PV-PROGRAM-NAME          05630009
+056400             END-EXEC                                             05640009
+056500                                                                  05650009
+056600             EVALUATE TRUE                                        05660009
+056700                 WHEN SQLCODE = ZERO                              05670009
+056800                 WHEN SQLCODE = -904                              05680009
+056900                 WHEN SQLCODE = -913                              05690009
+057000                      CONTINUE                                    05700009
+057100                                                                  05710009
+057200                 WHEN SQLWARN0 NOT = SPACES                       05720009
+057300                 WHEN SQLCODE  NOT = ZERO                         05730009
+057400                     MOVE PV-CURRENT-PARAGRAPH                    05740009
+057500                                         TO AA-PARAGRAPH-NAME     05750009
+057600                     DISPLAY '******** PLAN_NAME:'                05760009
+057700                              PV-PROGRAM-NAME                     05770009
+057800                     MOVE SPACES TO AA-MESSAGE-1                  05780009
+057900                                    AA-MESSAGE-2                  05790009
+058000                     MOVE 'UNSUCCESSFUL UPDATE'                   05800009
+058100                                         TO AA-DB2-OPERATION      05810009
+058200                     MOVE 'TCKRSTCNTL'   TO AA-DB2-TABLE          05820009
+058300                     PERFORM Z999-DB2-ABEND                       05830009
+058400             END-EVALUATE                                         05840009
+058500     END-PERFORM.                                                 05850009
+058600                                                                  05860009
+058700     IF PC-RETRY-COUNT > PC-RETRY-MAX                             05870009
+058800         MOVE PV-CURRENT-PARAGRAPH                                05880009
+058900                             TO AA-PARAGRAPH-NAME                 05890009
+059000         DISPLAY '******** PLAN_NAME:'                            05900009
+059100                  PV-PROGRAM-NAME                                 05910009
+059200         MOVE SPACES TO AA-MESSAGE-1                              05920009
+059300                        AA-MESSAGE-2                              05930009
+059400         MOVE 'MAX RETRIES EXCEEDED ON UPDATE'                    05940009
+059500                             TO AA-DB2-OPERATION                  05950009
+059600         MOVE 'TCKRSTCNTL'   TO AA-DB2-TABLE                      05960009
+059700         PERFORM Z999-DB2-ABEND                                   05970009
+059800     END-IF.                                                      05980009
+059900                                                                  05990009
+060000     EJECT                                                        06000009
+060100*----------------------------------------------------------------*06010009
+060200*    UPDATES THE CHECKPOINT RESTART INFO TABLE.  THE WORKING     *06020009
+060300*    STORAGE DESCRIPTION FIELD IS UPDATED WITH THE CURRENT INPUT *06030009
+060400*    FILE RECORD COUNTS AND THE FILE PROCESSOR INDICATOR.        *06040009
+060500*----------------------------------------------------------------*06050009
+060600 X700-UPDATE-TCKRSTINF.                                           06060009
+060700                                                                  06070009
+060800     MOVE 'X700-UPDATE-TCKRSTINF' TO PV-CURRENT-PARAGRAPH.        06080009
+060900                                                                  06090009
+061000     MOVE PV-TPREQIT-INPUT-COUNT TO CR-EXTRACT-RECS-WORKED.       06100009
+061100     MOVE CKPT-RESTART-INFO   TO TCKRSTINF-WORK-STRG-DESC-TEXT.   06110009
+061200     MOVE 4022                TO TCKRSTINF-WORK-STRG-DESC-LEN.    06120009
+061300                                                                  06130009
+061400     PERFORM WITH TEST AFTER                                      06140009
+061500             VARYING PC-RETRY-COUNT FROM 1 BY 1                   06150009
+061600             UNTIL   PC-RETRY-COUNT > PC-RETRY-MAX OR             06160009
+061700                     SQLCODE = ZERO                               06170009
+061800                                                                  06180009
+061900             EXEC SQL                                             06190009
+062000                 UPDATE TCKRSTINF                                 06200009
+062100                 SET WORK_STRG_DESC   = :TCKRSTINF-WORK-STRG-DESC 06210009
+062200                 WHERE PLAN_NAME      = :PV-PROGRAM-NAME          06220009
+062300             END-EXEC                                             06230009
+062400                                                                  06240009
+062500             EVALUATE TRUE                                        06250009
+062600                 WHEN SQLCODE = ZERO                              06260009
+062700                 WHEN SQLCODE = -904                              06270009
+062800                 WHEN SQLCODE = -913                              06280009
+062900                      CONTINUE                                    06290009
+063000                                                                  06300009
+063100                 WHEN SQLWARN0 NOT = SPACES                       06310009
+063200                 WHEN SQLCODE  NOT = ZERO                         06320009
+063300                     MOVE PV-CURRENT-PARAGRAPH                    06330009
+063400                                         TO AA-PARAGRAPH-NAME     06340009
+063500                     DISPLAY '******** PLAN_NAME:'                06350009
+063600                              PV-PROGRAM-NAME                     06360009
+063700                     MOVE SPACES TO AA-MESSAGE-1                  06370009
+063800                                    AA-MESSAGE-2                  06380009
+063900                     MOVE 'UNSUCCESSFUL UPDATE'                   06390009
+064000                                         TO AA-DB2-OPERATION      06400009
+064100                     MOVE 'TCKRSTINF'    TO AA-DB2-TABLE          06410009
+064200                     PERFORM Z999-DB2-ABEND                       06420009
+064300             END-EVALUATE                                         06430009
+064400     END-PERFORM.                                                 06440009
+064500                                                                  06450009
+064600     IF PC-RETRY-COUNT > PC-RETRY-MAX                             06460009
+064700         MOVE PV-CURRENT-PARAGRAPH                                06470009
+064800                             TO AA-PARAGRAPH-NAME                 06480009
+064900         DISPLAY '******** PLAN_NAME:'                            06490009
+065000                  PV-PROGRAM-NAME                                 06500009
+065100         MOVE SPACES TO AA-MESSAGE-1                              06510009
+065200                        AA-MESSAGE-2                              06520009
+065300         MOVE 'MAX RETRIES EXCEEDED ON UPDATE'                    06530009
+065400                             TO AA-DB2-OPERATION                  06540009
+065500         MOVE 'TCKRSTINF'    TO AA-DB2-TABLE                      06550009
+065600         PERFORM Z999-DB2-ABEND                                   06560009
+065700     END-IF.                                                      06570009
+065800                                                                  06580009
+065900 EJECT                                                            06590009
+066000                                                                  06600009
+066100*----------------------------------------------------------------*06610009
+066200*    ISSUES AN SQL COMMIT WORK AFTER A LUW HAS BEEN COMPLETED.   *06620009
+066300*----------------------------------------------------------------*06630009
+066400 Y100-COMMIT.                                                     06640009
+066500                                                                  06650009
+066600     MOVE 'Y100-COMMIT'    TO PV-CURRENT-PARAGRAPH.               06660009
+066700                                                                  06670009
+066800     EXEC SQL                                                     06680009
+066900         COMMIT                                                   06690009
+067000     END-EXEC.                                                    06700009
+067100                                                                  06710009
+067200     EVALUATE TRUE                                                06720009
+067300         WHEN SQLCODE = ZEROS                                     06730009
+067400             CONTINUE                                             06740009
+067500         WHEN OTHER                                               06750009
+067600             MOVE PV-CURRENT-PARAGRAPH                            06760009
+067700                                 TO AA-PARAGRAPH-NAME             06770009
+067800             MOVE SPACES TO AA-MESSAGE-1                          06780009
+067900                            AA-MESSAGE-2                          06790009
+068000             MOVE 'UNSUCCESSFUL COMMIT'                           06800009
+068100                                 TO AA-DB2-OPERATION              06810009
+068200             MOVE SPACES         TO AA-DB2-TABLE                  06820009
+068300             PERFORM Z999-DB2-ABEND                               06830009
+068400     END-EVALUATE.                                                06840009
+068500 EJECT                                                            06850009
+068600 Z900-PROCESS-ABEND.                                              06860009
+068700                                                                  06870009
+068800     DISPLAY '*** ABEND'.                                         06880009
+068900     DISPLAY '*** PROGRAM   = AHKUP031'.                          06890009
+069000     DISPLAY '*** PARAGRAPH = ' PV-CURRENT-PARAGRAPH.             06900009
+069100     DISPLAY AA-MESSAGE-LINE-1.                                   06910009
+069200     DISPLAY AA-MESSAGE-LINE-2.                                   06920009
+069300     COPY DPPD004.                                                06930009
+069400     CALL 'ILBOABN0' USING ABEND-CODE.                            06940009
+069500                                                                  06950009
+069600                                                                  06960009
+069700                                                                  06970009
+069800 Z999-DB2-ABEND.                                                  06980009
+069900                                                                  06990009
+070000     DISPLAY AA-ABEND-LIT.                                        07000009
+070100     DISPLAY AA-DB2-ERROR-LIT.                                    07010009
+070200     DISPLAY AA-PROGRAM-LIT.                                      07020009
+070300     DISPLAY AA-PARAGRAPH-LIT.                                    07030009
+070400     DISPLAY AA-DB2-OPERATION-LIT.                                07040009
+070500     DISPLAY AA-DB2-TABLE.                                        07050009
+070600     SET AC-DB2-ERROR TO TRUE.                                    07060009
+070700                                                                  07070009
+070800     COPY DPPD004.                                                07080009
+070900                                                                  07090009
+071000     CALL 'ILBOABN0' USING ABEND-CODE.                            07100009

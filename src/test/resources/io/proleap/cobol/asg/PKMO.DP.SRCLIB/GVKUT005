@@ -1,0 +1,1355 @@
+       IDENTIFICATION DIVISION.                                                 
+       PROGRAM-ID.         GVKUT005.                                            
+       AUTHOR.             COGNIZANT.                                           
+       INSTALLATION.       KOHLS DEPARTMENT STORES.                             
+       DATE-WRITTEN.       FEB 2015.                                            
+      ******************************************************************        
+      *When compiling check 'MQSERIES PROGRAM(Y/N)' with 'Y' on second *        
+      *compile screen.                                                 *        
+      ******************************************************************        
+      *        SEND STORE EXPECTED DATA TO GIV APPLICATION                      
+      * This program will be used by multiple GVK022 version jobs to            
+      * process the store expected inventory update data and convert it         
+      * to XML format and write to MQ queue. A Tibco process will               
+      * process the data from MQ and send to GIV application.                   
+      * The MQ queue details will be determined using the Integration           
+      * type code 'GIVSTOREXP'                                                  
+      ******************************************************************        
+      *  CHANGE LOG                                                             
+      *  DATE       CHANGED BY      DESC                                        
+      *  ---------- -------------   ------------------------------------        
+      *  02/2015    Cognizant       Initial implementation.                     
+      *  10/2015    McAsey          Add additional MQ display info for          
+      *                             MQ abends (CHG0125396)                      
+      *  11/2023    McAsey          Add additional output queue for             
+      *                             Mechanical Orchard                          
+      *  03/2024    McAsey          Add additional output queue option          
+      *             CHG0301102      for Mechanical Orchard                      
+      *                             GV.MO.IB.SU.ADJ.STORE_EXPECTED_22           
+      ******************************************************************        
+       ENVIRONMENT DIVISION.                                                    
+       CONFIGURATION SECTION.                                                   
+       SOURCE-COMPUTER.    IBM-3090.                                            
+       OBJECT-COMPUTER.    IBM-3090.                                            
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+       FILE-CONTROL.                                                            
+           SELECT STREXPCTD-FILE        ASSIGN TO INP01.                        
+           SELECT PROCESSED-FILE        ASSIGN TO OUT01.                        
+1123RM     SELECT MO-ERROR-FILE         ASSIGN TO OUT02.                        
+                                                                                
+      ******************************************************************        
+       DATA DIVISION.                                                           
+       FILE SECTION.                                                            
+                                                                                
+       FD  STREXPCTD-FILE                                                       
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  STREXPCTD-RECORD            PIC X(100).                              
+       FD  PROCESSED-FILE                                                       
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  PROCESSED-RECORD                PIC X(100).                          
+1123RM FD  MO-ERROR-FILE                                                        
+1123RM     RECORDING MODE IS F                                                  
+1123RM     LABEL RECORDS ARE STANDARD                                           
+1123RM     BLOCK CONTAINS 0 RECORDS.                                            
+1123RM 01  MO-ERROR-RECORD                 PIC X(100).                          
+                                                                                
+      ******************************************************************        
+       WORKING-STORAGE SECTION.                                                 
+      ******************************************************************        
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-END-OF-STREXPCTD-REC     PIC X(01) VALUE 'N'.                 
+               88  PS-END-OF-STREXPCTD-REC-Y         VALUE 'Y'.                 
+               88  PS-END-OF-STREXPCTD-REC-N         VALUE 'N'.                 
+           05  PS-MQPUT-SUCCESSFUL-IND     PIC X(01) VALUE SPACES.              
+               88  PS-MQPUT-SUCCESSFUL               VALUE 'Y'.                 
+1123RM     05  PS-MO-MQPUT-SUCCESSFUL-IND  PIC X(01) VALUE SPACES.              
+1123RM         88  PS-MO-MQPUT-SUCCESSFUL            VALUE 'Y'.                 
+                                                                                
+       01  PA-PROGRAM-ACCUMULATORS.                                             
+           05  PA-TOTAL-MQ-MSGS-SENT       PIC S9(9) VALUE +0 COMP-3.           
+1123RM     05  PA-TOTAL-MO-MQ-MSGS-SENT    PIC S9(9) VALUE +0 COMP-3.           
+1123RM     05  PA-GIV-MO-ERR-CNT           PIC S9(9) VALUE +0 COMP-3.           
+                                                                                
+       01  PV-PROGRAM-VARIABLES.                                                
+           05  PV-INTR-UPC-ID-HOLD         PIC S9(9) COMP VALUE ZEROES.         
+           05  PV-COUNTER                  PIC 9(09) VALUE ZEROES.              
+           05  PV-ADJUSTMENT-SENT-TO-QUE   PIC 9(09) VALUE ZEROES.              
+           05  PV-HOLD-COMPLETION-CODE     PIC S9(9) BINARY.                    
+           05  PV-HOLD-REASON              PIC S9(9) BINARY.                    
+           05  PV-XML-BANNER               PIC X(39) VALUE                      
+               '<?xml version="1.0" encoding="UTF-8" ?>'.                       
+           05  PV-TRN-ERR-CODE             PIC X(03)   VALUE SPACEs.            
+               88  PV-NO-ERRORS                        VALUE '000'.             
+           05  PV-PREV-ERR-CDE       PIC X(03)     VALUE  '000'.                
+               88  PV-PREV-NO-ERRORS               VALUE  '000'.                
+               88  PV-PREV-ITM-NBR-ERR             VALUES '004'.                
+                                                                                
+1123RM     05  PV-SYS-PARM-VALUES.                                              
+1123RM         10  PV-SYS-PARM-VALUE           PIC X(10).                       
+1123RM             88 PV-SYS-STR-EXPCTD    VALUE IS 'GIVSTOREXP'.               
+1123RM         10 FILLER                   PIC X(01).                           
+1123RM         10 PV-SYS-PARM-VALUE-2      PIC X(10).                           
+1123RM             88 PV-VALID-SYS-PARM-2  VALUE is 'GIVMOSTRXP',               
+0324RM                                              'GIVMOSTE22'.               
+                                                                                
+           05  PV-INTR-UPC-ID-X      PIC X(09)     VALUE SPACES.                
+           05  PV-INTR-UPC-ID-9   REDEFINES                                     
+               PV-INTR-UPC-ID-X      PIC 9(09).                                 
+           05  PV-ADJ-QTY-X          PIC X(08)     VALUE SPACES.                
+           05  PV-ADJ-QTY-9   REDEFINES                                         
+               PV-ADJ-QTY-X          PIC 9(08).                                 
+                                                                                
+      *** PLEASE NOTE THAT PV-LOC-NBR-X AND PV-LOC-NBR-9 SHOULD NOT             
+      *** BE USED FOR ANYTHING OTHER THAN THE NUMERIC EDIT CHECKING.            
+      *** THIS FIELD CANNOT SUPPORT THE 5 DIGITS NEEDED FOR LOCATION            
+      *** NUMBER.  A 5 DIGIT LOCATION NUMBER WILL BE TRUNCATED.                 
+           05  PV-LOC-NBR-X          PIC X(04)     VALUE SPACES.                
+           05  PV-LOC-NBR-9   REDEFINES                                         
+               PV-LOC-NBR-X          PIC 9(04).                                 
+                                                                                
+           05  PV-TRN-STAT-E-CNT     PIC S9(09)    VALUE +0 COMP-3.             
+           05  PV-TRN-ERR-001-CNT    PIC S9(09)    VALUE +0 COMP-3.             
+           05  PV-TRN-ERR-002-CNT    PIC S9(09)    VALUE +0 COMP-3.             
+           05  PV-TRN-ERR-003-CNT    PIC S9(09)    VALUE +0 COMP-3.             
+           05  PV-TRN-ERR-004-CNT    PIC S9(09)    VALUE +0 COMP-3.             
+1123RM     05  PV-WSV5-INTGRTN-TYP-CDE      PIC   X(10).                        
+1123RM     05  PV-WSV5-INTGRTN-TYP-DESC     PIC   X(50).                        
+                                                                                
+      ******************************************************************        
+      *     FORMATTED FIELDS FOR END OF JOB DISPLAY COUNTS.                     
+      ******************************************************************        
+       01  PV-DISPLAY-COUNTS.                                                   
+           10  PV-TRN-STAT-E-CNT-DISP                                           
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-ERR-001-CNT-DISP                                          
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-ERR-002-CNT-DISP                                          
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-ERR-003-CNT-DISP                                          
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-ERR-004-CNT-DISP                                          
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+                                                                                
+       01  ABEND-CODE                      PIC S9(4) VALUE +0 COMP SYNC.        
+       01  PV-HOLD-MSGBUFFER.                                                   
+           05  PV-MSGBUFFER-CHAR OCCURS   1000 TIMES                            
+                                           PIC X(01).                           
+       01  PV-ABEND-VARIABLES.                                                  
+           05  PV-SQLCODE                  PIC S9(9).                           
+           05  PV-DISPLAY-SQLCODE          PIC -------999.                      
+           05  PV-ABEND-PROGRAM            PIC X(08) VALUE 'GVKUT005'.          
+           05  PV-ABEND-PARAGRAPH          PIC X(25) VALUE SPACES.              
+           05  PV-ABEND-OPERATION          PIC X(20) VALUE SPACES.              
+           05  PV-ABEND-STRUCTURE-1        PIC X(08) VALUE SPACES.              
+           05  PV-DB2-OPERATION-MESSAGE-1  PIC X(79) VALUE SPACES.              
+           05  PV-ABEND-CODE               PIC S9(4) VALUE +0 COMP SYNC.        
+                                                                                
+      *****************************************************************         
+      *    RECORD PURPOSE: ADJUSTMENT Extract (for XML conversion)              
+      * The lines in the next 01 level need to start w/capitol and    *         
+      * end with lower case for the XML to work.                                
+      *****************************************************************         
+                                                                                
+       01  Adjustment.                                                          
+            05  ItemNumber                 PIC X(08) VALUE SPACES.              
+            05  Quantity                   PIC S9(9)V9 COMP.                    
+            05  ReasonCode                 PIC X(03) VALUE SPACES.              
+            05  ReasonText                 PIC X(40) VALUE SPACES.              
+            05  StoreNumber                PIC 9(04) VALUE ZERO.                
+            05  SupplyType                 PIC X(40) VALUE SPACE.               
+            05  Reference1                 PIC X(40) VALUE SPACES.              
+            05  Reference2                 PIC X(40) VALUE SPACES.              
+            05  Reference3                 PIC X(40) VALUE SPACES.              
+            05  Reference4                 PIC X(40) VALUE SPACE.               
+            05  Reference5                 PIC X(40) VALUE SPACE.               
+                                                                                
+       01  PV-XML                          PIC X(1000) VALUE SPACES.            
+       01  PV-DISPLAY                      PIC X(132)  VALUE SPACES.            
+       01  XML-LENGTH                      PIC 9(09)   COMP.                    
+                                                                                
+           COPY ISWS007.                                                        
+           COPY ISWS008.                                                        
+           COPY ISWS009.                                                        
+                                                                                
+      *****************************************************************         
+      * FILE OPEN STATUS'S ON THE CONTROL CARDS USED FOR GETTING                
+      * MQ-SERIES QUEUE MANAGER AND QUEUE NAME.                                 
+      *****************************************************************         
+                                                                                
+       01  PE-MQ-ABEND-VARIABLES.                                               
+           05  PE-MQ-QMANAGER              PIC X(05) VALUE SPACES.              
+           05  PE-MQ-QMANAGER-REMOTE       PIC X(30) VALUE SPACES.              
+           05  PE-MQ-QNAME                 PIC X(48) VALUE SPACES.              
+           05  PE-MQ-COMPLETION-CODE       PIC 9(04) VALUE ZEROES.              
+           05  PE-MQ-REASON-CODE           PIC 9(04) VALUE ZEROES.              
+1123RM     05  PE-MO-MQ-QMANAGER           PIC X(05) VALUE SPACES.              
+1123RM     05  PE-MO-MQ-QMANAGER-REMOTE    PIC X(30) VALUE SPACES.              
+1123RM     05  PE-MO-MQ-QNAME              PIC X(48) VALUE SPACES.              
+1123RM     05  PE-MO-MQ-COMPLETION-CODE    PIC 9(04) VALUE ZEROES.              
+1123RM     05  PE-MO-MQ-REASON-CODE        PIC 9(04) VALUE ZEROES.              
+                                                                                
+      ******************************************************************        
+      *  DB2 FORMATTED MESSAGE AREA                                             
+      ******************************************************************        
+           COPY DPWS004.                                                        
+                                                                                
+      ******************************************************************        
+      *  INPUT FILE                                                             
+      ******************************************************************        
+           COPY PCRD010.                                                        
+                                                                                
+      ******************************************************************        
+      *  COMMUNICATIONS AREA FOR DB2                                            
+      ******************************************************************        
+           EXEC SQL                                                             
+                INCLUDE SQLCA                                                   
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  DB2 DECLARATION - LOGISTICS                                            
+      *      TABLE XLT00003-SKU-NBR                                             
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE XLT00003                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  DB2 DECLARATION - WMOS - Provider Queue information (Put/Write)        
+      *      TABLE (WSV_PRVDR_QUE)                                              
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE WSV00005                                                 
+           END-EXEC.                                                            
+                                                                                
+      ****************************************************************          
+      **     MQ SERIES WORKING STORAGE                                          
+      **         MQ COPYBOOKS                                                   
+      ****************************************************************          
+       01  MQM-OBJECT-DESCRIPTOR.                                               
+           COPY CMQODV.                                                         
+                                                                                
+       01  MQM-MESSAGE-DESCRIPTOR.                                              
+           COPY CMQMDV.                                                         
+                                                                                
+       01  MQM-PUT-MESSAGE-OPTIONS.                                             
+           COPY CMQPMOV.                                                        
+                                                                                
+       01  MQM-GET-MESSAGE-OPTIONS.                                             
+           COPY CMQGMOV.                                                        
+                                                                                
+       01  MQM-CONSTANTS.                                                       
+           COPY CMQV.                                                           
+                                                                                
+      ****************************************************************          
+      ** CONTROL CARDS FOR QUEUE MANAGER AND QUEUE NAME                         
+      ****************************************************************          
+       01  CC-CONTROL-CARD-1.                                                   
+           05  CC-QMGR-NAME-REMOTE         PIC X(50).                           
+                                                                                
+       01  CC-CONTROL-CARD-2.                                                   
+           05  CC-TRANS-QUEUE-NAME         PIC X(50).                           
+                                                                                
+       01  CC-CONTROL-CARD-4.                                                   
+           05  CC-QMGR-NAME                PIC X(50).                           
+1122RM*-- CONTROL CARDS FOR MECH-ORCHARD QUEUE                                  
+1123RM 01  CC-CONTROL-CARD-5.                                                   
+1123RM     05  CC5-QMGR-NAME-REMOTE        PIC X(50).                           
+1123RM                                                                          
+1123RM 01  CC-CONTROL-CARD-6.                                                   
+1123RM     05  CC6-TRANS-QUEUE-NAME        PIC X(50).                           
+1123RM                                                                          
+1123RM 01  CC-CONTROL-CARD-7.                                                   
+1123RM     05  CC7-QMGR-NAME               PIC X(50).                           
+                                                                                
+      ****************************************************************          
+      *  MQ SERIES CONSTANTS FOR CALLING MODULES SUCH AS GET AND    **          
+      *  OPEN, CONNECT, DISCONNECT.                                             
+      ****************************************************************          
+       01  MQ-WORKING-STORAGE.                                                  
+           05  PC-MQCONN                   PIC X(08) VALUE 'CSQBCONN'.          
+           05  PC-MQOPEN                   PIC X(08) VALUE 'CSQBOPEN'.          
+           05  PC-MQINQ                    PIC X(08) VALUE 'CSQBINQ'.           
+           05  PC-MQPUT                    PIC X(08) VALUE 'CSQBPUT'.           
+           05  PC-MQGET                    PIC X(08) VALUE 'CSQBGET'.           
+           05  PC-MQCMIT                   PIC X(08) VALUE 'CSQBCOMM'.          
+           05  PC-MQBACK                   PIC X(08) VALUE 'CSQBBACK'.          
+           05  PC-MQCLOSE                  PIC X(08) VALUE 'CSQBCLOS'.          
+           05  PC-MQDISC                   PIC X(08) VALUE 'CSQBDISC'.          
+           05  PC-TRANS-QNAME              PIC X(48) VALUE SPACES.              
+1123RM     05  PC-MO-TRANS-QNAME           PIC X(48) VALUE SPACES.              
+**TEMP     05  PC-MQRC-UNEXPECTED-ERROR    PIC S9(9) BINARY VALUE 2195.         
+**TEMP     05  PC-MQRC-PAGESET-FULL        PIC S9(9) BINARY VALUE 2192.         
+           05  PC-QMGR-NAME                PIC X(04) VALUE SPACES.              
+               88  PC-PROD-QMGR-NAME                 VALUE 'QKSP'.              
+               88  PC-ACCEPT-QMGR-NAME               VALUE 'QKSQ'.              
+               88  PC-TEST-QMGR-NAME                 VALUE 'QKST'.              
+                                                                                
+      ****************************************************************          
+      ** QUEUE MANAGER HANDLE                                                   
+      *  QUEUE HANDLE                                                           
+      ****************************************************************          
+       01 PV-MQ-PROGRAM-HANDLES.                                                
+           05  PV-QM-NAME                  PIC X(48).                           
+           05  PV-QM-NAME-REMOTE           PIC X(48).                           
+           05  PV-HCONN                    PIC S9(9) BINARY VALUE 0.            
+           05  PV-PQ-HANDLE                PIC S9(9) BINARY VALUE 0.            
+1123RM     05  PV-MO-PQ-HANDLE             PIC S9(9) BINARY VALUE 0.            
+                                                                                
+      ****************************************************************          
+      * ERROR PROCESSING VARIABLES                                              
+      * CODES FROM CALLS ARE STORED HERE                                        
+      ****************************************************************          
+       01 PV-MQ-PROGRAM-VARIABLES.                                              
+           05  PV-COMPLETION-CODE          PIC S9(9) BINARY.                    
+           05  PV-REASON                   PIC S9(9) BINARY.                    
+           05  PV-CON-REASON               PIC S9(9) BINARY.                    
+           05  PV-MQCHECK                  PIC X(08) VALUE 'MQR2C'.             
+           05  PV-ERROR-MESSAGE            PIC X(48) VALUE SPACES.              
+           05  PV-OPEN-OPTIONS             PIC S9(9) BINARY.                    
+           05  PV-MQ-REASON-TEXT           PIC X(30) VALUE SPACES.              
+           05  PV-EVENT-TMST               PIC X(26).                           
+           05  PV-EVENT-TMST-DATE-HHMM   REDEFINES                              
+               PV-EVENT-TMST.                                                   
+               10  PV-EVENT-DATE           PIC X(10).                           
+               10  FILLER                  PIC X(01).                           
+               10  PV-EVENT-HH             PIC X(02).                           
+               10  FILLER                  PIC X(01).                           
+               10  PV-EVENT-MM             PIC X(02).                           
+               10  FILLER                  PIC X(01).                           
+               10  PV-EVENT-SS             PIC X(02).                           
+               10  FILLER                  PIC X(01).                           
+               10  PV-EVENT-MS             PIC X(06).                           
+           05  PV-EVENT-TMST-FINAL.                                             
+               10  PV-XML-DATE             PIC X(10).                           
+               10  PV-XML-CNCNT            PIC X(01) VALUE 'T'.                 
+               10  PV-XML-HH               PIC X(02).                           
+               10  PV-FILLER               PIC X(01) VALUE ':'.                 
+               10  PV-XML-MM               PIC X(02).                           
+               10  PV-FILLER               PIC X(01) VALUE ':'.                 
+               10  PV-XML-SS               PIC X(02).                           
+           05  PV-PARAGRAPH                PIC X(48) VALUE SPACES.              
+           05  PV-MSG-LENGTH               PIC S9(9) BINARY.                    
+           05  PV-DC-NBR                   PIC 9(04).                           
+           05  PV-MSG-LENGTH-DISPLAY       PIC S9(9).                           
+           05  PV-MSGBUFFER.                                                    
+               10  PV-MSGBUFFER-banner     PIC X(39) VALUE SPACES.              
+               10  PV-MSGBUFFER-data       PIC X(999999) VALUE SPACES.          
+                                                                                
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-CURRENT-PROGRAM-NAME     PIC X(08) VALUE 'GVKUT005'.          
+           05  PC-MAX-RETRIES              PIC S9(3) VALUE +5 COMP-3.           
+           05  PC-READY                    PIC X(06) VALUE 'READY '.            
+           05  PC-ERROR                    PIC X(06) VALUE 'ERROR '.            
+           05  PC-WAIT-15-SECS             PIC S9(9) VALUE 1500.                
+           05  PC-MQPUT-RETRY-COUNTER      PIC 9(3)  VALUE ZERO.                
+           05  PC-DELAY-INTERVAL.                                               
+               10  FILLER                  PIC X(2)  VALUE SPACES.              
+               10  PC-DELAY-TIME           PIC 9(8)  VALUE 3000.                
+           05  PC-INTGRTN-TYP-CDE          PIC X(10)                            
+                                           VALUE 'GIVSTOREXP'.                  
+           05  PC-TRAN-TYP-CODE.                                                
+               10  PC-TRAN-TYP-AR          PIC X(40) VALUE                      
+                                           'STORE-VRFY-RECEIPT'.                
+               10  PC-TRAN-TYP-CS          PIC X(40) VALUE                      
+                                           'CNTL-STOCK-RECEIPT'.                
+               10  PC-TRAN-TYP-VA          PIC X(40) VALUE                      
+                                           'STORE-VRFY-ADJ'.                    
+               10  PC-TRAN-TYP-SH          PIC X(40) VALUE                      
+                                           'SHIPPD-DC'.                         
+               10  PC-TRAN-TYP-UN          PIC X(40) VALUE                      
+                                           'UNLOAD-ST'.                         
+           05  PC-SUPPLY-TYPE              PIC X(40) VALUE                      
+                                           'STORE_EXPECTED.ex'.                 
+                                                                                
+      ****************************************************************          
+      * RETURN CODES ARE EVALUATED AND THIS SWITCH IS USED TO                   
+      * INDICATE ANY ERRORS (THIS SWITCH MAY NOT BE USED SINCE THE              
+      * PROGRAM ABENDS BEFORE IT IS USED ANYWHERE)                              
+      ****************************************************************          
+       01 PV-MQ-PROGRAM-SWITCHES.                                               
+           05  PS-MQ-ERROR-SW              PIC X(01) VALUE 'N'.                 
+               88  PS-NO-MQ-ERROR                    VALUE 'N'.                 
+               88  PS-MQ-ERROR                       VALUE 'Y'.                 
+       01  PV-MQ-INFO-FOR-DIFF-DCS.                                             
+           05  MQ-INFO.                                                         
+              10 MQ-INTGRTN-TYP-DESC       PIC X(50).                           
+              10 MQ-QMGR-NAME              PIC X(50).                           
+              10 MQ-QMGR-NAME-REMOTE       PIC X(50).                           
+              10 MQ-TRANS-QUEUE-NAME       PIC X(50).                           
+       01  PV-MQ-HANDLE-FOR-DIFF-DCS.                                           
+           05  PV-MQ-HANDLE-INFO.                                               
+              10 PV-MQ-HANDLE-HOLD         PIC S9(9) BINARY VALUE 0.            
+1123RM        10 PV-MO-MQ-HANDLE-HOLD      PIC S9(9) BINARY VALUE 0.            
+**TEMP        10 PV-MO-MQ-HANDLE-HOLD-TMP  PIC S9(9) BINARY VALUE 9.            
+1123RM*--ADDITIONAL QUEUE INFO FOR MECHANICAL ORCHARD QUEUE                     
+1123RM     05  MQ-MO-INFO.                                                      
+1123RM        10 MQ-MO-INTGRTN-TYP-DESC    PIC X(50).                           
+1123RM        10 MQ-MO-QMGR-NAME           PIC X(50).                           
+1123RM        10 MQ-MO-QMGR-NAME-REMOTE    PIC X(50).                           
+1123RM        10 MQ-MO-TRANS-QUEUE-NAME    PIC X(50).                           
+1123RM 01  PV-MQ-MO-HANDLE-FOR-DIFF-DCS.                                        
+1123RM     05  PV-MQ-MO-HANDLE-INFO.                                            
+1123RM        10 PV-MQ-MO-HANDLE-HOLD      PIC S9(9) BINARY VALUE 0.            
+1123RM                                                                          
+1123RM******************************************************************        
+1123RM LINKAGE SECTION.                                                         
+1123RM*****************************************************************         
+1123RM 01 PARM-AREA.                                                            
+1123RM     05 PARM-LENGTH                  PIC S9(4) COMP.                      
+1123RM     05 PARM-VALUE                   PIC X(10).                           
+1123RM     05 FILLER                       PIC X(01).                           
+1123RM     05 PARM-M-O-QUEUE-REQ           PIC X(10).                           
+      ****************************************************************          
+1123RM*prOCEDURE DIVISION.                                                      
+1123RM PROCEDURE DIVISION USING PARM-AREA.                                      
+      *                                                                         
+       0000-MAINLINE.                                                           
+                                                                                
+           DISPLAY '************ START OF GVKUT005 ***************'             
+                                                                                
+           PERFORM 1000-INITIALIZE.                                             
+                                                                                
+           PERFORM 2000-PROCESS-STREXPCTD-RECS                                  
+             UNTIL PS-END-OF-STREXPCTD-REC-Y.                                   
+                                                                                
+      *CLOSE THE OPEN QUEUE.                                                    
+           PERFORM 1500-MQ-QUEUE-CLOSE.                                         
+                                                                                
+0324RM     IF PV-VALID-SYS-PARM-2                                               
+1123RM         PERFORM 1550-MO-MQ-QUEUE-CLOSE                                   
+1123RM     END-IF.                                                              
+                                                                                
+      *DISCONNECT FROM THE QMGR.                                                
+           PERFORM 1600-DISCONNECT-QMGR.                                        
+                                                                                
+      * END OF JOB ROUTINE.                                                     
+           PERFORM 9000-EOJ-ROUTINE.                                            
+                                                                                
+           DISPLAY '************  END OF GVKUT005  ***************'             
+           STOP RUN.                                                            
+                                                                                
+      ******************************************************************        
+      *           INITIALIZATION                                                
+      ******************************************************************        
+       1000-INITIALIZE.                                                         
+                                                                                
+           MOVE '1000-INITIALIZE'         TO PV-PARAGRAPH.                      
+                                                                                
+**TEMP     DISPLAY ' PARM-AREA ' PARM-AREA.                                     
+      *READ MQ CONTROL CARDS.                                                   
+                                                                                
+           PERFORM 1200-GET-MQ-QUEUE-INFO.                                      
+                                                                                
+      *CONNECT TO QUEUE MANAGER ONLY ONCE.                                      
+                                                                                
+           PERFORM 1300-MQ-CONNECT-TO-QMGR.                                     
+                                                                                
+      *OPEN THE MQ FOR MQPUT                                                    
+                                                                                
+           PERFORM 1400-MQ-QUEUE-OPEN.                                          
+                                                                                
+1123RM     MOVE PARM-M-O-QUEUE-REQ  TO PV-SYS-PARM-VALUE-2.                     
+1123RM     DISPLAY 'ADDITIONAL QUEUE PARM ' PV-SYS-PARM-VALUE-2.                
+0324RM     IF PV-VALID-SYS-PARM-2                                               
+1123RM         PERFORM 1250-GET-ADDL-MQ-QUEUE-INFO                              
+1123RM         PERFORM 1450-MQ-MO-QUEUE-OPEN                                    
+1123RM     END-IF.                                                              
+                                                                                
+           OPEN  INPUT  STREXPCTD-FILE.                                         
+           OPEN  OUTPUT PROCESSED-FILE                                          
+1123RM                  MO-ERROR-FILE.                                          
+                                                                                
+           MOVE  ZEROES TO PV-COUNTER                                           
+                           PV-ADJUSTMENT-SENT-TO-QUE.                           
+                                                                                
+           SET   PS-END-OF-STREXPCTD-REC-N TO TRUE.                             
+                                                                                
+           PERFORM 1800-READ-STREXPCTD-RECS.                                    
+                                                                                
+      ****************************************************************          
+      * GET MQ INFORMATION FROM DB2 TABLES.                                     
+      ****************************************************************          
+       1200-GET-MQ-QUEUE-INFO.                                                  
+                                                                                
+           MOVE '1200-GET-MQ-QUEUE-INFO'  TO PV-PARAGRAPH.                      
+                                                                                
+1123RM*    MOVE PC-INTGRTN-TYP-CDE  TO WSV00005-INTGRTN-TYP-CDE.                
+1123RM     MOVE PARM-VALUE        TO PV-SYS-PARM-VALUE.                         
+1123RM     MOVE PV-SYS-PARM-VALUE TO WSV00005-INTGRTN-TYP-CDE.                  
+                                                                                
+           EXEC SQL                                                             
+              SELECT A.INTGRTN_TYP_DESC                                         
+                    ,A.LCL_QUE_MGR                                              
+                    ,A.RMT_QUE_MGR                                              
+                    ,A.QUE_NM                                                   
+              INTO                                                              
+                     :WSV00005-INTGRTN-TYP-DESC                                 
+                    ,:CC-QMGR-NAME                                              
+                    ,:CC-QMGR-NAME-REMOTE                                       
+                    ,:CC-TRANS-QUEUE-NAME                                       
+               FROM WSV_PRVDR_QUE A                                             
+               WHERE A.APPL_FUNC_DESC    = 'QUEUE'                              
+                 AND A.INTGRTN_TYP_CDE   = :WSV00005-INTGRTN-TYP-CDE            
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+             WHEN SQLCODE = ZERO                                                
+                                                                                
+                 DISPLAY 'QMGR-NAME-REMOTE:' CC-QMGR-NAME-REMOTE                
+                 DISPLAY 'TRANS-QUEUE-NAME:' CC-TRANS-QUEUE-NAME                
+                                                                                
+                 MOVE WSV00005-INTGRTN-TYP-DESC                                 
+                        TO MQ-INTGRTN-TYP-DESC                                  
+                 MOVE CC-QMGR-NAME                                              
+                        TO MQ-QMGR-NAME                                         
+                 MOVE CC-QMGR-NAME-REMOTE                                       
+                        TO MQ-QMGR-NAME-REMOTE                                  
+                 MOVE CC-TRANS-QUEUE-NAME                                       
+                        TO MQ-TRANS-QUEUE-NAME                                  
+                                                                                
+             WHEN SQLCODE = +100                                                
+                                                                                
+                 DISPLAY 'NO MQ QUEUE TO PUT'                                   
+                 DISPLAY 'INTEGRATION TYPE CODE = '                             
+                         WSV00005-INTGRTN-TYP-CDE                               
+                                                                                
+                 MOVE '1200-GET-MQ-QUEUE-INFO' TO PV-ABEND-PARAGRAPH            
+                 MOVE 'SELECT MQ DETAILS'      TO PV-ABEND-OPERATION            
+                                                                                
+                 PERFORM 9900-DB2-ABEND                                         
+                                                                                
+             WHEN OTHER                                                         
+                                                                                
+                 DISPLAY 'INTEGRATION TYPE CODE = '                             
+                         WSV00005-INTGRTN-TYP-CDE                               
+                                                                                
+                 MOVE '1200-GET-MQ-QUEUE-INFO' TO PV-ABEND-PARAGRAPH            
+                 MOVE 'SELECT MQ DETAILS'      TO PV-ABEND-OPERATION            
+                                                                                
+                 PERFORM 9900-DB2-ABEND                                         
+           END-EVALUATE.                                                        
+                                                                                
+1123RM****************************************************************          
+1123RM* GET MQ INFORMATION FROM DB2 TABLES FOR M-O QUEUE                        
+1123RM****************************************************************          
+1123RM 1250-GET-ADDL-MQ-QUEUE-INFO.                                             
+1123RM                                                                          
+1123RM     MOVE '1250-GET-ADDL-MQ-QUEUE-INFO'  TO PV-PARAGRAPH.                 
+**TEMP     DISPLAY PV-PARAGRAPH.                                                
+1123RM     MOVE PV-SYS-PARM-VALUE-2  TO PV-WSV5-INTGRTN-TYP-CDE.                
+1123RM                                                                          
+1123RM     EXEC SQL                                                             
+1123RM        SELECT A.INTGRTN_TYP_DESC                                         
+1123RM              ,A.LCL_QUE_MGR                                              
+1123RM              ,A.RMT_QUE_MGR                                              
+1123RM              ,A.QUE_NM                                                   
+1123RM        INTO                                                              
+1123RM               :PV-WSV5-INTGRTN-TYP-DESC                                  
+1123RM              ,:CC7-QMGR-NAME                                             
+1123RM              ,:CC5-QMGR-NAME-REMOTE                                      
+1123RM              ,:CC6-TRANS-QUEUE-NAME                                      
+1123RM         FROM WSV_PRVDR_QUE A                                             
+1123RM         WHERE A.APPL_FUNC_DESC    = 'QUEUE'                              
+1123RM           AND A.INTGRTN_TYP_CDE   = :PV-WSV5-INTGRTN-TYP-CDE             
+1123RM     END-EXEC.                                                            
+1123RM                                                                          
+1123RM     EVALUATE TRUE                                                        
+1123RM       WHEN SQLCODE = ZERO                                                
+1123RM                                                                          
+1123RM           DISPLAY 'MO QMGR-NAME-REMOTE:' CC5-QMGR-NAME-REMOTE            
+1123RM           DISPLAY 'MO TRANS-QUEUE-NAME:' CC6-TRANS-QUEUE-NAME            
+1123RM                                                                          
+1123RM           MOVE PV-WSV5-INTGRTN-TYP-DESC                                  
+1123RM                  TO MQ-MO-INTGRTN-TYP-DESC                               
+1123RM           MOVE CC7-QMGR-NAME                                             
+1123RM                  TO MQ-MO-QMGR-NAME                                      
+1123RM           MOVE CC5-QMGR-NAME-REMOTE                                      
+1123RM                  TO MQ-MO-QMGR-NAME-REMOTE                               
+1123RM           MOVE CC6-TRANS-QUEUE-NAME                                      
+1123RM                  TO MQ-MO-TRANS-QUEUE-NAME                               
+1123RM                                                                          
+1123RM       WHEN SQLCODE = +100                                                
+1123RM                                                                          
+1123RM           DISPLAY 'NO MQ QUEUE TO PUT'                                   
+1123RM           DISPLAY 'INTEGRATION TYPE CODE = '                             
+1123RM                   PV-WSV5-INTGRTN-TYP-CDE                                
+1123RM           MOVE '1250-GET-ADDL-MQ-QUEUE-INFO' TO                          
+1123RM                 PV-ABEND-PARAGRAPH                                       
+1123RM           MOVE 'SELECT ADDL MQ DETAILS'      TO                          
+1123RM                 PV-ABEND-OPERATION                                       
+1123RM           PERFORM 9900-DB2-ABEND                                         
+1123RM                                                                          
+1123RM       WHEN OTHER                                                         
+1123RM                                                                          
+1123RM           DISPLAY 'INTEGRATION TYPE CODE = '                             
+1123RM                   PV-WSV5-INTGRTN-TYP-CDE                                
+1123RM           MOVE '1250-GET-ADDL-MQ-QUEUE-INFO' TO                          
+1123RM                 PV-ABEND-PARAGRAPH                                       
+1123RM           MOVE 'SELECT ADDL MQ DETAILS'      TO                          
+1123RM                 PV-ABEND-OPERATION                                       
+1123RM           PERFORM 9900-DB2-ABEND                                         
+1123RM     END-EVALUATE.                                                        
+      ****************************************************************          
+      ** CONNECT TO THE MULTIPLE QUEUE MANAGERS.                                
+      ** GET THE HANDLE TO THE QUEUE MANAGER - PV-HCONN                         
+      ****************************************************************          
+       1300-MQ-CONNECT-TO-QMGR.                                                 
+                                                                                
+           MOVE '1300-MQ-CONNECT-TO-QMGR' TO PV-PARAGRAPH.                      
+                                                                                
+           MOVE MQ-QMGR-NAME                TO PV-QM-NAME.                      
+                                                                                
+           CALL PC-MQCONN USING PV-QM-NAME                                      
+                                PV-HCONN                                        
+                                PV-COMPLETION-CODE                              
+                                PV-REASON.                                      
+                                                                                
+           MOVE PV-REASON TO PV-CON-REASON.                                     
+           IF PV-COMPLETION-CODE = MQCC-OK                                      
+              DISPLAY 'CONNECTED TO QM -' MQ-QMGR-NAME                          
+               CONTINUE                                                         
+           ELSE                                                                 
+               CALL PV-MQCHECK USING PV-REASON                                  
+                                     PV-MQ-REASON-TEXT                          
+               MOVE PV-QM-NAME           TO PE-MQ-QMANAGER                      
+               MOVE PV-COMPLETION-CODE   TO PE-MQ-COMPLETION-CODE               
+               MOVE PV-REASON            TO PE-MQ-REASON-CODE                   
+               MOVE '1300-MQ-CONNECT-TO-QMGR'                                   
+                                         TO PV-ERROR-MESSAGE                    
+               PERFORM 9200-MQ-ABEND                                            
+           END-IF.                                                              
+                                                                                
+      ****************************************************************          
+      ** OPEN MQ QUEUE FOR 'PUT'                                                
+      ****************************************************************          
+       1400-MQ-QUEUE-OPEN.                                                      
+                                                                                
+           MOVE '1400-MQ-QUEUE-OPEN' TO PV-PARAGRAPH.                           
+                                                                                
+      * CONTROL CARD 2 - QUEUE NAME                                             
+           MOVE MQ-TRANS-QUEUE-NAME  TO PC-TRANS-QNAME.                         
+           COMPUTE PV-OPEN-OPTIONS = MQOO-OUTPUT                                
+                                   + MQOO-SET-IDENTITY-CONTEXT                  
+                                   + MQOO-FAIL-IF-QUIESCING.                    
+           MOVE PC-TRANS-QNAME       TO MQOD-OBJECTNAME.                        
+                                                                                
+           DISPLAY 'PC-TRANS-QNAME:' PC-TRANS-QNAME                             
+           DISPLAY 'MQOD-OBJECTNAME:' MQOD-OBJECTNAME                           
+                                                                                
+      * CONTROL CARD 3 - REMOTE QMGR NAME                                       
+           MOVE MQ-QMGR-NAME-REMOTE                                             
+                                TO MQOD-OBJECTQMGRNAME.                         
+                                                                                
+      ******************************************************************        
+      *REPLACE REMOTE QMGR NAME WITH LOCAL QMGR NAME TO WRITE TO LOCAL Q        
+      ******************************************************************        
+                                                                                
+           DISPLAY 'MQOD-OBJECTQMGRNAME  :' MQOD-OBJECTQMGRNAME                 
+           DISPLAY 'MQOD-OBJECTNAME      :' MQOD-OBJECTNAME                     
+           DISPLAY 'PV-HCONN             :' PV-HCONN                            
+           DISPLAY 'MQM-OBJECT-DESCRIPTOR:' MQM-OBJECT-DESCRIPTOR               
+           DISPLAY 'PV-OPEN-OPTIONS      :' PV-OPEN-OPTIONS                     
+           DISPLAY 'PV-PQ-HANDLE         :' PV-PQ-HANDLE                        
+                                                                                
+           CALL PC-MQOPEN USING PV-HCONN                                        
+                                MQM-OBJECT-DESCRIPTOR                           
+                                PV-OPEN-OPTIONS                                 
+                                PV-PQ-HANDLE                                    
+                                PV-COMPLETION-CODE                              
+                                PV-REASON.                                      
+                                                                                
+           IF PV-COMPLETION-CODE = MQCC-OK THEN                                 
+               MOVE  PV-PQ-HANDLE TO PV-MQ-HANDLE-HOLD                          
+               DISPLAY 'OPEN COMPLETE'                                          
+               CONTINUE                                                         
+           ELSE                                                                 
+               CALL PV-MQCHECK USING PV-REASON                                  
+                                     PV-MQ-REASON-TEXT                          
+               MOVE PV-QM-NAME-REMOTE    TO PE-MQ-QMANAGER-REMOTE               
+               MOVE PC-TRANS-QNAME       TO PE-MQ-QNAME                         
+               MOVE PV-COMPLETION-CODE   TO PE-MQ-COMPLETION-CODE               
+               MOVE PV-REASON            TO PE-MQ-REASON-CODE                   
+               MOVE '1400-MQ-QUEUE-OPEN' TO PV-ERROR-MESSAGE                    
+               PERFORM 9200-MQ-ABEND                                            
+           END-IF.                                                              
+                                                                                
+1123RM****************************************************************          
+1123RM** OPEN ADDITIONAL MQ QUEUE FOR 'PUT' FOR MECHANICAL ORCHARD              
+1123RM****************************************************************          
+1123RM 1450-MQ-MO-QUEUE-OPEN.                                                   
+1123RM     MOVE '1400-MQ-QUEUE2-OPEN' TO PV-PARAGRAPH.                          
+1123RM                                                                          
+**TEMP     DISPLAY '1450-MQ-MO-QUEUE-OPEN OF '  MQ-MO-TRANS-QUEUE-NAME.         
+1123RM* CONTROL CARD 6 - QUEUE NAME                                             
+1123RM     MOVE MQ-MO-TRANS-QUEUE-NAME     TO PC-MO-TRANS-QNAME.                
+1123RM     COMPUTE PV-OPEN-OPTIONS = MQOO-OUTPUT                                
+1123RM                             + MQOO-SET-IDENTITY-CONTEXT                  
+1123RM                             + MQOO-FAIL-IF-QUIESCING.                    
+1123RM     MOVE PC-MO-TRANS-QNAME    TO MQOD-OBJECTNAME.                        
+1123RM                                                                          
+1123RM     DISPLAY 'PC-MO-TRANS-QNAME:' PC-MO-TRANS-QNAME                       
+1123RM     DISPLAY 'MQOD-OBJECTNAME  :' MQOD-OBJECTNAME                         
+1123RM                                                                          
+1123RM* CONTROL CARD 5 - REMOTE QMGR NAME                                       
+1123RM     MOVE MQ-QMGR-NAME-REMOTE                                             
+1123RM                          TO MQOD-OBJECTQMGRNAME.                         
+1123RM                                                                          
+1123RM******************************************************************        
+1123RM*REPLACE REMOTE QMGR NAME WITH LOCAL QMGR NAME TO WRITE TO LOCAL Q        
+1123RM******************************************************************        
+1123RM                                                                          
+1123RM     DISPLAY 'MQOD-OBJECTQMGRNAME  :' MQOD-OBJECTQMGRNAME                 
+1123RM     DISPLAY 'MQOD-OBJECTNAME      :' MQOD-OBJECTNAME                     
+1123RM     DISPLAY 'PV-HCONN             :' PV-HCONN                            
+1123RM     DISPLAY 'MQM-OBJECT-DESCRIPTOR:' MQM-OBJECT-DESCRIPTOR               
+1123RM     DISPLAY 'PV-OPEN-OPTIONS      :' PV-OPEN-OPTIONS                     
+1123RM     DISPLAY 'PV-MO-PQ-HANDLE      :' PV-MO-PQ-HANDLE                     
+1123RM                                                                          
+1123RM     CALL PC-MQOPEN USING PV-HCONN                                        
+1123RM                          MQM-OBJECT-DESCRIPTOR                           
+1123RM                          PV-OPEN-OPTIONS                                 
+1123RM                          PV-MO-PQ-HANDLE                                 
+1123RM                          PV-COMPLETION-CODE                              
+1123RM                          PV-REASON.                                      
+1123RM                                                                          
+1123RM     IF PV-COMPLETION-CODE = MQCC-OK THEN                                 
+1123RM         MOVE  PV-MO-PQ-HANDLE TO PV-MO-MQ-HANDLE-HOLD                    
+1123RM         DISPLAY 'OPEN COMPLETE FOR: ' MQ-MO-TRANS-QUEUE-NAME             
+1123RM*        CONTINUE                                                         
+1123RM     ELSE                                                                 
+1123RM         CALL PV-MQCHECK USING PV-REASON                                  
+1123RM                               PV-MQ-REASON-TEXT                          
+1123RM         MOVE PV-QM-NAME-REMOTE     TO PE-MO-MQ-QMANAGER-REMOTE           
+1123RM         MOVE PC-TRANS-QNAME        TO PE-MO-MQ-QNAME                     
+1123RM         MOVE PV-COMPLETION-CODE    TO PE-MO-MQ-COMPLETION-CODE           
+1123RM         MOVE PV-REASON             TO PE-MO-MQ-REASON-CODE               
+1123RM         MOVE '1450-MQ-QUEUE2-OPEN' TO PV-ERROR-MESSAGE                   
+1123RM         PERFORM 9200-MQ-ABEND                                            
+1123RM     END-IF.                                                              
+      ****************************************************************          
+      ** CLOSES THE MQ QUEUE.                                                   
+      ****************************************************************          
+       1500-MQ-QUEUE-CLOSE.                                                     
+                                                                                
+           MOVE '1500-MQ-QUEUE-CLOSE' TO PV-PARAGRAPH.                          
+                                                                                
+           CALL PC-MQCLOSE USING PV-HCONN                                       
+                                 PV-MQ-HANDLE-HOLD                              
+                                 MQCO-NONE                                      
+                                 PV-COMPLETION-CODE                             
+                                 PV-REASON.                                     
+                                                                                
+           IF PV-COMPLETION-CODE = MQCC-OK                                      
+               CONTINUE                                                         
+           ELSE                                                                 
+               CALL PV-MQCHECK USING PV-REASON                                  
+                                     PV-MQ-REASON-TEXT                          
+               MOVE PV-QM-NAME           TO PE-MQ-QMANAGER                      
+               MOVE PC-TRANS-QNAME       TO PE-MQ-QNAME                         
+               MOVE PV-COMPLETION-CODE   TO PE-MQ-COMPLETION-CODE               
+               MOVE PV-REASON            TO PE-MQ-REASON-CODE                   
+               MOVE 'MQ-CLOSE'           TO PV-ERROR-MESSAGE                    
+               PERFORM 9200-MQ-ABEND                                            
+           END-IF.                                                              
+                                                                                
+1123RM****************************************************************          
+1123RM** CLOSES THE MQ QUEUE.                                                   
+1123RM****************************************************************          
+1123RM 1550-MO-MQ-QUEUE-CLOSE.                                                  
+1123RM     MOVE '1550-MO-MQ-QUEUE-CLOSE' TO PV-PARAGRAPH.                       
+1123RM                                                                          
+1123RM     CALL PC-MQCLOSE USING PV-HCONN                                       
+1123RM                           PV-MO-MQ-HANDLE-HOLD                           
+1123RM                           MQCO-NONE                                      
+1123RM                           PV-COMPLETION-CODE                             
+1123RM                           PV-REASON.                                     
+1123RM                                                                          
+1123RM     IF PV-COMPLETION-CODE = MQCC-OK                                      
+0324RM         CONTINUE                                                         
+**TEMP*        DISPLAY '1550-MO-MQ CLOSE SUCCESSFUL'                            
+1123RM     ELSE                                                                 
+1123RM         CALL PV-MQCHECK USING PV-REASON                                  
+1123RM                               PV-MQ-REASON-TEXT                          
+1123RM         MOVE PV-QM-NAME           TO PE-MQ-QMANAGER                      
+1123RM         MOVE PC-TRANS-QNAME       TO PE-MQ-QNAME                         
+1123RM         MOVE PV-COMPLETION-CODE   TO PE-MQ-COMPLETION-CODE               
+1123RM         MOVE PV-REASON            TO PE-MQ-REASON-CODE                   
+1123RM         MOVE 'MQ-CLOSE'           TO PV-ERROR-MESSAGE                    
+1123RM         PERFORM 9200-MQ-ABEND                                            
+1123RM     END-IF.                                                              
+      ****************************************************************          
+      ** DISCONNECT FROM THE QUEUE MANAGER                                      
+      ****************************************************************          
+       1600-DISCONNECT-QMGR.                                                    
+           MOVE '1600-DISCONNECT-QMGR' TO PV-PARAGRAPH.                         
+                                                                                
+           CALL PC-MQDISC USING PV-HCONN                                        
+                                PV-COMPLETION-CODE                              
+                                PV-REASON                                       
+                                                                                
+           IF PV-COMPLETION-CODE = MQCC-OK                                      
+              CONTINUE                                                          
+           ELSE                                                                 
+              CALL PV-MQCHECK USING PV-REASON                                   
+                                    PV-MQ-REASON-TEXT                           
+              MOVE PV-QM-NAME             TO PE-MQ-QMANAGER                     
+              MOVE PC-TRANS-QNAME         TO PE-MQ-QNAME                        
+              MOVE PV-COMPLETION-CODE     TO PE-MQ-COMPLETION-CODE              
+              MOVE PV-REASON              TO PE-MQ-REASON-CODE                  
+              MOVE '1600-DISCONNECT-QMGR' TO PV-ERROR-MESSAGE                   
+              PERFORM 9200-MQ-ABEND                                             
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *     READ STORE EXPECTED RECORDS                                         
+      ******************************************************************        
+       1800-READ-STREXPCTD-RECS.                                                
+                                                                                
+           MOVE '1800-READ-STREXPCTD-RECS' TO PV-PARAGRAPH.                     
+                                                                                
+           READ STREXPCTD-FILE INTO PC010-PCT-INTRANSIT-REC                     
+                AT END SET PS-END-OF-STREXPCTD-REC-Y TO TRUE.                   
+                                                                                
+           IF PS-END-OF-STREXPCTD-REC-N                                         
+              ADD +1 TO PV-COUNTER                                              
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *     PROCESS FS ADJUSTMENTS                                              
+      ******************************************************************        
+       2000-PROCESS-STREXPCTD-RECS.                                             
+                                                                                
+           MOVE '2000-PROCESS-STREXPCTD-RECS' TO PV-PARAGRAPH.                  
+                                                                                
+           PERFORM 2100-EDIT-AND-FORMAT-TRAN.                                   
+                                                                                
+           IF  PV-NO-ERRORS                                                     
+               PERFORM 2020-FORMAT-OUTPUT                                       
+           END-IF.                                                              
+                                                                                
+           PERFORM 1800-READ-STREXPCTD-RECS.                                    
+                                                                                
+      ******************************************************************        
+      *  EDIT THE STORE EXPECTED TRANSACTION.                                   
+      ******************************************************************        
+       2100-EDIT-AND-FORMAT-TRAN.                                               
+                                                                                
+           MOVE '2100-EDIT-AND-FORMAT-TRAN' TO PV-PARAGRAPH.                    
+      **** INITIALIZE THE ERROR CODE TO '000' (NO ERRORS).                      
+      **** THIS CODE WILL BE OVERLAID IF AN ERROR IS FOUND.                     
+           MOVE '000' TO PV-TRN-ERR-CODE.                                       
+                                                                                
+      **** PERFORM GENERAL EDITS ON THE ADJUSTMENT DATA                         
+           MOVE PC010-INTR-UPC-ID TO PV-INTR-UPC-ID-X                           
+           IF  PV-INTR-UPC-ID-9  NOT NUMERIC                                    
+               MOVE '001'         TO PV-TRN-ERR-CODE                            
+               ADD  +1            TO PV-TRN-ERR-001-CNT                         
+           ELSE                                                                 
+               IF  PV-NO-ERRORS                                                 
+                                                                                
+                   PERFORM 2105-VALIDATE-ITEM                                   
+                                                                                
+                   MOVE PC010-INTR-UPC-ID    TO PV-INTR-UPC-ID-HOLD             
+                   MOVE PV-TRN-ERR-CODE      TO PV-PREV-ERR-CDE                 
+                                                                                
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+      *** PLEASE NOTE THAT PV-LOC-NBR-X AND PV-LOC-NBR-9 SHOULD NOT             
+      *** BE USED FOR ANYTHING OTHER THAN THE NUMERIC EDIT CHECKING.            
+      *** THIS FIELD CANNOT SUPPORT THE 5 DIGITS NEEDED FOR LOCATION            
+      *** NUMBER.  A 5 DIGIT LOCATION NUMBER WILL BE TRUNCATED.                 
+           IF  PV-NO-ERRORS                                                     
+               MOVE PC010-STR-NBR     TO PV-LOC-NBR-X                           
+               IF  PV-LOC-NBR-9 NOT NUMERIC                                     
+                   MOVE '002'         TO PV-TRN-ERR-CODE                        
+                   ADD  +1            TO PV-TRN-ERR-002-CNT                     
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+           IF  PV-NO-ERRORS                                                     
+               MOVE PC010-IN-TRNST-QTY TO PV-ADJ-QTY-X                          
+               IF  PV-ADJ-QTY-9 NOT NUMERIC                                     
+                   MOVE '003'         TO PV-TRN-ERR-CODE                        
+                   ADD  +1            TO PV-TRN-ERR-003-CNT                     
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+           IF  PV-NO-ERRORS                                                     
+               CONTINUE                                                         
+           ELSE                                                                 
+               ADD  +1              TO PV-TRN-STAT-E-CNT                        
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  VALIDATE THE INTRANSIT UPC ID                                          
+      *    --  IF THE ITEM NUMBER IS DIFFERENT THAN THAT OF THE                 
+      *        PREVIOUS TRANSACTION, SELECT THE ITEM FROM XLT_SKU.              
+      *    --  IF THE ITEM NUMBER IS THE SAME AS THAT OF THE PREVIOUS           
+      *        TRANSACTION, DO NOT SELECT ITEM FROM XLT_SKU.  CHECK             
+      *        IF THERE WAS AN ITEM NUMBER ERROR ON THE PREVIOUS TRAN.          
+      ******************************************************************        
+       2105-VALIDATE-ITEM.                                                      
+                                                                                
+           IF PC010-INTR-UPC-ID  NOT = PV-INTR-UPC-ID-HOLD                      
+               PERFORM 3000-SELECT-XLT-SKU                                      
+           ELSE                                                                 
+               IF  PV-PREV-ITM-NBR-ERR                                          
+                   MOVE PV-PREV-ERR-CDE TO PV-TRN-ERR-CODE                      
+                   IF  PV-PREV-ERR-CDE = '004'                                  
+                       ADD  +1 TO PV-TRN-ERR-004-CNT                            
+                   END-IF                                                       
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      * BUILD MQ OUTPUT                                                         
+      ******************************************************************        
+       2020-FORMAT-OUTPUT.                                                      
+                                                                                
+           MOVE '2020-FORMAT-OUTPUT'    TO PV-PARAGRAPH.                        
+                                                                                
+           INITIALIZE Adjustment.                                               
+                                                                                
+           MOVE XLT00003-SKU-NBR        TO ItemNumber.                          
+           MOVE PC010-IN-TRNST-QTY      TO Quantity.                            
+           MOVE PC010-TRN-TYP-CDE       TO ReasonCode.                          
+                                                                                
+           EVALUATE TRUE                                                        
+                                                                                
+              WHEN PC010-STORE-VRFY-RECEIPT                                     
+                 MOVE PC-TRAN-TYP-AR    TO ReasonText                           
+                                                                                
+              WHEN PC010-CNTL-STOCK-RECEIPT                                     
+                 MOVE PC-TRAN-TYP-CS    TO ReasonText                           
+                                                                                
+              WHEN PC010-STORE-VRFY-ADJ                                         
+                 MOVE PC-TRAN-TYP-VA    TO ReasonText                           
+                                                                                
+              WHEN PC010-SHIPPD-DC                                              
+                 MOVE PC-TRAN-TYP-SH    TO ReasonText                           
+                                                                                
+              WHEN PC010-UNLOAD-ST                                              
+                 MOVE PC-TRAN-TYP-UN    TO ReasonText                           
+                                                                                
+           END-EVALUATE.                                                        
+                                                                                
+           MOVE PC010-STR-NBR           TO StoreNumber.                         
+           MOVE PC-SUPPLY-TYPE          TO SupplyType.                          
+           MOVE PC010-PO-NBR            TO Reference1.                          
+           MOVE PC010-RCVR-SEQ-NBR      TO Reference2.                          
+           MOVE PC010-EVENT-TMST        TO PV-EVENT-TMST.                       
+           MOVE PV-EVENT-DATE           TO PV-XML-DATE.                         
+           MOVE PV-EVENT-HH             TO PV-XML-HH.                           
+           MOVE PV-EVENT-MM             TO PV-XML-MM.                           
+           MOVE PV-EVENT-SS             TO PV-XML-SS.                           
+           MOVE PV-EVENT-TMST-FINAL     TO Reference3.                          
+           MOVE PC010-TRN-LNE-NBR       TO Reference4.                          
+           MOVE PC010-TRIP-ID           TO Reference5.                          
+                                                                                
+           PERFORM 4000-CREATE-MSGS.                                            
+                                                                                
+      ****************************************************************          
+      * SELECT NEEDED INFO FROM XLT_SKU BY INTR_UPC_ID                          
+      ****************************************************************          
+       3000-SELECT-XLT-SKU.                                                     
+                                                                                
+           MOVE '3000-SELECT-XLT-SKU'   TO PV-PARAGRAPH.                        
+                                                                                
+           EXEC SQL                                                             
+               SELECT SKU_NBR                                                   
+                 INTO :XLT00003-SKU-NBR                                         
+                 FROM XLT_SKU                                                   
+                WHERE INTR_UPC_ID    = :PC010-INTR-UPC-ID                       
+                WITH UR                                                         
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+             WHEN SQLCODE = ZERO                                                
+                 CONTINUE                                                       
+             WHEN SQLCODE = +100                                                
+                 MOVE '004' TO PV-TRN-ERR-CODE                                  
+                 ADD  +1    TO PV-TRN-ERR-004-CNT                               
+             WHEN OTHER                                                         
+                 MOVE '3000-SELECT-XLT-SKU' TO PV-ABEND-PARAGRAPH               
+                 MOVE 'SELECT             ' TO PV-ABEND-OPERATION               
+                 DISPLAY '3000-SELECT-XLT-SKU SQLCODE='                         
+                         SQLCODE ' FOR INTR_UPC_ID '                            
+                         PC010-INTR-UPC-ID                                      
+                 PERFORM 9900-DB2-ABEND                                         
+           END-EVALUATE.                                                        
+                                                                                
+      ****************************************************************          
+      * CREATE XML FOR RDC AND OUTPUT TO MQ                                     
+      ****************************************************************          
+       4000-CREATE-MSGS.                                                        
+                                                                                
+           MOVE '4000-CREATE-MSGS'      TO PV-PARAGRAPH.                        
+                                                                                
+           PERFORM 4100-GENERATE-XML.                                           
+           ADD +1 TO PV-ADJUSTMENT-SENT-TO-QUE.                                 
+                                                                                
+           MOVE PV-XML-BANNER              TO PV-MSGBUFFER-banner.              
+           MOVE PV-XML(1:XML-LENGTH)       TO PV-MSGBUFFER-data.                
+           COMPUTE PV-MSG-LENGTH = XML-LENGTH                                   
+                                 + LENGTH OF PV-XML-BANNER.                     
+           MOVE PV-MSG-LENGTH TO PV-MSG-LENGTH-DISPLAY.                         
+           INITIALIZE PS-MQPUT-SUCCESSFUL-IND                                   
+                      PC-MQPUT-RETRY-COUNTER.                                   
+           PERFORM 5000-MQ-PUT-TO-QUEUE                                         
+             UNTIL PS-MQPUT-SUCCESSFUL.                                         
+                                                                                
+1123RM     IF PS-MQPUT-SUCCESSFUL and PV-VALID-SYS-PARM-2                       
+1123RM         INITIALIZE PS-MO-MQPUT-SUCCESSFUL-IND                            
+1123RM                    PC-MQPUT-RETRY-COUNTER                                
+1123RM         PERFORM 5500-MO-MQ-PUT-TO-QUEUE                                  
+1123RM     END-IF.                                                              
+                                                                                
+0124rm     IF PV-ADJUSTMENT-SENT-TO-QUE = 5000                                  
+0124rm*    IF PV-ADJUSTMENT-SENT-TO-QUE = 2500                                  
+               PERFORM 5100-MQ-COMMIT                                           
+               MOVE ZEROS TO PV-ADJUSTMENT-SENT-TO-QUE                          
+               PERFORM 4500-WRITE-PROCESSD-FILE                                 
+           END-IF.                                                              
+                                                                                
+      ***************************************************************           
+       4100-GENERATE-XML.                                                       
+                                                                                
+           MOVE '4100-GENERATE-XML'     TO PV-PARAGRAPH.                        
+                                                                                
+           MOVE SPACES TO PV-XML.                                               
+           XML GENERATE PV-XML                                                  
+               FROM Adjustment                                                  
+               COUNT IN XML-LENGTH                                              
+               WITH ATTRIBUTES                                                  
+               ON EXCEPTION                                                     
+                   DISPLAY Adjustment ' PV=' PV-XML                             
+                   PERFORM 4110-XML-ERROR                                       
+               NOT ON EXCEPTION                                                 
+                   CONTINUE                                                     
+           END-XML.                                                             
+                                                                                
+      ***************************************************************           
+       4110-XML-ERROR.                                                          
+                                                                                
+           MOVE '4110-XML-ERROR'        TO PV-PARAGRAPH.                        
+                                                                                
+           PERFORM 9000-EXPLAIN-XML-RESPONSE                                    
+           PERFORM  VARYING XML-LINE-IDX FROM 1 BY 1                            
+                      UNTIL XML-LINE-IDX > XML-RESPONSE-LINES                   
+               DISPLAY XML-MSG(XML-LINE-IDX)                                    
+           END-PERFORM.                                                         
+           MOVE +4018         TO ABEND-CODE.                                    
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    
+                                                                                
+           COPY ISPD007.                                                        
+           COPY ISPD008.                                                        
+           COPY ISPD009.                                                        
+                                                                                
+      ******************************************************************        
+      * INSERT PROCESSED RECORD IN PROCESSED FILE                               
+      ******************************************************************        
+       4500-WRITE-PROCESSD-FILE.                                                
+           MOVE '4500-WRITE-PROCESSD-FILE' TO PV-PARAGRAPH.                     
+                                                                                
+           MOVE PC010-PCT-INTRANSIT-REC    TO PROCESSED-RECORD                  
+           WRITE PROCESSED-RECORD.                                              
+      ******************************************************************        
+      *      PUT MQ MESSAGE                                                     
+      ******************************************************************        
+       5000-MQ-PUT-TO-QUEUE.                                                    
+                                                                                
+           MOVE '5000-MQ-PUT-TO-QUEUE' TO PV-PARAGRAPH.                         
+                                                                                
+           MOVE MQMI-NONE    TO MQMD-MSGID.                                     
+           MOVE MQCI-NONE    TO MQMD-CORRELID.                                  
+           MOVE MQFMT-STRING TO MQMD-FORMAT.                                    
+                                                                                
+           COMPUTE MQPMO-OPTIONS  = MQPMO-SYNCPOINT                             
+                                  + MQPMO-SET-IDENTITY-CONTEXT.                 
+           PERFORM 5010-LOW-VALUES.                                             
+                                                                                
+           CALL PC-MQPUT USING PV-HCONN                                         
+                               PV-MQ-HANDLE-HOLD                                
+                               MQM-MESSAGE-DESCRIPTOR                           
+                               MQM-PUT-MESSAGE-OPTIONS                          
+                               PV-MSG-LENGTH                                    
+                               PV-MSGBUFFER                                     
+                               PV-COMPLETION-CODE                               
+                               PV-REASON.                                       
+                                                                                
+      *IF PUT FAILED THEN DISPLAY ERROR MESSAGE                                 
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK)                                
+               IF (PV-REASON NOT = MQRC-PAGESET-FULL                            
+                 AND PV-REASON NOT = MQRC-Q-FULL                                
+                 AND PV-REASON NOT = MQRC-Q-SPACE-NOT-AVAILABLE )               
+                   CALL PV-MQCHECK USING PV-REASON                              
+                                         PV-MQ-REASON-TEXT                      
+      *            DISPLAY 'MQ MESSAGE = ' PV-MSGBUFFER                         
+                   DISPLAY 'MQ MESSAGE = ' PV-MSGBUFFER(1:1000)                 
+                   MOVE '5000-MQ-PUT-TO-QUEUE'  TO PV-PARAGRAPH                 
+                   MOVE 'MQPUT FAILED'          TO PV-ERROR-MESSAGE             
+                   MOVE PV-COMPLETION-CODE  TO PV-HOLD-COMPLETION-CODE          
+                                               PE-MQ-COMPLETION-CODE            
+                   MOVE PV-REASON               TO PV-HOLD-REASON               
+                                                   PE-MQ-REASON-CODE            
+                   PERFORM 5200-BACK-OUT-MQ                                     
+                   MOVE PV-HOLD-COMPLETION-CODE TO PV-COMPLETION-CODE           
+                   MOVE PV-HOLD-REASON          TO PV-REASON                    
+                   PERFORM 9200-MQ-ABEND                                        
+               ELSE                                                             
+                   ADD 1 TO PC-MQPUT-RETRY-COUNTER                              
+                   IF PC-MQPUT-RETRY-COUNTER >= 60                              
+                       CALL PV-MQCHECK USING PV-REASON                          
+                                             PV-MQ-REASON-TEXT                  
+      *                DISPLAY 'MQ MESSAGE = ' PV-MSGBUFFER                     
+                       DISPLAY 'MQ MESSAGE = ' PV-MSGBUFFER(1:1000)             
+                       MOVE '5000-MQ-PUT-TO-QUEUE' TO PV-PARAGRAPH              
+                       MOVE 'MQPUT ERROR- RETRY > 60 '                          
+                            TO PV-ERROR-MESSAGE                                 
+                       MOVE PV-COMPLETION-CODE                                  
+                            TO PV-HOLD-COMPLETION-CODE                          
+                               PE-MQ-COMPLETION-CODE                            
+                       MOVE PV-REASON TO PV-HOLD-REASON                         
+                                         PE-MQ-REASON-CODE                      
+                       PERFORM 5200-BACK-OUT-MQ                                 
+                       MOVE PV-HOLD-COMPLETION-CODE                             
+                            TO PV-COMPLETION-CODE                               
+                       MOVE PV-HOLD-REASON TO PV-REASON                         
+                       PERFORM 9200-MQ-ABEND                                    
+                   ELSE                                                         
+      *WAIT FOR 30 SECONDS AND TRY AGAIN                                        
+                       CALL 'SYSWAIT' USING PC-DELAY-INTERVAL                   
+                   END-IF                                                       
+               END-IF                                                           
+           ELSE                                                                 
+               ADD 1 TO PA-TOTAL-MQ-MSGS-SENT                                   
+               SET PS-MQPUT-SUCCESSFUL TO TRUE                                  
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+       5010-LOW-VALUES.                                                         
+                                                                                
+           MOVE '5010-LOW-VALUES'      TO PV-PARAGRAPH.                         
+                                                                                
+           MOVE PV-MSGBUFFER TO PV-HOLD-MSGBUFFER.                              
+           MOVE PV-HOLD-MSGBUFFER TO PV-MSGBUFFER.                              
+                                                                                
+      ******************************************************************        
+      *  COMMIT MQ PROCESSING SINCE THE POINT OF THE LAST COMMIT                
+      ******************************************************************        
+       5100-MQ-COMMIT.                                                          
+                                                                                
+           MOVE '5100-MQ-COMMIT'      TO PV-PARAGRAPH.                          
+                                                                                
+           CALL PC-MQCMIT USING PV-HCONN                                        
+                                PV-COMPLETION-CODE                              
+                                PV-REASON.                                      
+                                                                                
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK)                                
+              CALL PV-MQCHECK USING PV-REASON                                   
+                                    PV-MQ-REASON-TEXT                           
+              MOVE '5100-COMMIT-MQ'   TO PV-PARAGRAPH                           
+              MOVE 'MQCMIT ERROR'     TO PV-ERROR-MESSAGE                       
+              MOVE PV-COMPLETION-CODE TO PV-HOLD-COMPLETION-CODE                
+                                         PE-MQ-COMPLETION-CODE                  
+              MOVE PV-REASON          TO PV-HOLD-REASON                         
+                                         PE-MQ-REASON-CODE                      
+              PERFORM 5200-BACK-OUT-MQ                                          
+              MOVE PV-HOLD-COMPLETION-CODE TO PV-COMPLETION-CODE                
+              MOVE PV-HOLD-REASON          TO PV-REASON                         
+              PERFORM 9200-MQ-ABEND                                             
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * BACK OUT MQ PROCESSING SINCE THE POINT OF THE LAST COMMIT               
+      ******************************************************************        
+       5200-BACK-OUT-MQ.                                                        
+                                                                                
+           MOVE '5200-BACK-OUT-MQ'    TO PV-PARAGRAPH.                          
+                                                                                
+           CALL PC-MQBACK USING PV-HCONN                                        
+                                PV-COMPLETION-CODE                              
+                                PV-REASON.                                      
+                                                                                
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK)                                
+              CALL PV-MQCHECK USING PV-REASON                                   
+                                    PV-MQ-REASON-TEXT                           
+1015RM        MOVE PV-COMPLETION-CODE TO PV-HOLD-COMPLETION-CODE                
+1015RM                                   PE-MQ-COMPLETION-CODE                  
+1015RM        MOVE PV-REASON          TO PV-HOLD-REASON                         
+1015RM                                   PE-MQ-REASON-CODE                      
+              MOVE '5200-BACK-OUT-MQ'  TO PV-PARAGRAPH                          
+              MOVE 'MQBACK ERROR'    TO PV-ERROR-MESSAGE                        
+              PERFORM 9200-MQ-ABEND                                             
+           END-IF.                                                              
+                                                                                
+1123RM******************************************************************        
+1123RM*      PUT MECHANICAL ORCHARD MQ MESSAGE                                  
+1123RM******************************************************************        
+1123RM 5500-MO-MQ-PUT-TO-QUEUE.                                                 
+1123RM     MOVE '5500-MO-MQ-PUT-TO-QUEUE' TO PV-PARAGRAPH.                      
+**TEMP*    DISPLAY PV-PARAGRAPH.                                                
+1123RM                                                                          
+1123RM     MOVE MQMI-NONE    TO MQMD-MSGID.                                     
+1123RM     MOVE MQCI-NONE    TO MQMD-CORRELID.                                  
+1123RM     MOVE MQFMT-STRING TO MQMD-FORMAT.                                    
+1123RM                                                                          
+1123RM     COMPUTE MQPMO-OPTIONS  = MQPMO-SYNCPOINT                             
+1123RM                            + MQPMO-SET-IDENTITY-CONTEXT.                 
+1123RM     PERFORM 5010-LOW-VALUES.                                             
+1123RM                                                                          
+**TEMP*****TO FORCE AN ERROR IN THE MQPUT SWAP PV-MO-MQ-HANDLE-HOLD FOR         
+**TEMP*    PV-MO-MQ-HANDLE-HOLD-TMP                                             
+1123RM     CALL PC-MQPUT USING PV-HCONN                                         
+1123RM                         PV-MO-MQ-HANDLE-HOLD                             
+**TEMP*                        PV-MO-MQ-HANDLE-HOLD-TMP                         
+1123RM                         MQM-MESSAGE-DESCRIPTOR                           
+1123RM                         MQM-PUT-MESSAGE-OPTIONS                          
+1123RM                         PV-MSG-LENGTH                                    
+1123RM                         PV-MSGBUFFER                                     
+1123RM                         PV-COMPLETION-CODE                               
+1123RM                         PV-REASON.                                       
+1123RM                                                                          
+**TEMP**** CODE TO FORCE TO GO THRU ERROR LOGIC                                 
+**TEMP*    DISPLAY 'PV-COMPLETION-CODE ' PV-COMPLETION-CODE.                    
+**TEMP*    MOVE 2 TO PV-COMPLETION-CODE.                                        
+**TEMP*    MOVE PC-MQRC-PAGESET-FULL TO PV-REASON                               
+**TEMP                                                                          
+1123RM*IF PUT FAILED THEN DISPLAY ERROR MESSAGE                                 
+1123RM*AND WRITE FAILED MESSAGE TO MO OUTPUT FILE                               
+1123RM*IF PUT FAILED THEN DISPLAY ERROR MESSAGE                                 
+1123RM     IF PV-COMPLETION-CODE = MQCC-OK                                      
+**TEMP*        DISPLAY '5500-MO-MQPUT - SUCCESS'                                
+1123RM         ADD 1 TO PA-TOTAL-MQ-MSGS-SENT                                   
+1123RM         ADD 1 TO PA-TOTAL-MO-MQ-MSGS-SENT                                
+1123RM         SET PS-MO-MQPUT-SUCCESSFUL TO TRUE                               
+1123RM     ELSE                                                                 
+1123RM         DISPLAY 'MO MQ PUT MSG FAILED ' PV-REASON                        
+1123RM          ' ' PV-COMPLETION-CODE                                          
+1123RM          ' ' PV-MSGBUFFER(1:500)                                         
+1123RM          ' INPUT RECORD COUNT ' PV-COUNTER                               
+1123RM           PERFORM 6000-WRITE-MO-ERROR-FILE                               
+1123RM     END-IF.                                                              
+1123RM******************************************************************        
+1123RM*      WRITE MECHANICAL ORCHARD PUT ERROR RECORDS                         
+1123RM******************************************************************        
+1123RM 6000-WRITE-MO-ERROR-FILE.                                                
+1123rm     MOVE PC010-PCT-INTRANSIT-REC TO MO-ERROR-RECORD.                     
+1123RM     WRITE MO-ERROR-RECORD.                                               
+1123RM     ADD +1 TO PA-GIV-MO-ERR-CNT.                                         
+      ******************************************************************        
+      * DISPLAY STATISTICS FOR THE PROGRAM                                      
+      ******************************************************************        
+       9000-EOJ-ROUTINE.                                                        
+                                                                                
+           MOVE '9000-EOJ-ROUTINE'    TO PV-PARAGRAPH.                          
+                                                                                
+           CLOSE STREXPCTD-FILE.                                                
+           CLOSE PROCESSED-FILE.                                                
+1123RM     CLOSE MO-ERROR-FILE.                                                 
+                                                                                
+           DISPLAY ' '                                                          
+           DISPLAY ' ********************************************'              
+           DISPLAY '     * GVKUT005 SUMMARY STATISTICS *         '              
+           DISPLAY '       ---------------------------           '              
+           DISPLAY '          EXPECT   EXTRACT VIA MQ            '              
+           DISPLAY '       ---------------------------           '              
+           DISPLAY '   TOTAL EXPECT RECORDS READ        = '                     
+                                          PV-COUNTER                            
+1123RM     DISPLAY '   TOTAL MECH ORCH MESSAGES SENT    = '                     
+1123RM                                    PA-TOTAL-MO-MQ-MSGS-SENT              
+           DISPLAY '   TOTAL MQ MESSAGES SENT           = '                     
+                                          PA-TOTAL-MQ-MSGS-SENT                 
+1123RM     DISPLAY '   TOTAL MECH ORCH ERROR RECS       = '                     
+1123RM                                    PA-GIV-MO-ERR-CNT.                    
+           MOVE PV-TRN-STAT-E-CNT TO PV-TRN-STAT-E-CNT-DISP.                    
+           DISPLAY 'NBR OF ERROR TRANSACTIONS           = '                     
+                                     PV-TRN-STAT-E-CNT-DISP.                    
+           IF  PV-TRN-ERR-001-CNT > 0                                           
+               MOVE PV-TRN-ERR-001-CNT TO PV-TRN-ERR-001-CNT-DISP               
+               DISPLAY 'ERROR CODE 001 - NBR OF ERRORS      = '                 
+                                          PV-TRN-ERR-001-CNT-DISP               
+           END-IF.                                                              
+                                                                                
+           IF  PV-TRN-ERR-002-CNT > 0                                           
+               MOVE PV-TRN-ERR-002-CNT TO PV-TRN-ERR-002-CNT-DISP               
+               DISPLAY 'ERROR CODE 002 - NBR OF ERRORS      = '                 
+                                          PV-TRN-ERR-002-CNT-DISP               
+           END-IF.                                                              
+                                                                                
+           IF  PV-TRN-ERR-003-CNT > 0                                           
+               MOVE PV-TRN-ERR-003-CNT TO PV-TRN-ERR-003-CNT-DISP               
+               DISPLAY 'ERROR CODE 003 - NBR OF ERRORS      = '                 
+                                          PV-TRN-ERR-003-CNT-DISP               
+           END-IF.                                                              
+                                                                                
+           IF  PV-TRN-ERR-004-CNT > 0                                           
+               MOVE PV-TRN-ERR-004-CNT TO PV-TRN-ERR-004-CNT-DISP               
+               DISPLAY 'ERROR CODE 004 - NBR OF ERRORS      = '                 
+                                          PV-TRN-ERR-004-CNT-DISP               
+           END-IF.                                                              
+                                                                                
+           DISPLAY ' ********************************************'.             
+                                                                                
+      ****************************************************************          
+      ** PERFORM MQ-SERIES ABEND PROCESSING                                     
+      ****************************************************************          
+       9200-MQ-ABEND.                                                           
+                                                                                
+           DISPLAY '****************** A B E N D ******************'.           
+           DISPLAY '** MQSERIES ERROR **'.                                      
+           DISPLAY '** PROGRAM:    ', PC-CURRENT-PROGRAM-NAME.                  
+           DISPLAY '** ABEND CODE: ', PV-ABEND-CODE.                            
+           DISPLAY '** PARAGRAPH:  ', PV-PARAGRAPH.                             
+           DISPLAY '** MESSAGE:    ', PV-ERROR-MESSAGE.                         
+           DISPLAY '** COMP CODE:  ', PE-MQ-COMPLETION-CODE.                    
+           DISPLAY '** RSN CODE:   ', PE-MQ-REASON-CODE.                        
+           DISPLAY '** RSN TEXT:   ', PV-MQ-REASON-TEXT.                        
+           DISPLAY '***********************************************'.           
+           DISPLAY '   TOTAL MQ MESSAGES SENT:   '                              
+                                          PA-TOTAL-MQ-MSGS-SENT                 
+           MOVE +4013 TO ABEND-CODE.                                            
+           CALL 'ILBOABN0' USING PV-ABEND-CODE.                                 
+                                                                                
+      ******************************************************************        
+      * 9900-DB2-ABEND - PERFORMS THE ABEND FOR THE PROGRAM IN THE              
+      * EVENT THAT AN SQL ERROR OR WARNING CODE OCCURS.                         
+      ******************************************************************        
+       9900-DB2-ABEND.                                                          
+                                                                                
+           MOVE SQLCODE    TO PV-SQLCODE.                                       
+           MOVE PV-SQLCODE TO PV-DISPLAY-SQLCODE.                               
+           DISPLAY '*** DB2 ERROR ***'.                                         
+           DISPLAY '*** SQLCODE   = ' PV-DISPLAY-SQLCODE.                       
+           DISPLAY '*** PROGRAM   = ' PV-ABEND-PROGRAM.                         
+           DISPLAY '*** PARAGRAPH = ' PV-ABEND-PARAGRAPH.                       
+           DISPLAY '*** OPERATION = ' PV-ABEND-OPERATION.                       
+           DISPLAY '*** MESSAGE   = ' PV-DB2-OPERATION-MESSAGE-1.               
+           DISPLAY '*** TABLE 1   = ' PV-ABEND-STRUCTURE-1.                     
+           DISPLAY '   TOTAL MQ MESSAGES SENT:   '                              
+                                          PA-TOTAL-MQ-MSGS-SENT                 
+                                                                                
+      ******************************************************************        
+      * THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-            
+      * MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE                 
+      * 'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE             
+      * FORMAT.                                                                 
+      ******************************************************************        
+           COPY DPPD004.                                                        
+                                                                                
+           IF SQLCODE NOT = -911                                                
+               EXEC SQL                                                         
+                   ROLLBACK                                                     
+               END-EXEC                                                         
+           END-IF.                                                              
+                                                                                
+           MOVE +4013         TO PV-ABEND-CODE.                                 
+           CALL 'ILBOABN0' USING PV-ABEND-CODE.                                 
+      ******************************************************************        

@@ -1,0 +1,1336 @@
+      *****************************************************************         
+       IDENTIFICATION DIVISION.                                                 
+      *****************************************************************         
+                                                                                
+       PROGRAM-ID.             MRKUP140.                                        
+       AUTHOR.                 KRISTIN PETERSON.                                
+       INSTALLATION.           KOHLS DEPARTMENT STORES.                         
+       DATE-WRITTEN            06-30-05.                                        
+       DATE-COMPILED.                                                           
+                                                                                
+      *****************************************************************         
+      *  THIS PROGRAM WILL UPDATE THE FT CODE ON TABLE TMRITST                  
+      *  TO 'X' (OFF) WHEN A SKU/STORE IS INELIGIBLE DUE TO ER RULES.           
+      *****************************************************************         
+      *  CHANGE LOG:                                                            
+      *  06/30/05 - KRISTIN PETERSON                                            
+      *             (WR# 26351) NEW PROGRAM FOR MR REVIEW & ADJUST              
+      *             PO SUBMIT PROJECT.                                          
+      *  06/11/08 - RONNA MCDONALD                                              
+      *             INC000000398180 - INCREASE INTERNAL TABLE THAT              
+      *             HOLDS THE MQ MESSAGE.                                       
+      *             THE TABLE SIZE WAS 2600.  INCREASED IT TO 12143             
+      *             TO MATCH THE MESSAGE LENGTH FROM MQ.                        
+      *  02/21/11 - JACK KRAMER                                                 
+      *             MULTI-LOCATION ORDER FULFILLMENT - FOR A SKU, IF ANY        
+      *             E_LOCATION IS ELIGIBLE, THE SKU IS ELIGIBLE AT THE          
+      *             ECOMM CHANNEL LEVEL.                                        
+HOTFIX*  09/14/15 - COGNIZANT                                                   
+HOTFIX*             THE JOB FAIL AFTER RETRY ON FINDING ITEM IN RESPONSE        
+HOTFIX*             QUEUE, IF ITEM IS NOT FOUND THEN SKIP THE PROCESS           
+HOTFIX*             INSTAED OF ABEND. THIS CHANGE IS DUE TO HIGH                
+HOTFIX*             INCIDENT INC1930531.                                        
+HOTFIX*  09/23/15 - COGNIZANT                                                   
+HOTFIX*             BACK OUT OF HOTFIX                                          
+C08377*  09/19/18 - COGNIZANT                                                   
+C08377*             MODIFIED PROGRAM NOT TO ABEND WHENEVER THERE IS NO          
+C08377*             RESPONSE FOR THE SKU FROM THE QUEUE                         
+      *****************************************************************         
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+      *****************************************************************         
+                                                                                
+       CONFIGURATION SECTION.                                                   
+                                                                                
+       SOURCE-COMPUTER.        IBM-3090.                                        
+       OBJECT-COMPUTER.        IBM-3090.                                        
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT CONTROL-CARD-1   ASSIGN TO INP01.                             
+           SELECT CONTROL-CARD-2   ASSIGN TO INP02.                             
+           SELECT MESSAGE-ID-FILE  ASSIGN TO INP03.                             
+           SELECT REPORT-FILE      ASSIGN TO OUT01.                             
+                                                                                
+      *****************************************************************         
+       DATA DIVISION.                                                           
+      *****************************************************************         
+                                                                                
+       FILE SECTION.                                                            
+                                                                                
+       FD  CONTROL-CARD-1                                                       
+           RECORDING MODE F                                                     
+           BLOCK CONTAINS 0 RECORDS                                             
+           LABEL RECORDS ARE OMITTED.                                           
+       01  CONTROL-CARD-LINE                PIC  X(80).                         
+                                                                                
+       FD  CONTROL-CARD-2                                                       
+           RECORDING MODE F                                                     
+           BLOCK CONTAINS 0 RECORDS                                             
+           LABEL RECORDS ARE OMITTED.                                           
+       01  CONTROL-CARD-LINE-2              PIC  X(80).                         
+                                                                                
+       FD  MESSAGE-ID-FILE                                                      
+           RECORDING MODE F                                                     
+           BLOCK CONTAINS 0 RECORDS                                             
+           RECORD CONTAINS 60 CHARACTERS                                        
+           LABEL RECORDS ARE STANDARD.                                          
+                                                                                
+       01  MESSAGE-ID-RECORD                PIC X(60).                          
+                                                                                
+       FD  REPORT-FILE                                                          
+           RECORDING MODE F                                                     
+           BLOCK CONTAINS 0 RECORDS                                             
+           RECORD CONTAINS 220 CHARACTERS.                                      
+                                                                                
+       01  REPORT-RECORD                    PIC X(220).                         
+                                                                                
+      ******************************************                                
+       WORKING-STORAGE SECTION.                                                 
+      ******************************************                                
+                                                                                
+      ******************************************                                
+      * NI SKU WORK FIELDS FOR CHANGING FIELD FORMATS AND LENGTHS               
+      ******************************************                                
+           COPY ISWS006.                                                        
+                                                                                
+      ******************************************                                
+      * COPYBOOKS FOR THE CALENDAR ROUTINE                                      
+      ******************************************                                
+           COPY DPWS024.                                                        
+           COPY DPWS500.                                                        
+      ******************************************                                
+       01  FILLER.                                                              
+           05  FILLER                      PIC  X(36)    VALUE                  
+               ' ***** WORKING STORAGE PGM=MRKUP140 '.                          
+           05  FILLER                      PIC  X(10)    VALUE                  
+               ' LOCATION='.                                                    
+           05  PGM-LOCATION                PIC  X(04)    VALUE SPACE.           
+           05  FILLER                      PIC  X(06)    VALUE                  
+               ' *****'.                                                        
+                                                                                
+       01  CR-CHECKPOINT-RESTART-AREA.                                          
+           05  CR-AREA-LEN                 PIC S9(04)  VALUE +38  COMP.         
+                                                                                
+           05  CR-CHECKPOINT-RESTART-VAR.                                       
+               10  CR-ITEM-NBR             PIC S9(15)    VALUE +0               
+                                                         COMP-3.                
+               10  CR-TOT-NBR-GETS-CNT     PIC S9(09)    VALUE +0               
+                                                         COMP-3.                
+               10  CR-CHANGE-CNT           PIC S9(09)    VALUE +0               
+                                                         COMP-3.                
+               10  CR-ROW-NOT-FOUND-CNT    PIC S9(09)    VALUE +0               
+                                                         COMP-3.                
+               10  CR-RPT-REC-CNT          PIC S9(09)    VALUE +0               
+                                                         COMP-3.                
+               10  CR-DB2-COMMIT-CNT       PIC S9(09)    VALUE +0               
+                                                         COMP-3.                
+               10  CR-MQ-COMMIT-CNT        PIC S9(09)    VALUE +0               
+                                                         COMP-3.                
+                                                                                
+       01  PROGRAM-SWITCHES.                                                    
+           05  PS-CONTROL-CARD-1-SW        PIC X(01)     VALUE 'N'.             
+               88  PS-CONTROL-CARD-1-END                 VALUE 'Y'.             
+               88  PS-CONTROL-CARD-1-START               VALUE 'N'.             
+                                                                                
+           05  PS-CONTROL-CARD-2-SW        PIC X(01)     VALUE 'N'.             
+               88  PS-CONTROL-CARD-2-END                 VALUE 'Y'.             
+               88  PS-CONTROL-CARD-2-START               VALUE 'N'.             
+                                                                                
+           05  PS-ERROR-SW                 PIC X(01)     VALUE 'N'.             
+               88  PS-ERROR                              VALUE 'Y'.             
+               88  PS-NO-ERROR                           VALUE 'N'.             
+                                                                                
+           05  PS-MSG-ID-FILE-SW           PIC X(01)     VALUE 'N'.             
+               88  MSG-ID-EOF                            VALUE 'Y'.             
+               88  MSG-ID-NOT-EOF                        VALUE 'N'.             
+                                                                                
+           05  PS-END-OF-STORES-SW         PIC X(01)     VALUE 'N'.             
+               88  PS-END-OF-STORES                      VALUE 'Y'.             
+               88  PS-NOT-END-OF-STORES                  VALUE 'N'.             
+                                                                                
+           05  PS-NEW-RPT-REC-SW           PIC X(01)     VALUE 'Y'.             
+               88  NEW-RPT-REC                           VALUE 'Y'.             
+               88  NOT-NEW-RPT-REC                       VALUE 'N'.             
+                                                                                
+           05  PS-PROCESS-STORE-SW         PIC X(01)     VALUE 'Y'.             
+               88  PROCESS-STORE                         VALUE 'Y'.             
+               88  DO-NOT-PROCESS-STORE                  VALUE 'N'.             
+                                                                                
+           05  PS-ELOC-ELIGIBLE-SW         PIC X(01)     VALUE 'N'.             
+               88  ELOCS-ELIGIBLE                        VALUE 'Y'.             
+               88  ELOCS-NOT-ELIGIBLE                    VALUE 'N'.             
+               88  ELOCS-NOT-SENT                        VALUE 'X'.             
+                                                                                
+           05  PS-E-STORE-FOUND-SW         PIC X(01)     VALUE 'N'.             
+               88  E-STORE-FOUND                         VALUE 'Y'.             
+               88  E-STORE-NOT-FOUND                     VALUE 'N'.             
+                                                                                
+           05  PS-END-OF-ELOCS-SW          PIC  X(01)    VALUE 'N'.             
+               88  END-OF-ELOCS                          VALUE 'Y'.             
+               88  NOT-END-OF-ELOCS                      VALUE 'N'.             
+                                                                                
+           05  PS-INELIGIBLE-STRS-FND-SW   PIC X(01)     VALUE 'N'.             
+               88  INELIGIBLE-STRS-FND                   VALUE 'Y'.             
+               88  NO-INELIGIBLE-STRS-FND                VALUE 'N'.             
+                                                                                
+           05  PS-FIRST-COMMIT-SW          PIC X(01)     VALUE 'N'.             
+               88  PS-FIRST-COMMIT                       VALUE 'Y'.             
+                                                                                
+       01  PC-CONSTANTS.                                                        
+           05  PC-PROGRAM-NAME             PIC X(08)     VALUE                  
+                                                         'MRKUP140'.            
+           05  PC-JOB-NAME                 PIC X(08)     VALUE                  
+                                                         'MRK016  '.            
+           05  PC-PLUS-1                   PIC S9(04)    VALUE +1               
+                                                         COMP SYNC.             
+           05  PC-ROW-NOT-FOUND            PIC S9(04)    VALUE +100             
+                                                         COMP SYNC.             
+           05  PC-MAX-MQ-READ-CNT          PIC S9(05)    VALUE +5000            
+                                                         COMP SYNC.             
+           05  PC-FT-X                     PIC X(01)     VALUE 'X'.             
+           05  PC-FIFTY-STARS              PIC X(50)     VALUE ALL '*'.         
+                                                                                
+           05  PC-QMGR-NAME-GET         PIC X(48)  VALUE SPACES.                
+               88  PC-PROD-QMGR-GET                VALUE 'QKSP'.                
+               88  PC-QA-QMGR-GET                  VALUE 'QKSQ'.                
+               88  PC-TEST-QMGR-GET                VALUE 'QKST'.                
+                                                                                
+           05  PC-MQCONN                PIC X(8)  VALUE 'CSQBCONN'.             
+           05  PC-MQCMIT                PIC X(8)  VALUE 'CSQBCOMM'.             
+           05  PC-MQOPEN                PIC X(8)  VALUE 'CSQBOPEN'.             
+           05  PC-MQGET                 PIC X(8)  VALUE 'CSQBGET '.             
+           05  PC-MQPUT                 PIC X(8)  VALUE 'CSQBPUT '.             
+           05  PC-MQBACK                PIC X(8)  VALUE 'CSQBBACK'.             
+           05  PC-MQCLOSE               PIC X(8)  VALUE 'CSQBCLOS'.             
+           05  PC-MQDISC                PIC X(8)  VALUE 'CSQBDISC'.             
+           05  PC-MQCHECK               PIC X(8)  VALUE 'MQR2C   '.             
+           05  PC-PIPE                  PIC X(1)  VALUE '|'.                    
+           05  PC-MAX-REQUEST-LENGTH    PIC S9(09) BINARY VALUE +12143.         
+           05  PC-MAX-RETRY-CNT         PIC S9(04) VALUE  3                     
+                                                   COMP SYNC.                   
+           05  PC-MORE-THAN-MAX-RETRY   PIC S9(04) VALUE  4                     
+                                                   COMP SYNC.                   
+           05  PC-MAX-ELOC-NBR          PIC S9(04) VALUE 99  COMP SYNC.         
+           05  PC-ECOMM-CHANNEL         PIC S9(04) VALUE 873 COMP SYNC.         
+                                                                                
+       01  PV-DISPLAY-COUNT                 PIC ZZZ,ZZZ,ZZ9.                    
+C08377 01  PV-SKIPPED-COUNT                 PIC 9(08).                          
+                                                                                
+       01  PV-TIMESTAMP-FIELDS.                                                 
+           05  PV-COMMIT-TIMESTAMP          PIC X(26)    VALUE SPACES.          
+           05  PV-CURRENT-TIMESTAMP         PIC X(26)    VALUE SPACES.          
+                                                                                
+       01  PV-SCHED-DATE.                                                       
+           05  PV-SCHED-CCYY.                                                   
+               10  PV-SCHED-CC              PIC 9(2)     VALUE ZEROS.           
+               10  PV-SCHED-YY              PIC 9(2)     VALUE ZEROS.           
+           05  PV-SCHED-FILLER              PIC X(1)     VALUE SPACE.           
+           05  PV-SCHED-MM                  PIC 9(2)     VALUE ZEROS.           
+           05  PV-SCHED-FILLER              PIC X(1)     VALUE SPACE.           
+           05  PV-SCHED-DD                  PIC 9(2)     VALUE ZEROS.           
+                                                                                
+       01  PV-CPU-DATE.                                                         
+           05  PV-CPU-MO                    PIC 9(2)     VALUE ZEROS.           
+           05  FILLER                       PIC X(1)     VALUE '/'.             
+           05  PV-CPU-DY                    PIC 9(2)     VALUE ZEROS.           
+           05  FILLER                       PIC X(1)     VALUE '/'.             
+           05  PV-CPU-YR                    PIC 9(4)     VALUE ZEROS.           
+                                                                                
+       01  CT-CPU-TIME.                                                         
+           05  CT-CPU-HR                    PIC 9(2)     VALUE ZEROS.           
+           05  CT-CPU-MIN                   PIC 9(2)     VALUE ZEROS.           
+           05  CT-CPU-SEC                   PIC 9(2)     VALUE ZEROS.           
+           05  CT-CPU-HSEC                  PIC 9(2)     VALUE ZEROS.           
+                                                                                
+       01  RT-INFO.                                                             
+           05  RT-DAY-NO                    PIC 9(1)     VALUE ZEROS.           
+           05  FILLER                       PIC X(79)    VALUE SPACES.          
+                                                                                
+       01  PV-MISC-FIELDS.                                                      
+           05  PV-ERROR-MESSAGE            PIC X(48)     VALUE SPACES.          
+           05  PV-ABEND-CODE               PIC S9(04)    VALUE ZERO             
+                                                         COMP SYNC.             
+           05  PV-USER-ERROR               PIC S9(04)    VALUE +4003            
+                                                         COMP SYNC.             
+           05  PV-MQ-ERROR                 PIC S9(04)    VALUE +4020            
+                                                         COMP SYNC.             
+           05  PV-ABEND-PARAGRAPH          PIC  X(30)    VALUE SPACES.          
+                                                                                
+           05  PV-DB2-OPERATION-ATTEMPTED                                       
+                                           PIC X(30)     VALUE SPACES.          
+           05  PV-MES-SUB                  PIC S9(4)     VALUE +0               
+                                                         COMP SYNC.             
+           05  PV-ELIG-FLAG                PIC X(01).                           
+           05  PV-LAST-CKPT-ITEM-NBR       PIC S9(15)    VALUE +0               
+                                                         COMP-3.                
+           05  PV-MQ-READ-COMMIT-CNT       PIC S9(04)    VALUE +1               
+                                                         COMP SYNC.             
+           05  PV-NUMERIC-STORE            PIC 9(05).                           
+           05  PV-NUMERIC-STORE-PACKED     PIC S9(04)    COMP.                  
+           05  PV-RETRY-CNT                PIC S9(04)    VALUE +0.              
+           05  PV-HCONN                    PIC S9(09)    BINARY VALUE 0.        
+           05  PV-GETQ-HANDLE              PIC S9(09)    BINARY VALUE 0.        
+           05  PV-OPEN-OPTIONS             PIC S9(09)    BINARY.                
+           05  PV-COMPLETION-CODE          PIC S9(09)    BINARY.                
+           05  PV-REASON                   PIC S9(09)    BINARY.                
+           05  PV-CON-REASON               PIC S9(9)     BINARY.                
+           05  PV-MQ-REASON-TEXT           PIC X(30)     VALUE SPACES.          
+           05  PV-MSGLENGTH                PIC S9(09)    BINARY                 
+                                                         VALUE ZERO.            
+           05  PV-DATA-LENGTH              PIC S9(09)    BINARY.                
+           05  PV-MESSAGE-STRING           PIC X(12143)   VALUE SPACE.          
+           05  PV-MESSAGE-BYTE REDEFINES   PV-MESSAGE-STRING                    
+                               OCCURS 12143 TIMES                               
+                                           PIC  X(01).                          
+           05  PV-TEST-CHAR                PIC  X(01).                          
+               88  PV-VALID-STORE-CHAR          VALUES '0' THRU '9'.            
+           05  PV-ELOC-SUB               PIC S9(04) VALUE +0 COMP SYNC.         
+           05  PV-ELOC-COUNT             PIC S9(04) VALUE +0 COMP SYNC.         
+           05  PV-ELOC-FOUND-COUNT       PIC S9(04) VALUE +0 COMP SYNC.         
+           05  PV-DUMMY                  PIC  X(01).                            
+                                                                                
+      *----------------------------------------------------------------*        
+      *    CONTROL CARD-1                                                       
+      *----------------------------------------------------------------*        
+       01  CC-CONTROL-CARD-1.                                                   
+           05  CC-QMGR-NAME              PIC  X(48).                            
+           05  FILLER                    PIC  X(32).                            
+                                                                                
+      *----------------------------------------------------------------*        
+      *    CONTROL CARD-2                                                       
+      *----------------------------------------------------------------*        
+       01  CC-CONTROL-CARD-2.                                                   
+           05  CC-QNAME-GET              PIC  X(48).                            
+           05  FILLER                    PIC  X(32).                            
+                                                                                
+      *----------------------------------------------------------------*        
+      *    LAYOUT OF THE MESSAGE ID INPUT RECORD                       *        
+      *----------------------------------------------------------------*        
+           COPY MRRD138.                                                        
+                                                                                
+      *----------------------------------------------------------------*        
+      *    LAYOUT OF THE ER REPORT RECORD                              *        
+      *----------------------------------------------------------------*        
+           COPY MRRD140.                                                        
+                                                                                
+      *----------------------------------------------------------------*        
+      *    LAYOUTS USED TO SEND ELIGIBILITY REQUESTS THROUGH MQSERIES  *        
+      *----------------------------------------------------------------*        
+           COPY MRRD120.                                                        
+      *                                                                         
+           COPY MRRD121.                                                        
+                                                                                
+      *----------------------------------------------------------------*        
+      *    MQSERIES COPYBOOKS                                          *        
+      *----------------------------------------------------------------*        
+       01  MQM-OBJECT-DESCRIPTOR.                                               
+           COPY CMQODV.                                                         
+                                                                                
+       01  MQM-MESSAGE-DESCRIPTOR.                                              
+           COPY CMQMDV.                                                         
+                                                                                
+       01  MQM-GET-MESSAGE-OPTIONS.                                             
+           COPY CMQGMOV.                                                        
+                                                                                
+      *    MQV CONTAINS CONSTANTS (FOR FILLING IN THE CONTROL BLOCKS)           
+      *    AND RETURN CODES (FOR TESTING THE RESULT OF A CALL)                  
+                                                                                
+       01  MQM-CONSTANTS.                                                       
+           COPY CMQV.                                                           
+      *                                                                         
+           EJECT                                                                
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TMRITST                                                  
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TCKRSTCN                                                 
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TCKRSTIN                                                 
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE XMT00001                                                 
+           END-EXEC.                                                            
+                                                                                
+      * DB2 COMMUNICATION AREA                                                  
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+      * DB2 COMMUNICATION AREA2                                                 
+                                                                                
+           COPY SQLCA2.                                                         
+                                                                                
+      * E-LOCATIONS CURSOR                                                      
+           EXEC SQL                                                             
+             DECLARE E_LOCS_CSR CURSOR WITH HOLD FOR                            
+           SELECT LOC_NBR                                                       
+           FROM XMT_LOC                                                         
+           WHERE LOC_TYP_CDE = 'DS'                                             
+             AND E_BUS_IND = 'Y'                                                
+           ORDER BY LOC_NBR                                                     
+           END-EXEC.                                                            
+                                                                                
+      * E-LOCATIONS INTERNAL TABLE                                              
+       01  EL-EFC-LOC-TABLE.                                                    
+           05  EL-EFC-ENTRY   OCCURS 99 TIMES INDEXED BY EL-INDEX.              
+               10  EL-EFC-NMBR          PIC S9(04)  COMP SYNC.                  
+                                                                                
+      *****************************************************************         
+       PROCEDURE DIVISION.                                                      
+      *****************************************************************         
+       A000-MAINLINE-PROCESSING.                                                
+                                                                                
+           PERFORM A100-INITIALIZATION.                                         
+                                                                                
+           PERFORM A200-GET-ALL-E-LOCS.                                         
+                                                                                
+           IF  MSG-ID-EOF                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               PERFORM B100-PROCESS-ITEMS                                       
+                 UNTIL MSG-ID-EOF                                               
+           END-IF.                                                              
+                                                                                
+      **** END-OF-JOB PROCESSING                                                
+                                                                                
+           CLOSE MESSAGE-ID-FILE                                                
+                 REPORT-FILE.                                                   
+                                                                                
+           PERFORM Q300-MQ-CLOSE-GET-ER.                                        
+                                                                                
+           PERFORM Z995-END-OF-JOB.                                             
+                                                                                
+           GOBACK.                                                              
+                                                                                
+      ******************************************************************        
+      *  PROGRAM INITIALIZATION                                                 
+      ******************************************************************        
+       A100-INITIALIZATION.                                                     
+                                                                                
+           DISPLAY PC-FIFTY-STARS.                                              
+           DISPLAY '***** START OF PROGRAM MRKUP140 *****'.                     
+                                                                                
+           OPEN INPUT CONTROL-CARD-1                                            
+                      CONTROL-CARD-2                                            
+                      MESSAGE-ID-FILE                                           
+               OUTPUT REPORT-FILE.                                              
+                                                                                
+           SET PS-CONTROL-CARD-1-START TO TRUE.                                 
+           SET PS-CONTROL-CARD-2-START TO TRUE.                                 
+                                                                                
+      **** READ THE FIRST CONTROL CARD FOR THE QUEUE MGR NAME.                  
+                                                                                
+           PERFORM S100-READ-CONTROL-CARD-1.                                    
+           IF  PS-CONTROL-CARD-1-END                                            
+               DISPLAY PC-FIFTY-STARS                                           
+               DISPLAY PC-PROGRAM-NAME                                          
+                       ' CONTROL CARD MISSING - FOR QMGR NAME'                  
+           ELSE                                                                 
+               IF  CC-QMGR-NAME > SPACES                                        
+                   DISPLAY PC-FIFTY-STARS                                       
+                   DISPLAY 'GET QMGR:   ' CC-CONTROL-CARD-1                     
+               ELSE                                                             
+                   SET PS-CONTROL-CARD-1-END TO TRUE                            
+                   DISPLAY PC-PROGRAM-NAME ' INVALID QMGR NAME '                
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+           CLOSE CONTROL-CARD-1.                                                
+                                                                                
+      **** READ THE SECOND CONTROL CARD FOR THE GET QUEUE NAME                  
+                                                                                
+           PERFORM S200-READ-CONTROL-CARD-2.                                    
+           IF  PS-CONTROL-CARD-2-END                                            
+               DISPLAY PC-PROGRAM-NAME                                          
+                      ' CONTROL CARD MISSING - GET Q-NAME '                     
+            ELSE                                                                
+                IF  CC-QNAME-GET > SPACES                                       
+                    DISPLAY 'GET Q-NAME: ' CC-CONTROL-CARD-2                    
+                    DISPLAY PC-FIFTY-STARS                                      
+                ELSE                                                            
+                    SET PS-CONTROL-CARD-2-END TO TRUE                           
+                    DISPLAY PC-PROGRAM-NAME                                     
+                            ' INVALID GET Q-NAME'                               
+                END-IF                                                          
+           END-IF.                                                              
+                                                                                
+           CLOSE CONTROL-CARD-2.                                                
+                                                                                
+           IF  PS-CONTROL-CARD-1-END                                            
+           OR  PS-CONTROL-CARD-2-END                                            
+               CLOSE MESSAGE-ID-FILE                                            
+                     REPORT-FILE                                                
+               CALL 'ILBOABN0' USING PV-USER-ERROR                              
+           ELSE                                                                 
+               PERFORM Q100-MQ-CONNECT                                          
+               PERFORM Q200-MQ-OPEN-GET-ER                                      
+           END-IF.                                                              
+                                                                                
+      **** INITIALIZE THE DCLGEN FIELDS FOR TABLES ACCESSED                     
+           INITIALIZE DCLTMRITST                                                
+                      DCLTCKRSTCNTL                                             
+                      DCLTCKRSTINF.                                             
+                                                                                
+           PERFORM X100-INIT-CHECKPOINT-SELECT.                                 
+                                                                                
+      **** IF THE PROGRAM IS IN A RESTART STATUS, SELECT SAVED DATA             
+      **** FROM THE RESTART INFO TABLE.                                         
+           IF  TCKRSTCNTL-CKPT-STAT-CODE = '9'                                  
+               PERFORM X200-SELECT-RESTART-INFO                                 
+               MOVE TCKRSTINF-WORK-STRG-DESC-TEXT                               
+                 TO CR-CHECKPOINT-RESTART-VAR                                   
+               MOVE CR-ITEM-NBR                                                 
+                 TO PV-LAST-CKPT-ITEM-NBR                                       
+               PERFORM S300-READ-MSG-ID-FILE                                    
+                 UNTIL MR138-ITEM-NBR = PV-LAST-CKPT-ITEM-NBR                   
+                    OR MSG-ID-EOF                                               
+               DISPLAY SPACES                                                   
+               DISPLAY '** MRKUP140 IS BEING RESTARTED'                         
+               DISPLAY SPACES                                                   
+           ELSE                                                                 
+               SET PS-FIRST-COMMIT TO TRUE                                      
+           END-IF.                                                              
+                                                                                
+           PERFORM X500-GET-COMMIT-TIMESTAMP.                                   
+                                                                                
+           PERFORM S300-READ-MSG-ID-FILE.                                       
+                                                                                
+      *----------------------------------------------------------------*        
+      *    LOAD ALL E-BUS-LOCATIONS INTO AN INTERNAL TABLE                      
+      *----------------------------------------------------------------*        
+       A200-GET-ALL-E-LOCS.                                                     
+           PERFORM A300-OPEN-E-LOCS-CURSOR.                                     
+           MOVE ZERO TO PV-ELOC-SUB.                                            
+           INITIALIZE EL-EFC-LOC-TABLE.                                         
+           PERFORM A400-GET-E-LOC-STORES                                        
+               UNTIL END-OF-ELOCS.                                              
+           PERFORM A500-CLOSE-E-LOCS-CSR.                                       
+                                                                                
+      *----------------------------------------------------------------*        
+      * THIS PARAGRAPH OPENS THE E-LOCATIONS CURSOR                             
+      *----------------------------------------------------------------*        
+       A300-OPEN-E-LOCS-CURSOR.                                                 
+                                                                                
+           MOVE 'A300'                TO PGM-LOCATION.                          
+           MOVE 'A300-OPEN-E-LOCS-CURSOR' TO PV-ABEND-PARAGRAPH.                
+                                                                                
+           EXEC SQL                                                             
+               OPEN E_LOCS_CSR                                                  
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+             WHEN SQLCODE = ZERO                                                
+               MOVE 'N' TO PS-END-OF-ELOCS-SW                                   
+             WHEN SQLCODE = PC-ROW-NOT-FOUND                                    
+               CONTINUE                                                         
+             WHEN OTHER                                                         
+               PERFORM Z999-SQL-ERROR                                           
+           END-EVALUATE.                                                        
+                                                                                
+      *----------------------------------------------------------------*        
+      *  LOAD INTERNAL TABLE WITH E_BUS_LOCS FROM XMT_LOC                       
+      *----------------------------------------------------------------*        
+       A400-GET-E-LOC-STORES.                                                   
+                                                                                
+           PERFORM D300-FETCH-E-LOCS-CSR.                                       
+                                                                                
+           IF END-OF-ELOCS                                                      
+              MOVE PV-ELOC-SUB        TO PV-ELOC-COUNT                          
+           ELSE                                                                 
+              ADD +1   TO PV-ELOC-SUB                                           
+              IF PV-ELOC-SUB > PC-MAX-ELOC-NBR                                  
+                  DISPLAY '** ABEND ** IN PROGRAM MRKUP140 '                    
+                  DISPLAY 'MRKUP140 - EXCEEDED TABLE LIMIT'                     
+                       ' OF E-LOCATION TABLE'                                   
+                  CALL 'ILBOABN0' USING PV-USER-ERROR                           
+              END-IF                                                            
+              MOVE XMT00001-LOC-NBR   TO EL-EFC-NMBR(PV-ELOC-SUB)               
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------------*        
+      *  CLOSE E-LOCS CURSOR                                           *        
+      *----------------------------------------------------------------*        
+       A500-CLOSE-E-LOCS-CSR.                                                   
+                                                                                
+           MOVE 'A500'                  TO PGM-LOCATION.                        
+           MOVE 'A500-CLOSE-E-LOCS-CSR' TO PV-ABEND-PARAGRAPH.                  
+           EXEC SQL                                                             
+               CLOSE E_LOCS_CSR                                                 
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+             WHEN SQLCODE = ZERO                                                
+             WHEN SQLCODE = PC-ROW-NOT-FOUND                                    
+               CONTINUE                                                         
+             WHEN OTHER                                                         
+               PERFORM Z999-SQL-ERROR                                           
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  PROCESS ER RESPONSE MESSAGES                                  *        
+      ******************************************************************        
+       B100-PROCESS-ITEMS.                                                      
+                                                                                
+           PERFORM E100-GET-STORE-ELIGIBILITY.                                  
+                                                                                
+      **** AT THIS POINT A LOGICAL UNIT OF WORK HAS BEEN COMPLETED              
+      **** (COMPLETED PROCESSING OF ONE ITEM / ONE RESPONSE MESSAGE).           
+      **** THEREFORE, PERFORM CHECKPOINT PROCESSING.                            
+           PERFORM X300-COMMIT-PROCESSING.                                      
+                                                                                
+           PERFORM S300-READ-MSG-ID-FILE.                                       
+                                                                                
+      *----------------------------------------------------------------*        
+      * LOOK FOR 873 ON TMRITST FOR THE ITEM BEING PROCESSED          *         
+      *----------------------------------------------------------------*        
+       C100-CHECK-ELOC-SENT.                                                    
+                                                                                
+           MOVE 'C100'                        TO PGM-LOCATION.                  
+           MOVE 'C100-SELECT-TMRITST       '  TO PV-ABEND-PARAGRAPH.            
+                                                                                
+           EXEC SQL                                                             
+               SELECT  'Y'                                                      
+               INTO    :PV-DUMMY                                                
+               FROM TMRITST                                                     
+               WHERE ITEM_NBR = :MR138-ITEM-NBR                                 
+                 AND STR_NBR  = :PC-ECOMM-CHANNEL                               
+                 AND FT_CDE  <> 'X'                                             
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+             WHEN SQLCODE         = ZERO                                        
+               SET ELOCS-NOT-ELIGIBLE    TO TRUE                                
+             WHEN SQLCODE         = PC-ROW-NOT-FOUND                            
+               SET ELOCS-NOT-SENT        TO TRUE                                
+             WHEN OTHER                                                         
+               MOVE 'READ TMRITST '                                             
+                 TO  PV-DB2-OPERATION-ATTEMPTED                                 
+               PERFORM Z999-SQL-ERROR                                           
+           END-EVALUATE.                                                        
+                                                                                
+      *----------------------------------------------------------------*        
+      *    READ A ROW FROM THE STORE CURSOR                            *        
+      *----------------------------------------------------------------*        
+       D300-FETCH-E-LOCS-CSR.                                                   
+           MOVE 'D300'                        TO PGM-LOCATION.                  
+           MOVE 'D300-FETCH-E-LOCS-CSR'       TO PV-ABEND-PARAGRAPH.            
+                                                                                
+           EXEC SQL                                                             
+               FETCH E_LOCS_CSR                                                 
+                INTO :XMT00001-LOC-NBR                                          
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = ZERO                                              
+                   CONTINUE                                                     
+               WHEN SQLCODE = PC-ROW-NOT-FOUND                                  
+                   SET END-OF-ELOCS TO TRUE                                     
+               WHEN OTHER                                                       
+                   MOVE 'FETCH STORE CURSOR '                                   
+                       TO  PV-DB2-OPERATION-ATTEMPTED                           
+                   PERFORM Z999-SQL-ERROR                                       
+           END-EVALUATE.                                                        
+                                                                                
+      *----------------------------------------------------------------*        
+      *    GET RESPONSE FROM ELIGIBILITY ROUTINE, USING MQSERIES       *        
+      *----------------------------------------------------------------*        
+       E100-GET-STORE-ELIGIBILITY.                                              
+                                                                                
+           COMPUTE MQGMO-OPTIONS = MQGMO-WAIT                                   
+                                 + MQGMO-CONVERT                                
+                                 + MQGMO-FAIL-IF-QUIESCING.                     
+                                                                                
+           MOVE MR138-MESSAGE-ID      TO MQMD-CORRELID.                         
+           MOVE MQMI-NONE             TO MQMD-MSGID.                            
+      **** WAITINTERVAL IS IN MILLISECONDS (THOUSANDTHS OF A SECOND)            
+      **** WAITINTERVAL OF 60000 = 1 MINUTE                                     
+      *    MOVE 60000                 TO MQGMO-WAITINTERVAL.                    
+C08377**** WAITINTERVAL OF 180000 = 3 MINUTES                                   
+C08377     MOVE 180000                TO MQGMO-WAITINTERVAL.                    
+           MOVE CC-QMGR-NAME          TO PC-QMGR-NAME-GET.                      
+           MOVE PC-QMGR-NAME-GET      TO MQOD-OBJECTQMGRNAME.                   
+           MOVE CC-QNAME-GET          TO MQOD-OBJECTNAME.                       
+           MOVE PC-MAX-REQUEST-LENGTH TO PV-MSGLENGTH.                          
+                                                                                
+           PERFORM VARYING PV-RETRY-CNT FROM 1 BY 1                             
+               UNTIL PV-RETRY-CNT > PC-MAX-RETRY-CNT                            
+                                                                                
+           CALL PC-MQGET USING PV-HCONN                                         
+                               PV-GETQ-HANDLE                                   
+                               MQM-MESSAGE-DESCRIPTOR                           
+                               MQM-GET-MESSAGE-OPTIONS                          
+                               PV-MSGLENGTH                                     
+                               PV-MESSAGE-STRING                                
+                               PV-DATA-LENGTH                                   
+                               PV-COMPLETION-CODE                               
+                               PV-REASON                                        
+                                                                                
+           IF  PV-COMPLETION-CODE = MQCC-OK                                     
+               ADD +1 TO CR-TOT-NBR-GETS-CNT                                    
+               ADD +1 TO PV-MQ-READ-COMMIT-CNT                                  
+      ****     --- PARSE THRU MQ STRING TO FIND EACH STORE ---                  
+               SET PS-NOT-END-OF-STORES TO TRUE                                 
+               MOVE ZEROES TO PV-ELOC-FOUND-COUNT                               
+               PERFORM C100-CHECK-ELOC-SENT                                     
+               PERFORM E300-PARSE-MESSAGE                                       
+               MOVE PC-MORE-THAN-MAX-RETRY TO PV-RETRY-CNT                      
+           ELSE                                                                 
+               IF (PV-REASON = MQRC-NO-MSG-AVAILABLE) THEN                      
+                   PERFORM X600-SET-CURRENT-TIMESTAMP                           
+                   DISPLAY PV-CURRENT-TIMESTAMP                                 
+                           ' RESPONSE NOT FND FOR'                              
+                           ' ITEM '   MR138-ITEM-NBR                            
+                           ' SKU '    MR138-SKU                                 
+                           ' UPC '    MR138-INTR-UPC-ID                         
+                           ' DEPT '   MR138-DEPT                                
+                           ' SCL '    MR138-SCL                                 
+               END-IF                                                           
+           END-IF                                                               
+                                                                                
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-COMPLETION-CODE NOT = MQCC-OK                                 
+               MOVE 'MQGET ERROR' TO PV-ERROR-MESSAGE                           
+               MOVE 'E100-GET-STORE-ELIGIBILITY' TO                             
+                                           PV-ABEND-PARAGRAPH                   
+C08377         ADD +1 TO PV-SKIPPED-COUNT                                       
+C08377         DISPLAY ' SKU '    MR138-SKU                                     
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------------*        
+      *   PARSE MESSAGE STRING RETURNED FROM MQSERIES TO OBTAIN        *        
+      *   EACH STORE'S ELIGIBILITY                                     *        
+      *----------------------------------------------------------------*        
+       E300-PARSE-MESSAGE.                                                      
+                                                                                
+      *    --- FIND PIPE AFTER FIRST STORE ---                                  
+           PERFORM E400-DUMMY-PARAGRAPH                                         
+              VARYING PV-MES-SUB FROM 1 BY 1                                    
+              UNTIL (PV-MESSAGE-BYTE (PV-MES-SUB) = PC-PIPE)                    
+                 OR (PV-MES-SUB > PV-DATA-LENGTH).                              
+                                                                                
+           IF PV-MES-SUB > PV-DATA-LENGTH                                       
+              SET PS-END-OF-STORES                                              
+                  PS-ERROR   TO TRUE                                            
+           ELSE                                                                 
+      *    --- BACK UP 4 POSITIONS BEFORE PIPE ---                              
+              SUBTRACT +4 FROM PV-MES-SUB                                       
+              MOVE PV-MESSAGE-BYTE (PV-MES-SUB) TO PV-TEST-CHAR                 
+                                                                                
+      *    --- GO BACK UNTIL HIT FIRST NON-NUMERIC CHARACTER                    
+      *        (TO HANDLE ZERO-SUPRESSED STORE NUMBERS)                         
+              IF PV-VALID-STORE-CHAR                                            
+                 SUBTRACT +1 FROM PV-MES-SUB                                    
+                 MOVE PV-MESSAGE-BYTE (PV-MES-SUB) TO PV-TEST-CHAR              
+              END-IF                                                            
+              IF PV-VALID-STORE-CHAR                                            
+                 SUBTRACT +1 FROM PV-MES-SUB                                    
+                 MOVE PV-MESSAGE-BYTE (PV-MES-SUB) TO PV-TEST-CHAR              
+              END-IF                                                            
+              IF PV-VALID-STORE-CHAR                                            
+                 SUBTRACT +1 FROM PV-MES-SUB                                    
+                 MOVE PV-MESSAGE-BYTE (PV-MES-SUB) TO PV-TEST-CHAR              
+              END-IF                                                            
+              IF PV-VALID-STORE-CHAR                                            
+                 SUBTRACT +1 FROM PV-MES-SUB                                    
+              END-IF                                                            
+                                                                                
+      *       --- POSITION SUBSCRIPT AT FIRST DIGIT OF FIRST STORE ---          
+              ADD +1 TO PV-MES-SUB                                              
+                                                                                
+              PERFORM E500-EXTRACT-STORE-NBRS                                   
+                 UNTIL PS-END-OF-STORES OR                                      
+                       (PV-MES-SUB > PV-DATA-LENGTH)                            
+                                                                                
+              IF  INELIGIBLE-STRS-FND                                           
+                  SET NO-INELIGIBLE-STRS-FND TO TRUE                            
+                  IF  MR140-STR-INDX < 40                                       
+                      PERFORM W200-WRITE-REPORT-REC                             
+                  END-IF                                                        
+              END-IF                                                            
+                                                                                
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------------*        
+      *   DUMMY PARAGRAPH USED FOR PARSING THE MESSAGE STRING          *        
+      *----------------------------------------------------------------*        
+       E400-DUMMY-PARAGRAPH.                                                    
+                                                                                
+      *----------------------------------------------------------------*        
+      *   EXTRACT STORE NUMBER AND ELIGIBILITY FLAG FROM MESSAGE       *        
+      *   STRING AND SAVE IN TABLE                                     *        
+      *----------------------------------------------------------------*        
+       E500-EXTRACT-STORE-NBRS.                                                 
+                                                                                
+           UNSTRING PV-MESSAGE-STRING                                           
+              DELIMITED BY '='                                                  
+                   INTO PV-NUMERIC-STORE                                        
+                   WITH POINTER PV-MES-SUB.                                     
+                                                                                
+           UNSTRING PV-MESSAGE-STRING                                           
+              DELIMITED BY PC-PIPE                                              
+                   INTO PV-ELIG-FLAG                                            
+                   WITH POINTER PV-MES-SUB.                                     
+                                                                                
+      *    --- INTERROGATE FLAG AND TURN OFF STORE IF INELIGIBLE                
+           IF  PV-NUMERIC-STORE > ZERO                                          
+               PERFORM E600-CHECK-E-LOCATION                                    
+               IF PROCESS-STORE                                                 
+                   IF  PV-ELIG-FLAG = 'N'                                       
+                       SET INELIGIBLE-STRS-FND TO TRUE                          
+                       PERFORM M100-UPDT-TMRITST-STATUS                         
+                       PERFORM W100-FORMAT-REPORT-REC                           
+                   END-IF                                                       
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+      *    --- CHECK NEXT CHARACTER FOR STORE # OR END ---                      
+           MOVE PV-MESSAGE-BYTE (PV-MES-SUB) TO PV-TEST-CHAR.                   
+                                                                                
+           IF NOT PV-VALID-STORE-CHAR                                           
+              SET PS-END-OF-STORES TO TRUE                                      
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------------*        
+      *   PERFORM LOGIC TO DETERMINE IF THE STORE IS AN E-STORE,       *        
+      *   AND IF SO, DETERMINE E-STORE ELIGIBILITY                     *        
+      *----------------------------------------------------------------*        
+       E600-CHECK-E-LOCATION.                                                   
+           SET PROCESS-STORE TO TRUE.                                           
+           IF NOT ELOCS-NOT-SENT                                                
+      *       ----- ELOCATIONS WERE SENT -----                                  
+              IF PV-ELOC-FOUND-COUNT NOT = PV-ELOC-COUNT                        
+      *          ----- WE HAVE NOT PROCESSED ALL ELOCATIONS YET -----           
+                 PERFORM F100-SEARCH-ELOCS                                      
+                 IF E-STORE-FOUND                                               
+      *             ----- THIS IS AN ELOCATION -----                            
+                    ADD +1 TO PV-ELOC-FOUND-COUNT                               
+                    IF ELOCS-ELIGIBLE                                           
+      *                -- WE ALREADY FOUND AN ELIGIBLE ELOCATON --              
+                       SET DO-NOT-PROCESS-STORE TO TRUE                         
+                    ELSE                                                        
+                       IF PV-ELIG-FLAG = 'Y'                                    
+      *                   -- THIS ELOCATION IS ELIGIBLE --                      
+                          SET ELOCS-ELIGIBLE TO TRUE                            
+                          SET DO-NOT-PROCESS-STORE TO TRUE                      
+                       ELSE                                                     
+                          IF PV-ELOC-COUNT = PV-ELOC-FOUND-COUNT                
+      *                      -- WE HAVE PROCESSED ALL ELOCATIONS  --            
+      *                      --     AND NONE WERE ELIGIBLE      --              
+                             MOVE PC-ECOMM-CHANNEL TO PV-NUMERIC-STORE          
+                          ELSE                                                  
+      *                      -- WE HAVE NOT PROCESSED ALL ELOCATIONS YET        
+                             SET DO-NOT-PROCESS-STORE TO TRUE                   
+                          END-IF                                                
+                      END-IF                                                    
+                    END-IF                                                      
+                 END-IF                                                         
+              END-IF                                                            
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------------*        
+      *   SEARCH THE E-LOCATIONS INTERNAL TABLE TO SEE IF THIS IS      *        
+      *   AN E-STORE                                                   *        
+      *----------------------------------------------------------------*        
+                                                                                
+       F100-SEARCH-ELOCS.                                                       
+           SET EL-INDEX TO 1.                                                   
+           SEARCH EL-EFC-ENTRY                                                  
+              AT END                                                            
+                  SET E-STORE-NOT-FOUND TO TRUE                                 
+              WHEN EL-EFC-NMBR(EL-INDEX) = PV-NUMERIC-STORE                     
+                  SET E-STORE-FOUND TO TRUE                                     
+              WHEN EL-EFC-NMBR(EL-INDEX) = ZEROES                               
+                  SET E-STORE-NOT-FOUND TO TRUE                                 
+           END-SEARCH.                                                          
+                                                                                
+      ******************************************************************        
+      ** UPDATE STATUS ON TMRITST FOR SKU/STORE                                 
+      ******************************************************************        
+       M100-UPDT-TMRITST-STATUS.                                                
+                                                                                
+           MOVE 'M100'                     TO PGM-LOCATION.                     
+           MOVE 'M100-UPDT-TMRITST-STATUS' TO PV-ABEND-PARAGRAPH.               
+                                                                                
+           MOVE PV-NUMERIC-STORE           TO PV-NUMERIC-STORE-PACKED.          
+                                                                                
+           EXEC SQL                                                             
+               UPDATE TMRITST                                                   
+                  SET FT_CDE    = :PC-FT-X                                      
+                WHERE ITEM_NBR  = :MR138-ITEM-NBR                               
+                  AND STR_NBR   = :PV-NUMERIC-STORE-PACKED                      
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+             WHEN SQLCODE    = ZERO                                             
+               ADD PC-PLUS-1 TO CR-CHANGE-CNT                                   
+             WHEN SQLCODE    = PC-ROW-NOT-FOUND                                 
+               ADD PC-PLUS-1 TO CR-ROW-NOT-FOUND-CNT                            
+               DISPLAY ' ITEM '   MR138-ITEM-NBR                                
+                       ' STORE '  PV-NUMERIC-STORE                              
+                       ' NOT FOUND ON TMRITST'                                  
+             WHEN OTHER                                                         
+               MOVE 'UPDATE TMRITST '                                           
+                 TO  PV-DB2-OPERATION-ATTEMPTED                                 
+               PERFORM Z999-SQL-ERROR                                           
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  MQ - CONNECT TO THE QUEUE MANAGER.                                     
+      ******************************************************************        
+       Q100-MQ-CONNECT.                                                         
+                                                                                
+           MOVE CC-QMGR-NAME TO PC-QMGR-NAME-GET.                               
+                                                                                
+           CALL PC-MQCONN USING PC-QMGR-NAME-GET                                
+                                PV-HCONN                                        
+                                PV-COMPLETION-CODE                              
+                                PV-REASON.                                      
+                                                                                
+      *    IF CONNECTION FAILED THEN DISPLAY ERROR MESSAGE                      
+      *    AND EXIT                                                             
+                                                                                
+           MOVE PV-REASON TO PV-CON-REASON.                                     
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK) THEN                           
+              MOVE 'MQCONN ERROR'    TO PV-ERROR-MESSAGE                        
+              MOVE 'Q100-MQ-CONNECT' TO PV-ABEND-PARAGRAPH                      
+              PERFORM Z998-DISPLAY-MQ-ERROR                                     
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------------*        
+      *    OPEN QUEUES FOR CALL TO ELIGIBILITY RULES                            
+      *----------------------------------------------------------------*        
+       Q200-MQ-OPEN-GET-ER.                                                     
+                                                                                
+      *    ---- OPEN ITEM ELIGIBILITY QUEUE FOR GETTING RESPONSES ----          
+                                                                                
+           COMPUTE PV-OPEN-OPTIONS = MQOO-INPUT-SHARED +                        
+                                     MQOO-FAIL-IF-QUIESCING.                    
+           MOVE CC-QMGR-NAME     TO PC-QMGR-NAME-GET.                           
+           MOVE PC-QMGR-NAME-GET TO MQOD-OBJECTQMGRNAME.                        
+           MOVE CC-QNAME-GET     TO MQOD-OBJECTNAME.                            
+                                                                                
+           CALL PC-MQOPEN USING PV-HCONN                                        
+                                MQM-OBJECT-DESCRIPTOR                           
+                                PV-OPEN-OPTIONS                                 
+                                PV-GETQ-HANDLE                                  
+                                PV-COMPLETION-CODE                              
+                                PV-REASON.                                      
+      *                                                                         
+      *    IF OPEN FAILED, DISPLAY ERROR MESSAGE AND ABEND                      
+      *                                                                         
+           IF PV-COMPLETION-CODE NOT = MQCC-OK                                  
+              CALL PC-MQCHECK USING PV-REASON PV-MQ-REASON-TEXT                 
+                                                                                
+              MOVE 'Q200-MQ-OPEN-GET-ER' TO PV-ABEND-PARAGRAPH                  
+              MOVE 'MQOPEN ERROR   '     TO PV-ERROR-MESSAGE                    
+              PERFORM Z998-DISPLAY-MQ-ERROR                                     
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------------*        
+      *    CLOSE MQSERIES QUEUES                                       *        
+      *----------------------------------------------------------------*        
+       Q300-MQ-CLOSE-GET-ER.                                                    
+      *    ---- CLOSE GET QUEUE ----                                            
+           CALL PC-MQCLOSE USING PV-HCONN                                       
+                                 PV-GETQ-HANDLE                                 
+                                 MQCO-NONE                                      
+                                 PV-COMPLETION-CODE                             
+                                 PV-REASON.                                     
+                                                                                
+           IF  PV-COMPLETION-CODE NOT = MQCC-OK                                 
+               CALL PC-MQCHECK USING PV-REASON PV-MQ-REASON-TEXT                
+                                                                                
+               MOVE 'Q300-MQ-CLOSE-GET-ER' TO PV-ABEND-PARAGRAPH                
+               MOVE 'MQCLOSE ERROR  '      TO PV-ERROR-MESSAGE                  
+               PERFORM Z998-DISPLAY-MQ-ERROR                                    
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  DISCONNECT QUEUE MANAGER                                               
+      ******************************************************************        
+       Q600-DISCONNECT-QMGR.                                                    
+                                                                                
+           IF PV-CON-REASON IS NOT EQUAL TO MQRC-ALREADY-CONNECTED              
+              CALL PC-MQDISC USING PV-HCONN                                     
+                                   PV-COMPLETION-CODE                           
+                                   PV-REASON                                    
+              IF (PV-COMPLETION-CODE NOT = MQCC-OK) THEN                        
+                 MOVE 'MQDISC ERROR'         TO PV-ERROR-MESSAGE                
+                 MOVE 'Q600-DISCONNECT-QMGR' TO PV-ABEND-PARAGRAPH              
+                 PERFORM Z998-DISPLAY-MQ-ERROR                                  
+              END-IF                                                            
+           END-IF.                                                              
+                                                                                
+      *****************************************************************         
+      * READ CONTROL CARD-1 TO OBTAIN THE QUEUE MGR NAME.                       
+      *****************************************************************         
+       S100-READ-CONTROL-CARD-1.                                                
+                                                                                
+            READ CONTROL-CARD-1 INTO CC-CONTROL-CARD-1                          
+                AT END                                                          
+                    SET PS-CONTROL-CARD-1-END TO TRUE.                          
+                                                                                
+      *****************************************************************         
+      * READ CONTROL CARD-2 TO OBTAIN THE GET QUEUE NAME.                       
+      *****************************************************************         
+       S200-READ-CONTROL-CARD-2.                                                
+                                                                                
+            READ CONTROL-CARD-2 INTO CC-CONTROL-CARD-2                          
+                AT END                                                          
+                    SET PS-CONTROL-CARD-2-END   TO TRUE.                        
+                                                                                
+      ******************************************************************        
+      *  READ THE MESSAGE ID INPUT FILE                                         
+      ******************************************************************        
+       S300-READ-MSG-ID-FILE.                                                   
+                                                                                
+           READ MESSAGE-ID-FILE                                                 
+             INTO MR138-ER-MESSAGE-ID-RECORD                                    
+             AT END                                                             
+                 SET MSG-ID-EOF TO TRUE                                         
+             NOT AT END                                                         
+                 MOVE MR138-ITEM-NBR TO CR-ITEM-NBR.                            
+                                                                                
+      ******************************************************************        
+      *  FORMAT ER REPORT RECORD                                                
+      ******************************************************************        
+       W100-FORMAT-REPORT-REC.                                                  
+                                                                                
+           IF  NEW-RPT-REC                                                      
+               SET  NOT-NEW-RPT-REC    TO TRUE                                  
+               INITIALIZE MR140-ER-REPORT-RECORD                                
+               MOVE MR138-DEPT         TO MR140-DEPT                            
+               MOVE MR138-MCL          TO MR140-MCL                             
+               MOVE MR138-SCL          TO MR140-SCL                             
+               MOVE MR138-SKU          TO MR140-SKU                             
+               SET  MR140-STR-INDX     TO +1                                    
+               MOVE PV-NUMERIC-STORE   TO MR140-STORE-NBR                       
+                                                     (MR140-STR-INDX)           
+           ELSE                                                                 
+               SET  MR140-STR-INDX     UP BY +1                                 
+               MOVE PV-NUMERIC-STORE   TO MR140-STORE-NBR                       
+                                                     (MR140-STR-INDX)           
+               IF  MR140-STR-INDX = 40                                          
+                   PERFORM W200-WRITE-REPORT-REC                                
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  WRITE ER REPORT RECORD                                                 
+      ******************************************************************        
+       W200-WRITE-REPORT-REC.                                                   
+                                                                                
+           WRITE REPORT-RECORD                                                  
+             FROM MR140-ER-REPORT-RECORD.                                       
+                                                                                
+           SET NEW-RPT-REC TO TRUE.                                             
+           ADD +1 TO CR-RPT-REC-CNT.                                            
+                                                                                
+      ******************************************************************        
+      *  SELECT FROM THE CHECKPOINT RESTART CONTROL TABLE TO SEE IF             
+      *  THE PROGRAM IS IN A RESTART CONDITION.                                 
+      ******************************************************************        
+       X100-INIT-CHECKPOINT-SELECT.                                             
+                                                                                
+           EXEC SQL                                                             
+             SELECT                                                             
+                  CKPT_STAT_CODE                                                
+               INTO                                                             
+                 :TCKRSTCNTL-CKPT-STAT-CODE                                     
+               FROM  TCKRSTCNTL                                                 
+              WHERE  JOB_NAME  = :PC-JOB-NAME                                   
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                               
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = ZERO                                              
+                   CONTINUE                                                     
+               WHEN OTHER                                                       
+                   MOVE 'X100-INIT-CHECKPOINT-SELECT '                          
+                     TO  PV-ABEND-PARAGRAPH                                     
+                   MOVE 'ERROR ON SELECT OF TCKRSTCNTL '                        
+                     TO  PV-DB2-OPERATION-ATTEMPTED                             
+                   PERFORM Z999-SQL-ERROR                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  SELECT FROM THE CHECKPOINT RESTART INFORMATION TABLE TO                
+      *  OBTAIN THE PROGRAMS SAVED VARIABLES.                                   
+      ******************************************************************        
+       X200-SELECT-RESTART-INFO.                                                
+                                                                                
+           EXEC SQL                                                             
+               SELECT                                                           
+                  WORK_STRG_DESC                                                
+               INTO                                                             
+                 :TCKRSTINF-WORK-STRG-DESC                                      
+               FROM  TCKRSTINF                                                  
+              WHERE  JOB_NAME  = :PC-JOB-NAME                                   
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                               
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = ZERO                                              
+                   CONTINUE                                                     
+               WHEN OTHER                                                       
+                   MOVE 'X200-SELECT-RESTART-INFO '                             
+                     TO  PV-ABEND-PARAGRAPH                                     
+                   MOVE 'ERROR ON SELECT OF TCKRSTINF '                         
+                     TO  PV-DB2-OPERATION-ATTEMPTED                             
+                   PERFORM Z999-SQL-ERROR                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  CHECK IF WE NEED TO TAKE A COMMIT.  IF SO, COMMIT THIS UNIT            
+      *  OF WORK.                                                               
+      ******************************************************************        
+       X300-COMMIT-PROCESSING.                                                  
+                                                                                
+           PERFORM X600-SET-CURRENT-TIMESTAMP.                                  
+                                                                                
+           IF  PV-CURRENT-TIMESTAMP > PV-COMMIT-TIMESTAMP OR                    
+               PV-MQ-READ-COMMIT-CNT > PC-MAX-MQ-READ-CNT                       
+               IF  PS-FIRST-COMMIT                                              
+                   MOVE '9' TO TCKRSTCNTL-CKPT-STAT-CODE                        
+                   PERFORM X400-UPDATE-CHECKPOINT-STATUS                        
+                   MOVE 'N' TO PS-FIRST-COMMIT-SW                               
+               END-IF                                                           
+               PERFORM X700-COMMIT-DB2                                          
+               PERFORM X800-COMMIT-MQ                                           
+               PERFORM X500-GET-COMMIT-TIMESTAMP                                
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  UPDATE THE STATUS ON THE CHECKPOINT CONTROL TABLE                      
+      ******************************************************************        
+       X400-UPDATE-CHECKPOINT-STATUS.                                           
+                                                                                
+           EXEC SQL                                                             
+             UPDATE  TCKRSTCNTL                                                 
+                SET  CKPT_STAT_CODE = :TCKRSTCNTL-CKPT-STAT-CODE                
+              WHERE  JOB_NAME  = :PC-JOB-NAME                                   
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                               
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = ZERO                                              
+                   CONTINUE                                                     
+               WHEN OTHER                                                       
+                   MOVE 'X400-UPDATE-CHECKPOINT-STATUS '                        
+                     TO  PV-ABEND-PARAGRAPH                                     
+                   MOVE 'ERROR ON UPDATE OF TCKRSTCNTL '                        
+                     TO  PV-DB2-OPERATION-ATTEMPTED                             
+                   PERFORM Z999-SQL-ERROR                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  GET THE COMMIT TIMESTAMP FROM THE CHECKPOINT CONTROL TABLE             
+      ******************************************************************        
+       X500-GET-COMMIT-TIMESTAMP.                                               
+                                                                                
+           EXEC SQL                                                             
+             SELECT (CURRENT TIMESTAMP + CKPT_FRQNCY_QTY SECONDS)               
+               INTO :PV-COMMIT-TIMESTAMP                                        
+               FROM TCKRSTCNTL                                                  
+              WHERE JOB_NAME  = :PC-JOB-NAME                                    
+                AND PLAN_NAME = :PC-PROGRAM-NAME                                
+           END-EXEC.                                                            
+                                                                                
+           IF  SQLCODE = 0                                                      
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE 'X500-GET-COMMIT-TIMESTAMP '                                
+                 TO  PV-ABEND-PARAGRAPH                                         
+               MOVE 'ERROR ON SELECT OF TIMESTAMP '                             
+                 TO  PV-DB2-OPERATION-ATTEMPTED                                 
+               PERFORM Z999-SQL-ERROR                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  GET THE CURRENT TIMESTAMP FROM DB2                                     
+      ******************************************************************        
+       X600-SET-CURRENT-TIMESTAMP.                                              
+                                                                                
+           EXEC SQL                                                             
+                SET :PV-CURRENT-TIMESTAMP = CURRENT TIMESTAMP                   
+           END-EXEC.                                                            
+                                                                                
+           IF  SQLCODE = 0                                                      
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE 'X600-SET-CURRENT-TIMESTAMP '                               
+                 TO  PV-ABEND-PARAGRAPH                                         
+               MOVE 'ERROR ON SET OF TIMESTAMP '                                
+                 TO  PV-DB2-OPERATION-ATTEMPTED                                 
+               PERFORM Z999-SQL-ERROR                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  PERFORM UPDATE OF CHECKPOINT INFORMATION TABLE AND                     
+      *  TAKE A COMMIT.                                                         
+      ******************************************************************        
+       X700-COMMIT-DB2.                                                         
+                                                                                
+           MOVE CR-CHECKPOINT-RESTART-AREA TO TCKRSTINF-WORK-STRG-DESC.         
+                                                                                
+           EXEC SQL                                                             
+             UPDATE TCKRSTINF                                                   
+                SET WORK_STRG_DESC = :TCKRSTINF-WORK-STRG-DESC                  
+              WHERE JOB_NAME  = :PC-JOB-NAME                                    
+                AND PLAN_NAME = :PC-PROGRAM-NAME                                
+           END-EXEC.                                                            
+                                                                                
+           IF  SQLCODE = 0                                                      
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE 'X700-COMMIT-DB2 '                                          
+                 TO  PV-ABEND-PARAGRAPH                                         
+               MOVE 'ERROR ON UPDATE OF TCKRSTINF '                             
+                 TO  PV-DB2-OPERATION-ATTEMPTED                                 
+               PERFORM Z999-SQL-ERROR                                           
+           END-IF.                                                              
+                                                                                
+           EXEC SQL                                                             
+               COMMIT                                                           
+           END-EXEC.                                                            
+                                                                                
+           IF  SQLCODE = 0                                                      
+               ADD +1 TO CR-DB2-COMMIT-CNT                                      
+           ELSE                                                                 
+               MOVE 'X700-COMMIT-DB2 '                                          
+                 TO  PV-ABEND-PARAGRAPH                                         
+               MOVE 'ERROR ON COMMIT '                                          
+                 TO  PV-DB2-OPERATION-ATTEMPTED                                 
+               PERFORM Z999-SQL-ERROR                                           
+           END-IF.                                                              
+                                                                                
+           EJECT                                                                
+                                                                                
+      ******************************************************************        
+      *  COMMIT MQ PROCESSING SINCE THE POINT OF THE LAST COMMIT       *        
+      ******************************************************************        
+       X800-COMMIT-MQ.                                                          
+                                                                                
+           CALL PC-MQCMIT USING PV-HCONN                                        
+                                PV-COMPLETION-CODE                              
+                                PV-REASON.                                      
+                                                                                
+           IF  (PV-COMPLETION-CODE NOT = MQCC-OK)                               
+               MOVE 'X800-COMMIT-MQ'  TO PV-ABEND-PARAGRAPH                     
+               MOVE 'MQCMIT ERROR'    TO PV-ERROR-MESSAGE                       
+               PERFORM X900-BACK-OUT-MQ                                         
+           ELSE                                                                 
+               ADD +1 TO CR-MQ-COMMIT-CNT                                       
+               MOVE +1 TO PV-MQ-READ-COMMIT-CNT                                 
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * BACK OUT MQ PROCESSING SINCE THE POINT OF THE LAST COMMIT      *        
+      ******************************************************************        
+       X900-BACK-OUT-MQ.                                                        
+                                                                                
+           CALL PC-MQBACK USING PV-HCONN                                        
+                                PV-COMPLETION-CODE                              
+                                PV-REASON.                                      
+                                                                                
+           IF  (PV-COMPLETION-CODE NOT = MQCC-OK) THEN                          
+               MOVE 'Q900-BACK-OUT-MQ'  TO PV-ABEND-PARAGRAPH                   
+               MOVE 'MQBACK ERROR'    TO PV-ERROR-MESSAGE                       
+               PERFORM Q600-DISCONNECT-QMGR                                     
+               PERFORM Z998-DISPLAY-MQ-ERROR                                    
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  DISPLAY TOTAL COUNTS & UPDATE CKPT STATUS                              
+      ******************************************************************        
+       Z995-END-OF-JOB.                                                         
+                                                                                
+           DISPLAY SPACES.                                                      
+           DISPLAY '*********************************************'.             
+           DISPLAY '***** TOTAL COUNTS FOR PROGRAM MRKUP140 *****'.             
+           DISPLAY '*********************************************'.             
+                                                                                
+           MOVE CR-TOT-NBR-GETS-CNT     TO PV-DISPLAY-COUNT.                    
+           DISPLAY 'TOT NBR OF SUCCESSFUL MQ GETS         = '                   
+                                                     PV-DISPLAY-COUNT.          
+                                                                                
+           MOVE CR-CHANGE-CNT           TO PV-DISPLAY-COUNT.                    
+           DISPLAY 'TOT NBR OF SUCCESSFUL TMRITST UPDATES = '                   
+                                                     PV-DISPLAY-COUNT.          
+                                                                                
+           MOVE CR-ROW-NOT-FOUND-CNT    TO PV-DISPLAY-COUNT.                    
+           DISPLAY 'TOT NBR OF SKU/STR NOT FND ON TMRITST = '                   
+                                                     PV-DISPLAY-COUNT.          
+                                                                                
+           MOVE CR-RPT-REC-CNT          TO PV-DISPLAY-COUNT.                    
+           DISPLAY 'TOT NBR OF REPORT RECORDS WRITTEN     = '                   
+                                                     PV-DISPLAY-COUNT.          
+                                                                                
+           MOVE CR-DB2-COMMIT-CNT       TO PV-DISPLAY-COUNT.                    
+           DISPLAY 'TOT NBR OF DB2 COMMITS TAKEN          = '                   
+                                                     PV-DISPLAY-COUNT.          
+                                                                                
+           MOVE CR-MQ-COMMIT-CNT        TO PV-DISPLAY-COUNT.                    
+           DISPLAY 'TOT NBR OF MQ COMMITS TAKEN           = '                   
+                                                     PV-DISPLAY-COUNT.          
+C08377     DISPLAY 'TOT NBR OF SKIPPED RECORDS            = '                   
+C08377                                               PV-SKIPPED-COUNT.          
+                                                                                
+           DISPLAY SPACES.                                                      
+                                                                                
+           MOVE '0' TO TCKRSTCNTL-CKPT-STAT-CODE.                               
+           PERFORM X400-UPDATE-CHECKPOINT-STATUS.                               
+                                                                                
+      *****************************************************************         
+      * DISPLAY THE VALUES OF A FAILED MQ API COMMAND                           
+      *****************************************************************         
+       Z998-DISPLAY-MQ-ERROR.                                                   
+                                                                                
+           DISPLAY '************************************************'.          
+           DISPLAY '**** ABEND *************************************'.          
+           DISPLAY '************************************************'.          
+           DISPLAY '** MQSERIES ERROR **'                                       
+           DISPLAY '** PROGRAM:    ', PC-PROGRAM-NAME.                          
+           DISPLAY '** PARAGRAPH:  ', PV-ABEND-PARAGRAPH.                       
+           DISPLAY '** MESSAGE:    ', PV-ERROR-MESSAGE.                         
+           DISPLAY '** COMP CODE:  ', PV-COMPLETION-CODE.                       
+           DISPLAY '** RSN CODE:   ', PV-REASON.                                
+           DISPLAY '************************************************'.          
+           DISPLAY '************************************************'.          
+           DISPLAY '************************************************'.          
+      *    DISPLAY '************************************************'.          
+      *    DISPLAY '**** PROGRAM COUNTERS AT TIME OF ABEND *********'.          
+      *    DISPLAY '************************************************'.          
+      *    DISPLAY '** NUMBER OF Q MESSAGES PROCESSED: ', PA-PUTS.              
+      *    DISPLAY '************************************************'.          
+           MOVE PV-MQ-ERROR TO PV-ABEND-CODE.                                   
+           CALL 'ILBOABN0' USING PV-ABEND-CODE.                                 
+      *                                                                         
+      ******************************************************************        
+      *   ERROR MESSAGE ROUTINE                                                 
+      ******************************************************************        
+       Z999-SQL-ERROR.                                                          
+                                                                                
+           MOVE SQLCODE    TO SQLCODE2.                                         
+           MOVE SQLERRD(3) TO SQLERRD3.                                         
+           DISPLAY '** ABEND **       ** = SQLERROR'.                           
+           DISPLAY '** PROGRAM        ** = ' PC-PROGRAM-NAME.                   
+           DISPLAY '** PARAGRAPH:     ** = ' PV-ABEND-PARAGRAPH.                
+           DISPLAY '** OPERATION:     ** = ' PV-DB2-OPERATION-ATTEMPTED.        
+           DISPLAY '** SQLCODE        ** = ' SQLCODE2.                          
+           DISPLAY '** ROWS PROCESSED ** = ' SQLERRD3.                          
+           DISPLAY '** SQLERRM        ** = ' SQLERRM.                           
+           DISPLAY '** SQLERRMC       ** = ' SQLERRMC.                          
+           MOVE +4013 TO PV-ABEND-CODE.                                         
+           CALL 'ILBOABN0' USING PV-ABEND-CODE.                                 
+      ******************************************************************        

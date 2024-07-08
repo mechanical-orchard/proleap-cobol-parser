@@ -1,0 +1,635 @@
+       IDENTIFICATION DIVISION.                                                 
+       PROGRAM-ID.                SEKCS301.                                     
+       AUTHOR.                    JEFF ROUBIK.                                  
+       INSTALLATION.              KOHLS DEPARTMENT STORES.                      
+       DATE-WRITTEN.              MAY 2001.                                     
+       DATE-COMPILED.                                                           
+      ******************************************************************        
+      * This program validates and/or changes a users password via              
+      * MQSeries.  It is a CICS program triggered by MQSeries.                  
+      * After processing a request, it will wait for up to 30 minutes           
+      * for another request before shutting down.                               
+      *-----------------------------------------------------------------        
+      * 05/15/2001  Jeff Roubik                                                 
+      *             Created.                                                    
+      * 09/13/2001  Jeff Roubik                                                 
+      *             Fix timestamp for error messages.                           
+      *             Improved logging.                                           
+      ******************************************************************        
+207210*  07/05/2018  Jim Hunter    (CHG0207210)                        *        
+207210*              For Mainframe Refactoring:                        *        
+207210*              In the EXEC CICS VERIFY and CHANGE calls, specify *        
+207210*              the password before the user id. (Find 207210)    *        
+207210******************************************************************        
+       ENVIRONMENT DIVISION.                                                    
+       DATA DIVISION.                                                           
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-PGM-NAME             PIC X(08) VALUE 'SEKCS301'.              
+           05  PC-QMGR-NAME            PIC X(48) VALUE 'QKSP'.                  
+               88  PC-QMGR-PROD                  VALUE 'QKSP'.                  
+               88  PC-QMGR-LEARN                 VALUE 'QKSL'.                  
+               88  PC-QMGR-QA                    VALUE 'QKSQ'.                  
+               88  PC-QMGR-TEST                  VALUE 'QKST'.                  
+           05  PC-DATA-COLLECT-QNAME   PIC X(48) VALUE                          
+                                          'IS.RACF.SECURITY.REQUEST.Q'.         
+                                                                                
+      * MQSERIES COMPLETION CODES                                               
+           COPY ISWS005.                                                        
+                                                                                
+       01  PV-PROGRAM-VARIABLES.                                                
+           05  PV-QM-NAME              PIC X(48).                               
+           05  PV-HCONN                PIC S9(9) BINARY VALUE 0.                
+           05  PV-OPEN-OPTIONS         PIC S9(9) BINARY.                        
+           05  PV-HANDLE               PIC S9(9) BINARY VALUE 0.                
+           05  PV-COMPLETION-CODE      PIC S9(9) BINARY.                        
+           05  PV-REASON               PIC S9(9) BINARY.                        
+           05  PV-CON-REASON           PIC S9(9) BINARY.                        
+           05  PV-MSGBUFFER.                                                    
+               10  PV-MSGBUFFER-ARRAY  PIC X(1) OCCURS 1000 TIMES.              
+           05  PV-MSGLENGTH            PIC S9(9) BINARY VALUE 1000.             
+           05  PV-DATA-LENGTH          PIC S9(9) BINARY.                        
+           05  PV-ACTION               PIC X(60)        VALUE SPACES.           
+           05  PV-SYSID                PIC X(4).                        00870099
+           05  PV-REQUESTS             PIC S9(9) COMP-3 VALUE ZERO.     00870099
+           05  PV-DISPLAY-REQUESTS     PIC ZZZ,ZZZ,ZZ9.                 00870099
+                                                                                
+       01  SE-SECURITY-REQUEST.                                         00870099
+           05  SE-USERID               PIC X(08).                               
+           05  SE-CURRENT-PASSWORD     PIC X(08).                               
+           05  SE-NEW-PASSWORD         PIC X(08).                               
+                                                                                
+       01  SE-SECURITY-REPLY.                                           00870099
+           05  SE-RETURN-CODE          PIC X(04).                               
+           05  SE-MESSAGE              PIC X(80).                               
+           05  SE-PASSWORD-EXPIRES     PIC X(08).                               
+           05  SE-PASSWORD-CHANGED     PIC X(08).                               
+           05  SE-LAST-USE             PIC X(08).                               
+           05  SE-INVALID-ATTEMPTS     PIC X(04).                               
+           05  SE-DAYS-LEFT            PIC X(04).                               
+                                                                                
+       01  WS-MQCONN                   PIC X(8)  VALUE 'CSQCCONN'.              
+       01  WS-MQOPEN                   PIC X(8)  VALUE 'CSQCOPEN'.              
+       01  WS-MQINQ                    PIC X(8)  VALUE 'CSQCINQ'.               
+       01  WS-MQGET                    PIC X(8)  VALUE 'CSQCGET'.               
+       01  WS-MQPUT                    PIC X(8)  VALUE 'CSQCPUT'.               
+       01  WS-MQPUT1                   PIC X(8)  VALUE 'CSQCPUT1'.              
+       01  WS-MQCLOSE                  PIC X(8)  VALUE 'CSQCCLOS'.              
+       01  WS-MQDISC                   PIC X(8)  VALUE 'CSQCDISC'.              
+                                                                                
+      * API CONTROL BLOCKS                                                      
+       01  MQM-OBJECT-DESCRIPTOR.                                               
+           COPY CMQODV.                                                         
+       01  MQM-MESSAGE-DESCRIPTOR.                                              
+           COPY CMQMDV.                                                         
+       01  MQM-PUT-MESSAGE-OPTIONS.                                             
+           COPY CMQPMOV.                                                        
+       01  MQM-GET-MESSAGE-OPTIONS.                                             
+           COPY CMQGMOV.                                                        
+                                                                                
+      * MQV CONTAINS CONSTANTS (FOR FILLING IN THE CONTROL BLOCKS)              
+      * AND RETURN CODES (FOR TESTING THE RESULT OF A CALL)                     
+       01  MQM-CONSTANTS.                                                       
+           COPY CMQV.                                                           
+                                                                                
+       01  PL-PROGRAM-LOG-VARIABLES.                                            
+           05  PL-LOG-SUB       PIC  9(02)  VALUE ZERO.                         
+           05  PL-LOG-LINES-TABLE.                                              
+               10  FILLER       PIC  X(11)  VALUE ' SEKCS301: '.                
+               10  FILLER       PIC  X(14)  VALUE 'An attempt to '.             
+               10  PL-ACTION    PIC  X(06)  VALUE SPACES.                       
+               10  FILLER       PIC  X(18)  VALUE ' the password for '.         
+               10  PL-USERID    PIC  X(08)  VALUE SPACE.                        
+               10  FILLER       PIC  X(43)  VALUE 'failed.'.                    
+                                                                                
+               10  FILLER       PIC  X(11)  VALUE SPACES.                       
+               10  FILLER       PIC  X(05)  VALUE 'RESP='.                      
+               10  PL-RESP      PIC  9(04)  VALUE ZERO.                         
+               10  FILLER       PIC  X(08)  VALUE '  RESP2='.                   
+               10  PL-RESP2     PIC  9(04)  VALUE ZERO.                         
+               10  FILLER       PIC  X(15)  VALUE '  occurred in  '.            
+               10  PL-PARAGRAPH PIC  X(53)  VALUE SPACE.                        
+                                                                                
+               10  FILLER       PIC  X(11)  VALUE SPACES.                       
+               10  PL-MESSAGE   PIC  X(89)  VALUE SPACE.                        
+           05  PL-LOG-LINES  REDEFINES PL-LOG-LINES-TABLE                       
+               OCCURS 3 TIMES   PIC  X(100).                                    
+       01  WS-VARIABLES.                                                        
+           05  WS-RESP             PIC S9(8) COMP.                              
+           05  WS-RESP2            PIC S9(8) COMP.                              
+           05  WS-CHANGE-TIME      PIC S9(15) COMP-3.                           
+           05  WS-EXPIRY-TIME      PIC S9(15) COMP-3.                           
+           05  WS-LAST-USE-TIME    PIC S9(15) COMP-3.                           
+           05  WS-INVALID-ATTEMPTS PIC S9(04) COMP.                             
+           05  WS-DAYS-LEFT        PIC S9(04) COMP.                             
+       01  EM-ERROR-MESSAGE-LIST.                                               
+            05 EM-MESSAGE1                  PIC X(71) VALUE                     
+            'Userid not found on system.'.                                      
+            05 EM-MESSAGE2                  PIC X(71) VALUE                     
+            'Password as entered is invalid.  Please try again.'.               
+            05 EM-MESSAGE2A                 PIC X(71) VALUE                     
+            'Old password as entered is invalid.  Please try again.'.           
+            05 EM-MESSAGE3                  PIC X(71) VALUE                     
+            'Your password has expired.  Please enter new password.'.           
+            05 EM-MESSAGE4                  PIC X(71) VALUE                     
+            'New password as entered is invalid.'.                              
+            05 EM-MESSAGE13                 PIC X(71) VALUE                     
+            'Unknown return code from external security manager.'.              
+            05 EM-MESSAGE18                 PIC X(71) VALUE                     
+            'The external security manager is not initialized'.                 
+            05 EM-MESSAGE19                 PIC X(71) VALUE                     
+            'Your userid has been revoked. Please call the help desk.'.         
+            05 EM-MESSAGE22                 PIC X(71) VALUE                     
+            'The change password request failed in SECLABEL proc.'.             
+            05 EM-MESSAGE29                 PIC X(71) VALUE                     
+            'The external security manager is not responding.'.                 
+            05 EM-MESSAGE31                 PIC X(71) VALUE                     
+            'Userid is revoked in the connection to the default group.'.        
+            05 EM-MESSAGE32                 PIC X(71) VALUE                     
+            'Invalid userid entered.'.                                          
+            05 EM-MESSAGEOK                 PIC X(71) VALUE                     
+            'Action Successful.'.                                               
+            05 EM-MESSAGE-CHECK-FAILED      PIC X(71) VALUE                     
+            'Password Check Failed.'.                                           
+            05 EM-MESSAGE-CHANGE-FAILED     PIC X(71) VALUE                     
+            'Password Change Failed.'.                                          
+            05 EM-MESSAGE-INTERNAL-ERR      PIC X(71) VALUE                     
+            'Internal Error.  Please call the help desk'.                       
+                                                                                
+                                                                                
+                                                                                
+       PROCEDURE DIVISION.                                                      
+                                                                                
+           PERFORM 1000-SETUP.                                                  
+           PERFORM 2000-PROCESS-SECURITY-REQUESTS.                              
+           PERFORM 3000-CLEANUP.                                                
+                                                                                
+           EXEC CICS RETURN                                                     
+           END-EXEC.                                                            
+                                                                                
+                                                                                
+      ******************************************************************        
+      * INITIALIZE ALL TABLES PRIOR TO PROCESSING                      *        
+      ******************************************************************        
+       1000-SETUP.                                                              
+           EXEC CICS ASSIGN                                                     
+               SYSID (PV-SYSID)                                                 
+           END-EXEC.                                                            
+           IF PV-SYSID (3:1) = 'P'                                              
+               SET PC-QMGR-PROD  TO TRUE                                        
+           ELSE                                                                 
+           IF PV-SYSID (3:1) = 'L'                                              
+               SET PC-QMGR-LEARN TO TRUE                                        
+           ELSE                                                                 
+           IF PV-SYSID (3:1) = 'Q'                                              
+               SET PC-QMGR-QA    TO TRUE                                        
+           ELSE                                                                 
+               SET PC-QMGR-TEST  TO TRUE.                                       
+                                                                                
+           PERFORM 1100-MQSERIES-CONNECT.                                       
+           PERFORM 1200-MQSERIES-OPEN.                                          
+                                                                                
+                                                                                
+       1100-MQSERIES-CONNECT.                                                   
+                                                                                
+           MOVE PC-QMGR-NAME TO PV-QM-NAME                                      
+           CALL WS-MQCONN USING PV-QM-NAME                                      
+                                PV-HCONN                                        
+                                PV-COMPLETION-CODE                              
+                                PV-REASON.                                      
+                                                                                
+      *    IF CONNECTION FAILED THEN DISPLAY ERROR MESSAGE                      
+      *    AND EXIT                                                             
+                                                                                
+           MOVE PV-REASON TO PV-CON-REASON.                                     
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK)                                
+               STRING 'CONNECT - ' PV-QM-NAME                                   
+                 DELIMITED BY SIZE INTO PV-ACTION                               
+               PERFORM 9001-MQSERIES-ERROR.                                     
+                                                                                
+           MOVE SPACES TO PV-ACTION.                                            
+           STRING 'MQCONN SUCCESSFUL TO ' PV-QM-NAME                            
+             DELIMITED BY SIZE INTO PV-ACTION.                                  
+           PERFORM 6000-LOG-MESSAGE.                                            
+                                                                                
+                                                                                
+       1200-MQSERIES-OPEN.                                                      
+                                                                                
+           COMPUTE PV-OPEN-OPTIONS        = MQOO-INPUT-SHARED                   
+                                          + MQOO-FAIL-IF-QUIESCING.             
+           MOVE MQOT-Q                   TO MQOD-OBJECTTYPE.                    
+           MOVE PV-QM-NAME               TO MQOD-OBJECTQMGRNAME.                
+           MOVE PC-DATA-COLLECT-QNAME TO MQOD-OBJECTNAME.                       
+                                                                                
+           CALL WS-MQOPEN USING PV-HCONN                                        
+                                MQM-OBJECT-DESCRIPTOR                           
+                                PV-OPEN-OPTIONS                                 
+                                PV-HANDLE                                       
+                                PV-COMPLETION-CODE                              
+                                PV-REASON.                                      
+                                                                                
+      *    IF CONNECTION FAILED THEN DISPLAY ERROR MESSAGE                      
+      *    AND EXIT                                                             
+                                                                                
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK)                                
+               STRING 'OPEN - ' PC-DATA-COLLECT-QNAME                           
+                 DELIMITED BY SIZE INTO PV-ACTION                               
+               PERFORM 9001-MQSERIES-ERROR.                                     
+                                                                                
+           MOVE SPACES TO PV-ACTION.                                            
+           STRING 'MQOPEN SUCCESSFUL FOR '                                      
+                  PC-DATA-COLLECT-QNAME                                         
+             DELIMITED BY SIZE INTO PV-ACTION.                                  
+           PERFORM 6000-LOG-MESSAGE.                                            
+                                                                                
+                                                                                
+                                                                                
+       2000-PROCESS-SECURITY-REQUESTS.                                          
+                                                                                
+           PERFORM 2100-GET-SECURITY-REQUESTS.                                  
+           PERFORM  UNTIL PV-COMPLETION-CODE NOT = MQCC-OK                      
+               PERFORM 2200-CHECK-SECURITY                                      
+               PERFORM 2300-PUT-SECURITY-REPLY                                  
+               PERFORM 2100-GET-SECURITY-REQUESTS                               
+           END-PERFORM.                                                         
+                                                                                
+                                                                                
+       2100-GET-SECURITY-REQUESTS.                                              
+                                                                                
+           MOVE MQMI-NONE       TO MQMD-MSGID.                                  
+           MOVE MQCI-NONE       TO MQMD-CORRELID.                               
+      * WAIT FOR 30 MINUTES (1,800,000 MILLISECONDS) IN PROD...                 
+      * WAIT FOR 30 SECONDS (   30,000 MILLISECONDS) EVERYWHERE ELSE...         
+           IF PV-SYSID (3:1) = 'P'                                              
+               MOVE 1800000     TO MQGMO-WAITINTERVAL                           
+           ELSE                                                                 
+               MOVE   30000     TO MQGMO-WAITINTERVAL.                          
+           MOVE 1000            TO PV-MSGLENGTH.                                
+           COMPUTE MQGMO-OPTIONS = MQGMO-NO-SYNCPOINT                           
+                                 + MQGMO-WAIT                                   
+                                 + MQGMO-CONVERT                                
+                                 + MQGMO-FAIL-IF-QUIESCING.                     
+                                                                                
+           CALL WS-MQGET USING PV-HCONN                                         
+                               PV-HANDLE                                        
+                               MQM-MESSAGE-DESCRIPTOR                           
+                               MQM-GET-MESSAGE-OPTIONS                          
+                               PV-MSGLENGTH                                     
+                               PV-MSGBUFFER                                     
+                               PV-DATA-LENGTH                                   
+                               PV-COMPLETION-CODE                               
+                               PV-REASON.                                       
+                                                                                
+      * IF GET FAILED THEN DISPLAY ERROR MESSAGE                                
+           IF (PV-COMPLETION-CODE = MQCC-OK)                                    
+           OR (PV-REASON          = MQRC-NO-MSG-AVAILABLE)                      
+               CONTINUE                                                         
+           ELSE                                                                 
+               STRING 'GET - ' PC-DATA-COLLECT-QNAME                            
+                 DELIMITED BY SIZE INTO PV-ACTION                               
+               PERFORM 9001-MQSERIES-ERROR.                                     
+                                                                                
+                                                                                
+                                                                                
+       2200-CHECK-SECURITY.                                                     
+                                                                                
+           MOVE PV-MSGBUFFER TO SE-SECURITY-REQUEST.                            
+           MOVE FUNCTION UPPER-CASE (SE-USERID)                                 
+                                  TO SE-USERID.                                 
+           MOVE FUNCTION UPPER-CASE (SE-CURRENT-PASSWORD)                       
+                                  TO SE-CURRENT-PASSWORD.                       
+           MOVE FUNCTION UPPER-CASE (SE-NEW-PASSWORD)                           
+                                  TO SE-NEW-PASSWORD.                           
+           INITIALIZE SE-SECURITY-REPLY.                                        
+                                                                                
+           IF SE-NEW-PASSWORD <= SPACES                                         
+              PERFORM 4000-SIGNON                                               
+           ELSE                                                                 
+              PERFORM 5000-CHANGE-PASSWORD                                      
+           END-IF.                                                              
+                                                                                
+                                                                                
+                                                                                
+       2300-PUT-SECURITY-REPLY.                                                 
+                                                                                
+           MOVE MQMD-REPLYTOQMGR     TO MQOD-OBJECTQMGRNAME.                    
+           MOVE MQMD-REPLYTOQ        TO MQOD-OBJECTNAME.                        
+           MOVE MQMD-MSGID           TO MQMD-CORRELID.                          
+           MOVE MQMI-NONE            TO MQMD-MSGID.                             
+           MOVE MQMT-REPLY           TO MQMD-MSGTYPE.                           
+           MOVE MQFMT-STRING         TO MQMD-FORMAT.                            
+           MOVE 5000                 TO MQMD-EXPIRY.                            
+           MOVE 116                  TO PV-MSGLENGTH.                           
+           MOVE SE-SECURITY-REPLY    TO PV-MSGBUFFER.                           
+           MOVE MQPER-PERSISTENT     TO MQMD-PERSISTENCE.                       
+           COMPUTE MQPMO-OPTIONS      = MQPMO-NO-SYNCPOINT                      
+                                      + MQPMO-FAIL-IF-QUIESCING.                
+                                                                                
+           CALL WS-MQPUT1 USING PV-HCONN                                        
+                                MQM-OBJECT-DESCRIPTOR                           
+                                MQM-MESSAGE-DESCRIPTOR                          
+                                MQM-PUT-MESSAGE-OPTIONS                         
+                                PV-MSGLENGTH                                    
+                                PV-MSGBUFFER(1:116)                             
+                                PV-COMPLETION-CODE                              
+                                PV-REASON.                                      
+                                                                                
+      * IF PUT1 FAILED THEN DISPLAY ERROR MESSAGE                               
+                                                                                
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK)                                
+               INSPECT MQOD-OBJECTQMGRNAME                                      
+                 REPLACING ALL SPACE BY LOW-VALUE                               
+               INSPECT MQOD-OBJECTNAME                                          
+                 REPLACING ALL SPACE BY LOW-VALUE                               
+               STRING 'PUT1 - ' MQMD-REPLYTOQMGR                                
+                                        ' / ' MQMD-REPLYTOQ                     
+                 DELIMITED BY LOW-VALUE INTO PV-ACTION                          
+               PERFORM 9001-MQSERIES-ERROR.                                     
+                                                                                
+           ADD 1 TO PV-REQUESTS.                                                
+                                                                                
+                                                                                
+       3000-CLEANUP.                                                            
+                                                                                
+           PERFORM 3100-MQSERIES-CLOSE.                                         
+           PERFORM 3200-MQSERIES-DISCONNECT.                                    
+                                                                                
+           MOVE SPACES TO PV-ACTION.                                            
+           MOVE PV-REQUESTS TO PV-DISPLAY-REQUESTS.                             
+           STRING PV-DISPLAY-REQUESTS                                           
+                ' SECURITY REQUESTS PROCESSED.'                                 
+             DELIMITED BY SIZE INTO PV-ACTION.                                  
+           PERFORM 6000-LOG-MESSAGE.                                            
+                                                                                
+                                                                                
+       3100-MQSERIES-CLOSE.                                                     
+                                                                                
+           CALL WS-MQCLOSE USING PV-HCONN                                       
+                                 PV-HANDLE                                      
+                                 MQCO-NONE                                      
+                                 PV-COMPLETION-CODE                             
+                                 PV-REASON.                                     
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK)                                
+               STRING 'CLOSE - ' PC-DATA-COLLECT-QNAME                          
+                 DELIMITED BY SIZE INTO PV-ACTION                               
+               PERFORM 9001-MQSERIES-ERROR.                                     
+                                                                                
+           MOVE SPACES TO PV-ACTION.                                            
+           STRING 'MQCLOSE SUCCESSFUL FOR '                                     
+                  PC-DATA-COLLECT-QNAME                                         
+             DELIMITED BY SIZE INTO PV-ACTION.                                  
+           PERFORM 6000-LOG-MESSAGE.                                            
+                                                                                
+                                                                                
+       3200-MQSERIES-DISCONNECT.                                                
+                                                                                
+           IF PV-CON-REASON NOT = MQRC-ALREADY-CONNECTED                        
+               CALL WS-MQDISC USING PV-HCONN                                    
+                                    PV-COMPLETION-CODE                          
+                                    PV-REASON                                   
+               IF (PV-COMPLETION-CODE NOT = MQCC-OK)                            
+                   STRING 'DISCONNECT - ' PC-QMGR-NAME                          
+                     DELIMITED BY SIZE INTO PV-ACTION                           
+                   PERFORM 9001-MQSERIES-ERROR                                  
+               END-IF                                                           
+               MOVE SPACES TO PV-ACTION                                         
+               STRING 'MQDISC SUCCESSFUL FROM '                                 
+                      PV-QM-NAME                                                
+                 DELIMITED BY SIZE INTO PV-ACTION                               
+               PERFORM 6000-LOG-MESSAGE.                                        
+                                                                                
+                                                                                
+                                                                                
+      ******************************************************************        
+      * VERIFY USERID AND PASSWORD                                              
+      *-----------------------------------------------------------------        
+      * PL-MESSAGE SHOWS UP IN THE CICS LOG.                                    
+      * SE-MESSAGE IS WHAT IS SENT TO THE REQUESTER.                            
+      ******************************************************************        
+       4000-SIGNON.                                                             
+           EXEC CICS VERIFY                                                     
+207210         PASSWORD(SE-CURRENT-PASSWORD)                                    
+207210         USERID(SE-USERID)                                                
+               CHANGETIME(WS-CHANGE-TIME)                                       
+               EXPIRYTIME(WS-EXPIRY-TIME)                                       
+               LASTUSETIME(WS-LAST-USE-TIME)                                    
+               INVALIDCOUNT(WS-INVALID-ATTEMPTS)                                
+               DAYSLEFT(WS-DAYS-LEFT)                                           
+               RESP(WS-RESP)                                                    
+               RESP2(WS-RESP2)                                                  
+           END-EXEC.                                                            
+           EVALUATE TRUE                                                        
+               WHEN WS-RESP = DFHRESP(USERIDERR)                                
+                   MOVE '-110'                  TO SE-RETURN-CODE               
+                   MOVE EM-MESSAGE1             TO PL-MESSAGE                   
+                   MOVE EM-MESSAGE-CHECK-FAILED TO SE-MESSAGE                   
+               WHEN WS-RESP2 = 2                                                
+                   MOVE '-110'                  TO SE-RETURN-CODE               
+                   MOVE EM-MESSAGE2             TO PL-MESSAGE                   
+                   MOVE EM-MESSAGE-CHECK-FAILED TO SE-MESSAGE                   
+               WHEN WS-RESP2 = 3                                                
+                   MOVE '0003'                  TO SE-RETURN-CODE               
+                   MOVE EM-MESSAGE3             TO PL-MESSAGE                   
+                                                   SE-MESSAGE                   
+               WHEN WS-RESP2 = 13                                               
+                   MOVE '-110'                  TO SE-RETURN-CODE               
+                   MOVE EM-MESSAGE13            TO PL-MESSAGE                   
+                   MOVE EM-MESSAGE-INTERNAL-ERR TO SE-MESSAGE                   
+               WHEN WS-RESP2 = 18                                               
+                   MOVE '-110'                  TO SE-RETURN-CODE               
+                   MOVE EM-MESSAGE18            TO PL-MESSAGE                   
+                   MOVE EM-MESSAGE-INTERNAL-ERR TO SE-MESSAGE                   
+               WHEN WS-RESP2 = 19                                               
+                   MOVE '0019'                  TO SE-RETURN-CODE               
+                   MOVE EM-MESSAGE19            TO PL-MESSAGE                   
+                                                   SE-MESSAGE                   
+               WHEN WS-RESP2 = 29                                               
+                   MOVE '-110'                  TO SE-RETURN-CODE               
+                   MOVE EM-MESSAGE29            TO PL-MESSAGE                   
+                   MOVE EM-MESSAGE-INTERNAL-ERR TO SE-MESSAGE                   
+               WHEN WS-RESP2 = 32                                               
+                   MOVE '-110'                  TO SE-RETURN-CODE               
+                   MOVE EM-MESSAGE32            TO PL-MESSAGE                   
+                   MOVE EM-MESSAGE-CHECK-FAILED TO SE-MESSAGE                   
+               WHEN WS-RESP = 0                                                 
+                   MOVE '0000'                  TO SE-RETURN-CODE               
+                   MOVE EM-MESSAGEOK            TO PL-MESSAGE                   
+                                                   SE-MESSAGE                   
+                   PERFORM 4100-PROCESS-VALIDATE                                
+           END-EVALUATE.                                                        
+                                                                                
+           IF WS-RESP = 0                                                       
+               MOVE SPACES TO PV-ACTION                                         
+               STRING 'Successful login by ' SE-USERID                          
+                      'on ' MQMD-REPLYTOQMGR                                    
+                 DELIMITED BY SIZE INTO PV-ACTION                               
+               PERFORM 6000-LOG-MESSAGE                                         
+           ELSE                                                                 
+               MOVE 'verify'                    TO PL-ACTION                    
+               MOVE '4000-SIGNON'               TO PL-PARAGRAPH                 
+               PERFORM 6001-LOG-ERROR-MESSAGE.                                  
+                                                                                
+                                                                                
+      ******************************************************************        
+      * BUILD AND FORMAT RESPONSE TO REQUEST                                    
+      ******************************************************************        
+       4100-PROCESS-VALIDATE.                                                   
+           IF WS-CHANGE-TIME = -1                                               
+              MOVE 'NOEXPIRE' TO SE-PASSWORD-CHANGED                            
+           ELSE                                                                 
+              EXEC CICS FORMATTIME                                              
+                  ABSTIME(WS-CHANGE-TIME)                                       
+                  YYYYMMDD(SE-PASSWORD-CHANGED)                                 
+              END-EXEC.                                                         
+           IF WS-EXPIRY-TIME = -1                                               
+              MOVE 'NOEXPIRE' TO SE-PASSWORD-EXPIRES                            
+           ELSE                                                                 
+              EXEC CICS FORMATTIME                                              
+                  ABSTIME(WS-EXPIRY-TIME)                                       
+                  YYYYMMDD(SE-PASSWORD-EXPIRES)                                 
+              END-EXEC.                                                         
+           IF WS-LAST-USE-TIME = -1                                             
+              MOVE 'NOEXPIRE' TO SE-LAST-USE                                    
+           ELSE                                                                 
+              EXEC CICS FORMATTIME                                              
+                  ABSTIME(WS-LAST-USE-TIME)                                     
+                  YYYYMMDD(SE-LAST-USE)                                         
+              END-EXEC.                                                         
+           MOVE WS-INVALID-ATTEMPTS TO SE-INVALID-ATTEMPTS.                     
+           MOVE WS-DAYS-LEFT        TO SE-DAYS-LEFT.                            
+                                                                                
+                                                                                
+      ******************************************************************        
+      * CHANGE USERS PASSWORD                                                   
+      *-----------------------------------------------------------------        
+      * PL-MESSAGE SHOWS UP IN THE CICS LOG.                                    
+      * SE-MESSAGE IS WHAT IS SENT TO THE REQUESTER.                            
+      ******************************************************************        
+       5000-CHANGE-PASSWORD.                                                    
+           EXEC CICS CHANGE                                                     
+207210         PASSWORD(SE-CURRENT-PASSWORD)                                    
+207210         NEWPASSWORD(SE-NEW-PASSWORD)                                     
+207210         USERID(SE-USERID)                                                
+               RESP(WS-RESP)                                                    
+               RESP2(WS-RESP2)                                                  
+           END-EXEC.                                                            
+           EVALUATE TRUE                                                        
+               WHEN WS-RESP = DFHRESP(USERIDERR)                                
+                   MOVE '-110'                   TO SE-RETURN-CODE              
+                   MOVE EM-MESSAGE1              TO PL-MESSAGE                  
+                   MOVE EM-MESSAGE-CHANGE-FAILED TO SE-MESSAGE                  
+               WHEN WS-RESP2 = 2                                                
+                   MOVE '-110'                   TO SE-RETURN-CODE              
+                   MOVE EM-MESSAGE2A             TO PL-MESSAGE                  
+                   MOVE EM-MESSAGE-CHANGE-FAILED TO SE-MESSAGE                  
+               WHEN WS-RESP2 = 4                                                
+                   MOVE '0004'                   TO SE-RETURN-CODE              
+                   MOVE EM-MESSAGE4              TO PL-MESSAGE                  
+                                                    SE-MESSAGE                  
+               WHEN WS-RESP2 = 13                                               
+                   MOVE '-110'                   TO SE-RETURN-CODE              
+                   MOVE EM-MESSAGE13             TO PL-MESSAGE                  
+                   MOVE EM-MESSAGE-INTERNAL-ERR  TO SE-MESSAGE                  
+               WHEN WS-RESP2 = 18                                               
+                   MOVE '-110'                   TO SE-RETURN-CODE              
+                   MOVE EM-MESSAGE18             TO PL-MESSAGE                  
+                   MOVE EM-MESSAGE-INTERNAL-ERR  TO SE-MESSAGE                  
+               WHEN WS-RESP2 = 19                                               
+                   MOVE '0019'                   TO SE-RETURN-CODE              
+                   MOVE EM-MESSAGE19             TO PL-MESSAGE                  
+                                                    SE-MESSAGE                  
+               WHEN WS-RESP2 = 22                                               
+                   MOVE '-110'                   TO SE-RETURN-CODE              
+                   MOVE EM-MESSAGE22             TO PL-MESSAGE                  
+                   MOVE EM-MESSAGE-CHANGE-FAILED TO SE-MESSAGE                  
+               WHEN WS-RESP2 = 29                                               
+                   MOVE '-110'                   TO SE-RETURN-CODE              
+                   MOVE EM-MESSAGE29             TO PL-MESSAGE                  
+                   MOVE EM-MESSAGE-INTERNAL-ERR  TO SE-MESSAGE                  
+               WHEN WS-RESP2 = 31                                               
+                   MOVE '0031'                   TO SE-RETURN-CODE              
+                   MOVE EM-MESSAGE31             TO PL-MESSAGE                  
+                                                    SE-MESSAGE                  
+               WHEN WS-RESP2 = 32                                               
+                   MOVE '-110'                   TO SE-RETURN-CODE              
+                   MOVE EM-MESSAGE32             TO PL-MESSAGE                  
+                   MOVE EM-MESSAGE-CHANGE-FAILED TO SE-MESSAGE                  
+               WHEN WS-RESP = 0                                                 
+                   MOVE '0000'                   TO SE-RETURN-CODE              
+                   MOVE EM-MESSAGEOK             TO PL-MESSAGE                  
+                                                    SE-MESSAGE                  
+           END-EVALUATE.                                                        
+                                                                                
+           IF WS-RESP = 0                                                       
+               MOVE SPACES TO PV-ACTION                                         
+               STRING 'Successful password change by ' SE-USERID                
+                      'on ' MQMD-REPLYTOQMGR                                    
+                 DELIMITED BY SIZE INTO PV-ACTION                               
+               PERFORM 6000-LOG-MESSAGE                                         
+           ELSE                                                                 
+               MOVE 'change'                     TO PL-ACTION                   
+               MOVE '5000-CHANGE-PASSWORD'       TO PL-PARAGRAPH                
+               PERFORM 6001-LOG-ERROR-MESSAGE.                                  
+                                                                                
+                                                                                
+                                                                                
+      ************************************************************              
+      * TAKE ADVANTAGE OF LOGGING ROUTINES IN ISWS005.                          
+      ************************************************************              
+       6000-LOG-MESSAGE.                                                        
+                                                                                
+           EXEC CICS ASKTIME                                                    
+               ABSTIME (IS-ABSTIME)                                             
+           END-EXEC.                                                            
+           EXEC CICS FORMATTIME                                                 
+               ABSTIME  (IS-ABSTIME)                                            
+               MMDDYYYY (IS-LOG-DATE)                                           
+               DATESEP                                                          
+               TIME     (IS-LOG-TIME)                                           
+               TIMESEP                                                          
+           END-EXEC.                                                            
+                                                                                
+           STRING ' ' PC-PGM-NAME                                               
+                  ' ' IS-LOG-DATE                                               
+                  ' ' IS-LOG-TIME                                               
+                  ' ' PV-ACTION                                                 
+             DELIMITED BY SIZE INTO IS-LOG-LINE.                                
+                                                                                
+           PERFORM 9002-ENQUEUE.                                                
+           PERFORM 9003-WRITEQ-TD.                                              
+           PERFORM 9004-DEQUEUE.                                                
+                                                                                
+                                                                                
+                                                                                
+       6001-LOG-ERROR-MESSAGE.                                                  
+           MOVE SE-USERID  TO PL-USERID.                                        
+           MOVE WS-RESP    TO PL-RESP.                                          
+           MOVE WS-RESP2   TO PL-RESP2.                                         
+                                                                                
+           EXEC CICS ASKTIME                                                    
+               ABSTIME (IS-ABSTIME)                                             
+           END-EXEC.                                                            
+           EXEC CICS FORMATTIME                                                 
+               ABSTIME  (IS-ABSTIME)                                            
+               MMDDYYYY (IS-LOG-DATE)                                           
+               DATESEP                                                          
+               TIME     (IS-LOG-TIME)                                           
+               TIMESEP                                                          
+           END-EXEC.                                                            
+                                                                                
+           PERFORM 9002-ENQUEUE.                                                
+           PERFORM VARYING PL-LOG-SUB FROM 1 BY 1                               
+                     UNTIL PL-LOG-SUB > 3                                       
+             STRING ' ' PC-PGM-NAME                                             
+                    ' ' IS-LOG-DATE                                             
+                    ' ' IS-LOG-TIME                                             
+                    ' ' PL-LOG-LINES (PL-LOG-SUB)                               
+               DELIMITED BY SIZE INTO IS-LOG-LINE                               
+             PERFORM 9003-WRITEQ-TD                                             
+           END-PERFORM.                                                         
+           PERFORM 9004-DEQUEUE.                                                
+                                                                                
+                                                                                
+                                                                                
+           COPY ISPD005.                                                        

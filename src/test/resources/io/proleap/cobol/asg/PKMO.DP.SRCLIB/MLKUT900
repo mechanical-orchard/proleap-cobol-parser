@@ -1,0 +1,662 @@
+       IDENTIFICATION DIVISION.                                                 
+       PROGRAM-ID.    MLKUT900                                                  
+       AUTHOR.        D. THEEL                                                  
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+       DATE-WRITTEN.  07-25-2006.                                               
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      * MLKUT900 - PERM PRICE CHANGE SPLIT                                      
+      ******************************************************************        
+      * ONE TIME PROGRAM TO TAKE IN PERM PRICE CHANGE FILE AND SPLIT    00290000
+      * INTO A CURRENT AND NEXT PERM PRICE CHANGE FILE.  THE THIRD      00290000
+      * OUTPUT FILE IS AN ERROR FILE, WHICH WILL CONTAIN ANY RECORDS            
+      * WHERE THE SKU IS NOT ON TSKXREF OR THE SKU/STORE COMBINATION            
+      * IS NOT ON TSKST.  IF THIS CONDITION OCCURS, THE PROGRAM WILL            
+      * RETURN A 4095. THE INPUT FILE IS SORTED BY SKU/STORE AND ALL            
+      * FILES ARE IN MLRD017 FORMAT.                                            
+      * PROCESS FLOW:                                                           
+      * GET ITEM NUMBER FOR EACH SKU                                            
+      * FOR EACH SKU/STORE COMBINATION                                          
+      *  GET ONHAND QTY FROM TSKST                                              
+      *  CALCULATE THE DIFFERENCE BETWEEN THE INPUT ONHAND QTY AND              
+      *     TSKST.                                                              
+      *  IF THE DIFFERENCE IS > ZERO                                            
+      *   WRITE OUT OUT01 POPULATING THE ONHAND QTY WITH THIS DIFFERENCE        
+      *  IF THE TSKST ONHAND QTY > ZERO                                         
+      *   WRITE OUT OUT02 POPULATING THE ONHAND QTY AS FOLLOWS:                 
+      *     IF THE CALCULATED ONHAND IS < ZERO                                  
+      *       KEEP THE INPUT ONHAND FOR THE OUTPUT                              
+      *     ELSE                                                                
+      *       MOVE THE TSKST ONHAND QTY TO THE OUTPUT                           
+      *  SUMS OF INPUT FILE AND EACH OUTPUT FILE ARE INCLUDES IN                
+      *  THE END OF JOB DISPLAY.                                                
+      ******************************************************************        
+      ******************************************************************        
+      *                        CHANGE LOG                              *        
+      *  CHNGE DTE   PERSON     CHG ID     REASON FOR CHANGE           *        
+      *  ----------  ---------- ---------  -------------------------   *        
+21731 *  07/25/2006  D. THEEL   WR30723   INITIAL CREATION             *        
+SR3403*  03/01/2012  T. KARWEER SR3403    LARGE RETAIL AMOUNT FIELD    *        
+SR3403*                                   EXPANSION                    *        
+      ******************************************************************        
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+                                                                                
+       CONFIGURATION SECTION.                                                   
+       SOURCE-COMPUTER.    IBM-3090.                                            
+       OBJECT-COMPUTER.    IBM-3090.                                            
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+       FILE-CONTROL.                                                            
+           SELECT ML-PERM-PRICE-CHG                                             
+               ASSIGN TO INP01.                                                 
+                                                                                
+           SELECT OUT-FILE1                                                     
+               ASSIGN TO OUT01.                                                 
+R27813                                                                          
+R27813     SELECT OUT-FILE2                                                     
+R27813         ASSIGN TO OUT02.                                                 
+                                                                                
+R27813     SELECT OUT-FILE3                                                     
+R27813         ASSIGN TO OUT03.                                                 
+                                                                                
+       DATA DIVISION.                                                           
+                                                                                
+       FILE SECTION.                                                            
+                                                                                
+       FD  ML-PERM-PRICE-CHG                                                    
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK  CONTAINS   0 RECORDS                                          
+W29145     RECORD CONTAINS 200 CHARACTERS                                       
+           DATA RECORD IS ML-PERM-PRICE-CHG-REC.                                
+                                                                                
+W29145 01  ML-PERM-PRICE-CHG-REC         PIC X(200).                            
+                                                                                
+       FD  OUT-FILE1                                                            
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK  CONTAINS   0 RECORDS                                          
+W26603     RECORD CONTAINS 200 CHARACTERS                                       
+           DATA RECORD IS OUT-FILE1-REC.                                        
+                                                                                
+W26603 01  OUT-FILE1-REC                  PIC X(200).                           
+                                                                                
+       FD  OUT-FILE2                                                            
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK  CONTAINS   0 RECORDS                                          
+W26603     RECORD CONTAINS 200 CHARACTERS                                       
+           DATA RECORD IS OUT-FILE2-REC.                                        
+                                                                                
+W26603 01  OUT-FILE2-REC                  PIC X(200).                           
+                                                                                
+       FD  OUT-FILE3                                                            
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK  CONTAINS   0 RECORDS                                          
+W26603     RECORD CONTAINS 200 CHARACTERS                                       
+           DATA RECORD IS OUT-FILE3-REC.                                        
+                                                                                
+W26603 01  OUT-FILE3-REC                  PIC X(200).                           
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  FILLER                          PIC X(40)       VALUE                
+           '*** WORKING STORAGE AREA BEGIN ***'.                                
+                                                                                
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-PROGRAM-NAME               PIC X(08) VALUE 'MLKUT900'.        
+           05  PC-MAXIMUM-RETRY-COUNT         PIC S9(04)   VALUE +2             
+                                                           COMP SYNC.           
+      *                                                                         
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-INPUT-EOF-SW               PIC X(1)     VALUE 'N'.            
+               88  PS-INPUT-EOF                           VALUE 'Y'.            
+           05  PS-SKU-INFO-FOUND-SW           PIC  X(01)   VALUE 'N'.           
+               88  PS-SKU-INFO-FOUND                       VALUE 'Y'.           
+           05  PS-SKU-STORE-FOUND-SW          PIC  X(01)   VALUE 'N'.           
+               88  PS-SKU-STORE-FOUND                      VALUE 'Y'.           
+                                                                                
+       01  PV-PROGRAM-VARIABLES.                                                
+           05  PV-RETRY-COUNT                 PIC S9(04)   VALUE +0             
+                                                           COMP.                
+           05  PV-SAVE-SKU                PIC 9(08)      VALUE ZEROES.          
+           05  PV-INPUT-SKU-NUM           PIC 9(08)      VALUE ZEROES.          
+           05  PV-LOC-NBR-NUM5            PIC 9(05)      VALUE ZEROES.          
+           05  PV-LOC-NBR-COMP5           PIC S9(5)      COMP VALUE +0.         
+           05  PV-INPUT-QTY               PIC S9(7)V     VALUE ZEROES           
+                                                         COMP-3.                
+           05  PV-CALC-ONHAND             PIC S9(7)V     VALUE ZEROES           
+                                                         COMP-3.                
+019200     05  PV-PARAGRAPH-NAME          PIC X(30)      VALUE SPACE.           
+           05  PV-SQLCODE-DISPLAY         PIC +(8)9      VALUE ZEROES.  00830000
+019300     05  PV-DB2-OPER-ATTEMPTED      PIC X(30)      VALUE SPACE.           
+           05  PV-INPUT-RECS-READ         PIC 9(09)      VALUE ZEROES.          
+           05  PV-OUT01-RECS-WRITTEN      PIC 9(09)      VALUE ZEROES.          
+           05  PV-OUT02-RECS-WRITTEN      PIC 9(09)      VALUE ZEROES.          
+           05  PV-OUT03-RECS-WRITTEN      PIC 9(09)      VALUE ZEROES.          
+           05  PV-INPUT-OH-SUM            PIC 9(12)      VALUE ZEROES.          
+           05  PV-OUT01-OH-SUM            PIC 9(12)      VALUE ZEROES.          
+           05  PV-OUT02-OH-SUM            PIC 9(12)      VALUE ZEROES.          
+           05  PV-TSKST-SELECTS           PIC 9(09)      VALUE ZEROES.          
+           05  PV-TSKXREF-SELECTS         PIC 9(09)      VALUE ZEROES.          
+                                                                                
+       01  ABEND-CODE                       PIC S9(04)   VALUE +0               
+                                                          COMP SYNC.            
+       01  ERROR-CODE                       PIC S9(04)  VALUE +0                
+                                                         COMP SYNC.             
+000100 01  OUT01-PRICE-CHANGE-RECORD.                                   11/12/93
+000200     05  OUT01-PC-CDE                  PIC  X(1).                 MLRD017 
+000300         88  OUT01-VALID-PC-CDE        VALUE '4' '5'.                LV002
+000400         88  OUT01-MKDOWN              VALUE '4'.                 MLRD017 
+000500         88  OUT01-MKUP                VALUE '5'.                 MLRD017 
+000600     05  OUT01-PC-TYP-CDE              PIC  X(1).                 MLRD017 
+000500         88  OUT01-MARKDOWN            VALUE '1'.                 MLRD017 
+000500         88  OUT01-MARKDOWN-CANCEL     VALUE '2'.                 MLRD017 
+000500         88  OUT01-MARKUP              VALUE '3'.                 MLRD017 
+000500         88  OUT01-MARKUP-CANCEL       VALUE '4'.                 MLRD017 
+000700     05  OUT01-SLS-CORR-CDE            PIC  X(1).                 MLRD017 
+000800         88  OUT01-NORMAL-TRANS        VALUE ' '.                         
+000900         88  OUT01-SALES-AUDIT-CORR    VALUE 'S'.                         
+001000         88  OUT01-SYSTEM-LATE-CORR    VALUE 'L'.                         
+001100     05  OUT01-PC-DOC-5-NBR            PIC  X(5).                 MLRD017 
+001200     05  FILLER REDEFINES OUT01-PC-DOC-5-NBR.                     MLRD017 
+001300         10  OUT01-PC-DOC-5-DEPT       PIC  9(3).                 MLRD017 
+001400         10  OUT01-PC-DOC-5-DAY        PIC  9(2).                 MLRD017 
+001500     05  OUT01-PC-DTE.                                            MLRD017 
+001600         10  OUT01-PC-DTE-MM           PIC  9(2).                 MLRD017 
+001700         10  OUT01-PC-DTE-DD           PIC  9(2).                 MLRD017 
+001800     05  OUT01-PC-KOHLS-MM             PIC  X(2).                 MLRD017 
+W21731     05  OUT01-PC-SKU                  PIC  X(8).                 MLRD017 
+W21731     05  FILLER REDEFINES OUT01-PC-SKU.                           MLRD017 
+W21731         10  FILLER                    PIC  9(5).                 MLRD017 
+W21731         10  OUT01-PC-SEQ-NBR          PIC  9(3).                 MLRD017 
+002500     05  OUT01-PC-RSN-CDE              PIC  X(1).                 MLRD017 
+001000         88  OUT01-RC-VALID-MKDN-RSN   VALUE '1', '2', '3',               
+                                                   '4', '5', '6'.               
+001000         88  OUT01-RC-VALID-MKUP-RSN   VALUE '1', '2', '3',               
+                                                   '4', '5'.                    
+001000         88  OUT01-RC-PROMOTIONAL      VALUE '1'.                         
+001000         88  OUT01-RC-FREE-WITH-PURCH  VALUE '4'.                         
+001000         88  OUT01-RC-MISCELLANEOUS    VALUE '5'.                         
+                                                                                
+SR3403     05  OUT01-PC-OLD-PR-AMT           PIC  9(5)V99.              MLRD017 
+SR3403     05  OUT01-PC-NEW-PR-AMT           PIC  9(5)V99.              MLRD017 
+002800     05  OUT01-PC-QTY                  PIC  9(4).                 MLRD017 
+002900     05  FILLER                        PIC  X(1) VALUE SPACE.     MLRD017 
+003000     05  OUT01-PC-BATCH-NBR            PIC  X(3).                 MLRD017 
+001000         88  OUT01-BN-MANUAL-LID-CRCT  VALUE '799'.                       
+001000         88  OUT01-BN-OWN-ADJ-CRCT     VALUE '797'.                       
+001000         88  OUT01-BN-FWP-VOID-CRCT    VALUE '771'.                       
+001000         88  OUT01-BN-MANUAL-LID       VALUE '798'.                       
+001000         88  OUT01-BN-KOHLS-COUPON     VALUE '733'.                       
+001000         88  OUT01-BN-SENIOR-CITZ-DISC VALUE '728'.                       
+001000         88  OUT01-BN-OWN-ADJ          VALUE '796'.                       
+001000         88  OUT01-BN-GOLDSTAR         VALUE '753'.                       
+001000         88  OUT01-BN-PROMOTIONAL      VALUE '746'.                       
+W25349         88  OUT01-BN-BOGO             VALUE '775'.                       
+W26130         88  OUT01-BN-BOGO-II          VALUE '777'.                       
+W28545         88  OUT01-BN-UNEARNED-RWDS    VALUE '780'.                       
+001000         88  OUT01-BN-OWN-RTN-ADJ      VALUE '792'.                       
+001000         88  OUT01-BN-EMPLY-DISCOUNT   VALUE '790'.                       
+003100     05  OUT01-PC-MKDN-MKUP-RSN-CDE    PIC  X(3).                    CL**2
+SR3403     05  OUT01-PC-DIFFER-AMT           PIC S9(5)V99.                 CL**2
+003400     05  OUT01-PC-TOT-DOC-QTY          PIC  9(5).                 MLRD017 
+W26603     05  OUT01-PC-STORE-NBR            PIC  X(5).                 MLRD017 
+003600     05  FILLER                        PIC  X(1) VALUE SPACE.     MLRD017 
+003700     05  OUT01-PC-CATEG-CDE            PIC  X(1).                 MLRD017 
+001000         88  OUT01-PLU-MKDN-MKON       VALUE '1'.                         
+001000         88  OUT01-REGISTER-MKDN-MKON  VALUE '2'.                         
+001000         88  OUT01-UNMATCHED-MKDN-MKON VALUE '3'.                         
+001000         88  OUT01-BUYER-MKDN-MKON     VALUE '4'.                         
+001000         88  OUT01-STORE-MKDN-MKON     VALUE '5'.                         
+003800     05  OUT01-PC-DOC-7-NBR            PIC  X(7).                 MLRD017 
+W21731     05  OUT01-PC-DOC-7-NBR-PIC9       REDEFINES                          
+W21731         OUT01-PC-DOC-7-NBR            PIC  9(7).                         
+W21731     05  FILLER REDEFINES OUT01-PC-DOC-7-NBR.                     MLRD017 
+004000         10  OUT01-PC-CATEGORY-IND     PIC  9(2).                 MLRD017 
+004100         10  OUT01-PC-DOC-NBR.                                    MLRD017 
+004200             15  OUT01-PC-DOC-DEPT     PIC  9(3).                 MLRD017 
+004300             15  OUT01-PC-DOC-DAY      PIC  9(2).                 MLRD017 
+1099RR     05  FILLER                        PIC  X(01) VALUE SPACE.    MLRD017 
+1099RM     05  OUT01-PC-VENDOR-INHSE-NMBR    PIC  X(03).                MLRD017 
+W21731     05  FILLER                        PIC  X(02).                MLRD012I
+W21732     05  OUT01-PC-LINE-NBR         PIC S9(04) COMP VALUE ZEROS.   MLRD017 
+W21731     05  OUT01-PC-SKU-DTA-ATTRIB.                                 MLRD017 
+W21731         10  OUT01-PC-DEPT-CLASS       PIC  X(05).                MLRD017 
+W21731         10  OUT01-PC-DEPT-CLASS-NUM  REDEFINES                   MLRD017 
+W21731             OUT01-PC-DEPT-CLASS.                                 MLRD017 
+W21731             15  OUT01-PC-DEPT-NBR     PIC  9(03).                MLRD017 
+W21731             15  OUT01-PC-CLASS-NBR    PIC  9(02).                MLRD017 
+W21731         10  OUT01-PC-MAJ-CLASS        PIC  X(04).                MLRD017 
+W26603     05  OUT01-POS-NBR.                                                   
+W26603         10  OUT01-RGST-ID             PIC  S9(04) COMP.                  
+W26603         10  OUT01-TRN-NBR             PIC  S9(04) COMP.          MLRD017 
+W26603         10  OUT01-LNE-ITM-SEQ-NBR     PIC  S9(04) COMP.          MLRD017 
+W26603     05  OUT01-GMM                     PIC X(02).                 MLRD017 
+W26603     05  FILLER REDEFINES OUT01-GMM.                              MLRD017 
+W26603         10  OUT01-FILLER              PIC X(01).                 MLRD017 
+W26603         10  OUT01-DIVISION-NUMBER     PIC 9(01).                 MLRD017 
+W26603     05  OUT01-DMM                     PIC X(02).                 MLRD017 
+W26603     05  OUT01-MANAGER-NBR REDEFINES OUT01-DMM PIC 9(02).                 
+W26603     05  OUT01-BUYER                   PIC X(03).                 MLRD017 
+W26603     05  FILLER REDEFINES OUT01-BUYER.                            MLRD017 
+W26603         10  FILLER                    PIC X(01).                 MLRD017 
+W26603         10  OUT01-BUYER-NUMBER        PIC 9(02).                 MLRD017 
+W26603     05  OUT01-PC-ENT-ID               PIC S9(9) COMP.            MLRD017 
+W29145     05  OUT01-ORIG-CLR-DTE            PIC X(10).                 MLRD017 
+W29145     05  OUT01-MKDN-CDE                PIC X(01).                 MLRD017 
+SR3403     05  OUT01-ORIG-CLR-NONGRP-RTL     PIC 9(5)V99 VALUE ZERO.    MLRD017 
+S29145     05  OUT01-PC-DA.                                             MLRD017 
+S29145         10  OUT01-PC-DOC-16-NBR       PIC X(16)  VALUE SPACES.   MLRD017 
+S29145         10  OUT01-PC-AP-TRANS-CDE     PIC X(02)  VALUE SPACES.   MLRD017 
+SR3403     05  FILLER                        PIC X(56)  VALUE SPACES.   MLRD017 
+                                                                                
+000100 01  OUT02-PRICE-CHANGE-RECORD.                                   11/12/93
+000200     05  OUT02-PC-CDE                  PIC  X(1).                 MLRD017 
+000300         88  OUT02-VALID-PC-CDE        VALUE '4' '5'.                LV002
+000400         88  OUT02-MKDOWN              VALUE '4'.                 MLRD017 
+000500         88  OUT02-MKUP                VALUE '5'.                 MLRD017 
+000600     05  OUT02-PC-TYP-CDE              PIC  X(1).                 MLRD017 
+000500         88  OUT02-MARKDOWN            VALUE '1'.                 MLRD017 
+000500         88  OUT02-MARKDOWN-CANCEL     VALUE '2'.                 MLRD017 
+000500         88  OUT02-MARKUP              VALUE '3'.                 MLRD017 
+000500         88  OUT02-MARKUP-CANCEL       VALUE '4'.                 MLRD017 
+000700     05  OUT02-SLS-CORR-CDE            PIC  X(1).                 MLRD017 
+000800         88  OUT02-NORMAL-TRANS        VALUE ' '.                         
+000900         88  OUT02-SALES-AUDIT-CORR    VALUE 'S'.                         
+001000         88  OUT02-SYSTEM-LATE-CORR    VALUE 'L'.                         
+001100     05  OUT02-PC-DOC-5-NBR            PIC  X(5).                 MLRD017 
+001200     05  FILLER REDEFINES OUT02-PC-DOC-5-NBR.                     MLRD017 
+001300         10  OUT02-PC-DOC-5-DEPT       PIC  9(3).                 MLRD017 
+001400         10  OUT02-PC-DOC-5-DAY        PIC  9(2).                 MLRD017 
+001500     05  OUT02-PC-DTE.                                            MLRD017 
+001600         10  OUT02-PC-DTE-MM           PIC  9(2).                 MLRD017 
+001700         10  OUT02-PC-DTE-DD           PIC  9(2).                 MLRD017 
+001800     05  OUT02-PC-KOHLS-MM             PIC  X(2).                 MLRD017 
+W21731     05  OUT02-PC-SKU                  PIC  X(8).                 MLRD017 
+W21731     05  FILLER REDEFINES OUT02-PC-SKU.                           MLRD017 
+W21731         10  FILLER                    PIC  9(5).                 MLRD017 
+W21731         10  OUT02-PC-SEQ-NBR          PIC  9(3).                 MLRD017 
+002500     05  OUT02-PC-RSN-CDE              PIC  X(1).                 MLRD017 
+001000         88  OUT02-RC-VALID-MKDN-RSN   VALUE '1', '2', '3',               
+                                                   '4', '5', '6'.               
+001000         88  OUT02-RC-VALID-MKUP-RSN   VALUE '1', '2', '3',               
+                                                   '4', '5'.                    
+001000         88  OUT02-RC-PROMOTIONAL      VALUE '1'.                         
+001000         88  OUT02-RC-FREE-WITH-PURCH  VALUE '4'.                         
+001000         88  OUT02-RC-MISCELLANEOUS    VALUE '5'.                         
+                                                                                
+SR3403     05  OUT02-PC-OLD-PR-AMT           PIC  9(5)V99.              MLRD017 
+SR3403     05  OUT02-PC-NEW-PR-AMT           PIC  9(5)V99.              MLRD017 
+002800     05  OUT02-PC-QTY                  PIC  9(4).                 MLRD017 
+002900     05  FILLER                        PIC  X(1) VALUE SPACE.     MLRD017 
+003000     05  OUT02-PC-BATCH-NBR            PIC  X(3).                 MLRD017 
+001000         88  OUT02-BN-MANUAL-LID-CRCT  VALUE '799'.                       
+001000         88  OUT02-BN-OWN-ADJ-CRCT     VALUE '797'.                       
+001000         88  OUT02-BN-FWP-VOID-CRCT    VALUE '771'.                       
+001000         88  OUT02-BN-MANUAL-LID       VALUE '798'.                       
+001000         88  OUT02-BN-KOHLS-COUPON     VALUE '733'.                       
+001000         88  OUT02-BN-SENIOR-CITZ-DISC VALUE '728'.                       
+001000         88  OUT02-BN-OWN-ADJ          VALUE '796'.                       
+001000         88  OUT02-BN-GOLDSTAR         VALUE '753'.                       
+001000         88  OUT02-BN-PROMOTIONAL      VALUE '746'.                       
+W25349         88  OUT02-BN-BOGO             VALUE '775'.                       
+W26130         88  OUT02-BN-BOGO-II          VALUE '777'.                       
+W28545         88  OUT02-BN-UNEARNED-RWDS    VALUE '780'.                       
+001000         88  OUT02-BN-OWN-RTN-ADJ      VALUE '792'.                       
+001000         88  OUT02-BN-EMPLY-DISCOUNT   VALUE '790'.                       
+003100     05  OUT02-PC-MKDN-MKUP-RSN-CDE    PIC  X(3).                    CL**2
+SR3403     05  OUT02-PC-DIFFER-AMT           PIC S9(5)V99.                 CL**2
+003400     05  OUT02-PC-TOT-DOC-QTY          PIC  9(5).                 MLRD017 
+W26603     05  OUT02-PC-STORE-NBR            PIC  X(5).                 MLRD017 
+003600     05  FILLER                        PIC  X(1) VALUE SPACE.     MLRD017 
+003700     05  OUT02-PC-CATEG-CDE            PIC  X(1).                 MLRD017 
+001000         88  OUT02-PLU-MKDN-MKON       VALUE '1'.                         
+001000         88  OUT02-REGISTER-MKDN-MKON  VALUE '2'.                         
+001000         88  OUT02-UNMATCHED-MKDN-MKON VALUE '3'.                         
+001000         88  OUT02-BUYER-MKDN-MKON     VALUE '4'.                         
+001000         88  OUT02-STORE-MKDN-MKON     VALUE '5'.                         
+003800     05  OUT02-PC-DOC-7-NBR            PIC  X(7).                 MLRD017 
+W21731     05  OUT02-PC-DOC-7-NBR-PIC9       REDEFINES                          
+W21731         OUT02-PC-DOC-7-NBR            PIC  9(7).                         
+W21731     05  FILLER REDEFINES OUT02-PC-DOC-7-NBR.                     MLRD017 
+004000         10  OUT02-PC-CATEGORY-IND     PIC  9(2).                 MLRD017 
+004100         10  OUT02-PC-DOC-NBR.                                    MLRD017 
+004200             15  OUT02-PC-DOC-DEPT     PIC  9(3).                 MLRD017 
+004300             15  OUT02-PC-DOC-DAY      PIC  9(2).                 MLRD017 
+1099RR     05  FILLER                        PIC  X(01) VALUE SPACE.    MLRD017 
+1099RM     05  OUT02-PC-VENDOR-INHSE-NMBR    PIC  X(03).                MLRD017 
+W21731     05  FILLER                        PIC  X(02).                MLRD012I
+W21732     05  OUT02-PC-LINE-NBR         PIC S9(04) COMP VALUE ZEROS.   MLRD017 
+W21731     05  OUT02-PC-SKU-DTA-ATTRIB.                                 MLRD017 
+W21731         10  OUT02-PC-DEPT-CLASS       PIC  X(05).                MLRD017 
+W21731         10  OUT02-PC-DEPT-CLASS-NUM  REDEFINES                   MLRD017 
+W21731             OUT02-PC-DEPT-CLASS.                                 MLRD017 
+W21731             15  OUT02-PC-DEPT-NBR     PIC  9(03).                MLRD017 
+W21731             15  OUT02-PC-CLASS-NBR    PIC  9(02).                MLRD017 
+W21731         10  OUT02-PC-MAJ-CLASS        PIC  X(04).                MLRD017 
+W26603     05  OUT02-POS-NBR.                                                   
+W26603         10  OUT02-RGST-ID             PIC  S9(04) COMP.                  
+W26603         10  OUT02-TRN-NBR             PIC  S9(04) COMP.          MLRD017 
+W26603         10  OUT02-LNE-ITM-SEQ-NBR     PIC  S9(04) COMP.          MLRD017 
+W26603     05  OUT02-GMM                     PIC X(02).                 MLRD017 
+W26603     05  FILLER REDEFINES OUT02-GMM.                              MLRD017 
+W26603         10  OUT02-FILLER              PIC X(01).                 MLRD017 
+W26603         10  OUT02-DIVISION-NUMBER     PIC 9(01).                 MLRD017 
+W26603     05  OUT02-DMM                     PIC X(02).                 MLRD017 
+W26603     05  OUT02-MANAGER-NBR REDEFINES OUT02-DMM PIC 9(02).                 
+W26603     05  OUT02-BUYER                   PIC X(03).                 MLRD017 
+W26603     05  FILLER REDEFINES OUT02-BUYER.                            MLRD017 
+W26603         10  FILLER                    PIC X(01).                 MLRD017 
+W26603         10  OUT02-BUYER-NUMBER        PIC 9(02).                 MLRD017 
+W26603     05  OUT02-PC-ENT-ID               PIC S9(9) COMP.            MLRD017 
+W29145     05  OUT02-ORIG-CLR-DTE            PIC X(10).                 MLRD017 
+W29145     05  OUT02-MKDN-CDE                PIC X(01).                 MLRD017 
+SR3403     05  OUT02-ORIG-CLR-NONGRP-RTL     PIC 9(5)V99 VALUE ZERO.    MLRD017 
+S29145     05  OUT02-PC-DA.                                             MLRD017 
+S29145         10  OUT02-PC-DOC-16-NBR       PIC X(16)  VALUE SPACES.   MLRD017 
+S29145         10  OUT02-PC-AP-TRANS-CDE     PIC X(02)  VALUE SPACES.   MLRD017 
+SR3403     05  FILLER                        PIC X(56)  VALUE SPACES.   MLRD017 
+      ******************************************************************        
+      *  FASHION SALES SKU STORE TABLE                                          
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TSKST                                                    
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  SKU CROSS REFERENCE FILE                                               
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TSKXREF                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *    DB2 COMMUNICATION AREA                                               
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+           COPY SQLCA2.                                                         
+                                                                                
+      *****************************************************************         
+      ***************************************************************** 00120000
+21731 *  MERCHANDISE LEDGER MARKDOWN/MARKON RECORD LAYOUT - INPUT AND   00130000
+21731 *                                                     OUTPUT.     00130000
+      ***************************************************************** 00140000
+W26603     COPY MLRD017.                                                00000400
+                                                                                
+010900******************************************************************        
+011000*  VARIABLES REQUIRED FOR THE FORMAT SQLCA ROUTINE DPPD004                
+011100******************************************************************        
+011200                                                                          
+011300     COPY DPWS004.                                                        
+011400                                                                          
+                                                                                
+      *                                                                         
+       PROCEDURE DIVISION.                                                      
+                                                                                
+       0000-MLKUT900.                                                           
+                                                                                
+      ****************************************************************          
+      *    OPEN ALL FILES.                                                      
+      *    PROCESS.                                                             
+      *    CLOSE ALL FILES.                                                     
+      ****************************************************************          
+                                                                                
+           OPEN INPUT  ML-PERM-PRICE-CHG                                        
+                OUTPUT OUT-FILE1                                                
+R27813                 OUT-FILE2                                                
+R27813                 OUT-FILE3.                                               
+                                                                                
+           PERFORM 1000-INITIALIZE.                                             
+                                                                                
+           PERFORM 2000-PROCESS                                                 
+               UNTIL PS-INPUT-EOF.                                              
+                                                                                
+           PERFORM 3000-EOJ-PROCESSING.                                         
+                                                                                
+           STOP RUN.                                                            
+                                                                                
+       1000-INITIALIZE.                                                         
+                                                                                
+27813      PERFORM 4100-READ-FILE.                                              
+           IF PS-INPUT-EOF                                                      
+               DISPLAY ' '                                                      
+               DISPLAY '***********************************'                    
+               DISPLAY ' NO INPUT RECS TO PROCESS.'                             
+               DISPLAY '***********************************'                    
+               DISPLAY ' '                                                      
+           END-IF.                                                              
+                                                                                
+                                                                                
+       2000-PROCESS.                                                            
+                                                                                
+           MOVE ML017-PC-SKU             TO PV-INPUT-SKU-NUM.                   
+           MOVE ML017-PC-QTY             TO PV-INPUT-QTY.                       
+           ADD PV-INPUT-QTY              TO PV-INPUT-OH-SUM.                    
+           IF PV-INPUT-SKU-NUM = PV-SAVE-SKU                                    
+               CONTINUE                                                         
+           ELSE                                                                 
+               PERFORM 5500-GET-ITEM                                            
+           END-IF.                                                              
+           IF PS-SKU-INFO-FOUND                                                 
+               PERFORM 5000-GET-ONHAND                                          
+               IF PS-SKU-STORE-FOUND                                            
+                   COMPUTE PV-CALC-ONHAND =                                     
+                              PV-INPUT-QTY - TSKST-ONHAND-QTY                   
+                   IF PV-CALC-ONHAND > ZERO                                     
+                       PERFORM 6100-WRITE-OUT01                                 
+                   END-IF                                                       
+                   IF TSKST-ONHAND-QTY > 0                                      
+                       PERFORM 6200-WRITE-OUT02                                 
+                   END-IF                                                       
+               END-IF                                                           
+           ELSE                                                                 
+               PERFORM 6300-WRITE-OUT03                                         
+           END-IF.                                                              
+           MOVE PV-INPUT-SKU-NUM TO PV-SAVE-SKU.                                
+27813      PERFORM 4100-READ-FILE.                                              
+                                                                                
+      ******************************************************************        
+      * 3000-EOJ-PROCESSING.                                           *        
+      *    - CLOSE FILES                                               *        
+      *    - DISPLAYS PROCESSING TOTALS                                *        
+      ******************************************************************        
+       3000-EOJ-PROCESSING.                                                     
+           MOVE '3000-EOJ-PROCESSING' TO PV-PARAGRAPH-NAME.                     
+                                                                                
+           CLOSE ML-PERM-PRICE-CHG                                              
+                 OUT-FILE1                                                      
+R27813           OUT-FILE2                                                      
+R27813           OUT-FILE3.                                                     
+                                                                                
+           PERFORM 9990-DISPLAY-CONTROL-INFO.                                   
+           MOVE ERROR-CODE TO RETURN-CODE.                                      
+                                                                                
+                                                                                
+27813 ****************************************************************          
+27813 *  4100-READ-FILE.                                                        
+27813 ****************************************************************          
+27813  4100-READ-FILE.                                                          
+27813                                                                           
+           MOVE '4100-READ-FILE' TO PV-PARAGRAPH-NAME.                          
+                                                                                
+           READ ML-PERM-PRICE-CHG                                               
+               INTO ML017-PRICE-CHANGE-RECORD                                   
+                   AT END                                                       
+                       MOVE 'Y'     TO PS-INPUT-EOF-SW                          
+                   NOT AT END                                                   
+                       ADD 1                  TO PV-INPUT-RECS-READ             
+           END-READ.                                                            
+                                                                                
+                                                                                
+      ******************************************************************        
+      *5000-GET-ONHAND.                                                         
+      ******************************************************************        
+       5000-GET-ONHAND.                                                         
+           MOVE '5000-GET-ONHAND' TO PV-PARAGRAPH-NAME.                         
+           MOVE SKXREF-ITM-NBR TO TSKST-ITEM-NMBR.                              
+           MOVE ML017-PC-STORE-NBR TO PV-LOC-NBR-NUM5.                          
+           MOVE PV-LOC-NBR-NUM5    TO PV-LOC-NBR-COMP5.                         
+           MOVE PV-LOC-NBR-COMP5   TO TSKST-LOC-NBR.                            
+           INITIALIZE PV-RETRY-COUNT.                                           
+           PERFORM  WITH TEST AFTER                                             
+             UNTIL SQLCODE = ZERO                                               
+               OR  SQLCODE = +100                                               
+               OR  PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                      
+               EXEC SQL                                                         
+                  SELECT  ONHAND_QTY                                            
+                    INTO :TSKST-ONHAND-QTY                                      
+                   FROM  TSKST                                                  
+                   WHERE ITEM_NMBR = :TSKST-ITEM-NMBR                           
+                     AND LOC_NBR   = :TSKST-LOC-NBR                             
+                   WITH UR                                                      
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       ADD 1 TO PV-TSKST-SELECTS                                
+                       SET PS-SKU-STORE-FOUND TO TRUE                           
+                   WHEN SQLCODE = +100                                          
+                       MOVE 'N' TO PS-SKU-STORE-FOUND-SW                        
+                   WHEN SQLCODE = -913                                          
+                       ADD +1      TO PV-RETRY-COUNT                            
+                   WHEN OTHER                                                   
+                       MOVE 'SELECT TSKST'                                      
+                                   TO PV-DB2-OPER-ATTEMPTED                     
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                           
+               MOVE 'SELECT TSKST'                                              
+                                   TO PV-DB2-OPER-ATTEMPTED                     
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+       5500-GET-ITEM.                                                           
+           MOVE '5500-GET-ITEM' TO PV-PARAGRAPH-NAME.                           
+           MOVE PV-INPUT-SKU-NUM TO SKXREF-SKU.                                 
+           INITIALIZE PV-RETRY-COUNT.                                           
+           PERFORM  WITH TEST AFTER                                             
+             UNTIL SQLCODE = ZERO                                               
+               OR  SQLCODE = +100                                               
+               OR  PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                      
+               EXEC SQL                                                         
+                  SELECT  ITM_NBR                                               
+                    INTO :SKXREF-ITM-NBR                                        
+                   FROM  TSKXREF                                                
+                   WHERE SKU       = :SKXREF-SKU                                
+                   WITH UR                                                      
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       ADD 1 TO PV-TSKXREF-SELECTS                              
+                       SET PS-SKU-INFO-FOUND TO TRUE                            
+                   WHEN SQLCODE = +100                                          
+                       MOVE 'N' TO PS-SKU-INFO-FOUND-SW                         
+                   WHEN SQLCODE = -913                                          
+                       ADD +1      TO PV-RETRY-COUNT                            
+                   WHEN OTHER                                                   
+                       MOVE 'SELECT TSKXREF'                                    
+                                   TO PV-DB2-OPER-ATTEMPTED                     
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                           
+               MOVE 'SELECT TSKXREF'                                            
+                                   TO PV-DB2-OPER-ATTEMPTED                     
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+       6100-WRITE-OUT01.                                                        
+           MOVE ML017-PRICE-CHANGE-RECORD TO                                    
+                             OUT01-PRICE-CHANGE-RECORD.                         
+           IF TSKST-ONHAND-QTY >= ZERO                                          
+               MOVE PV-CALC-ONHAND TO OUT01-PC-QTY                              
+           END-IF.                                                              
+           WRITE OUT-FILE1-REC FROM OUT01-PRICE-CHANGE-RECORD.                  
+           ADD 1                   TO PV-OUT01-RECS-WRITTEN.                    
+           IF TSKST-ONHAND-QTY >= ZERO                                          
+               ADD PV-CALC-ONHAND TO PV-OUT01-OH-SUM                            
+           ELSE                                                                 
+               ADD ML017-PC-QTY TO PV-OUT01-OH-SUM                              
+           END-IF.                                                              
+                                                                                
+       6200-WRITE-OUT02.                                                        
+           MOVE ML017-PRICE-CHANGE-RECORD TO                                    
+                             OUT02-PRICE-CHANGE-RECORD.                         
+           IF PV-CALC-ONHAND < ZERO                                             
+              OR TSKST-ONHAND-QTY < ZERO                                        
+              ADD ML017-PC-QTY TO PV-OUT02-OH-SUM                               
+           ELSE                                                                 
+              MOVE TSKST-ONHAND-QTY TO OUT02-PC-QTY                             
+              ADD TSKST-ONHAND-QTY TO PV-OUT02-OH-SUM                           
+           END-IF.                                                              
+           WRITE OUT-FILE2-REC FROM OUT02-PRICE-CHANGE-RECORD.                  
+           ADD 1                   TO PV-OUT02-RECS-WRITTEN.                    
+                                                                                
+       6300-WRITE-OUT03.                                                        
+           WRITE OUT-FILE3-REC FROM                                             
+                ML017-PRICE-CHANGE-RECORD.                                      
+           ADD 1                   TO PV-OUT03-RECS-WRITTEN.                    
+           MOVE 4095 TO ERROR-CODE.                                             
+                                                                                
+      ******************************************************************        
+      * 9990-DISPLAY-CONTROL-INFO.                                     *        
+      *  ==> PROCESSES:                                                *        
+      *    - DISPLAYS CONTROL INFORMATION AT END OF JOB                *        
+      ******************************************************************        
+       9990-DISPLAY-CONTROL-INFO.                                               
+                                                                                
+                                                                                
+           DISPLAY '********************************************'.              
+           DISPLAY '**** RUN STATISTICS FOR PROGRAM MLKUT900 ***'.              
+           DISPLAY '****'.                                                      
+           DISPLAY 'INPUT RECORDS READ:    ' PV-INPUT-RECS-READ.                
+           DISPLAY 'OUT01 RECS WRITTEN:    ' PV-OUT01-RECS-WRITTEN.             
+           DISPLAY 'OUT02 RECS WRITTEN:    ' PV-OUT02-RECS-WRITTEN.             
+           DISPLAY 'OUT03 RECS WRITTEN:    ' PV-OUT03-RECS-WRITTEN.             
+           DISPLAY 'INPUT ONHAND SUM  :    ' PV-INPUT-OH-SUM.                   
+           DISPLAY 'OUT01 ONHAND SUM  :    ' PV-OUT01-OH-SUM.                   
+           DISPLAY 'OUT02 ONHAND SUM  :    ' PV-OUT02-OH-SUM.                   
+           DISPLAY 'TSKST SELECTS     :    ' PV-TSKST-SELECTS.                  
+           DISPLAY 'TSKXREF SELECTS   :    ' PV-TSKXREF-SELECTS.                
+           DISPLAY '****'.                                                      
+           DISPLAY '**** RUN STATS END FOR PROGRAM MLKUT900  ***'.              
+           DISPLAY '********************************************'.              
+                                                                                
+                                                                                
+      ******************************************************************        
+      * 9999-SQL-ABEND.                                                *        
+      *  ==> PROCESSES:                                                *        
+      *    - PERFORMS ABENDS AFTER UNEXPECTED SQLCODE                  *        
+      ******************************************************************        
+       9999-SQL-ABEND.                                                          
+                                                                                
+           MOVE SQLCODE TO PV-SQLCODE-DISPLAY.                                  
+                                                                                
+           DISPLAY '** ABEND **'.                                               
+           DISPLAY 'MLKUT900 - ABEND'.                                          
+           DISPLAY 'PARAGRAPH = ' PV-PARAGRAPH-NAME.                            
+           DISPLAY 'OPERATION = ' PV-DB2-OPER-ATTEMPTED.                        
+           DISPLAY 'SQL CODE  = ' PV-SQLCODE-DISPLAY.                           
+           DISPLAY 'INPUT SKU = ' PV-INPUT-SKU-NUM.                             
+                                                                                
+           PERFORM 9990-DISPLAY-CONTROL-INFO.                                   
+                                                                                
+           COPY DPPD004.                                                        
+                                                                                
+           MOVE +4013 TO ABEND-CODE.                                            
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    

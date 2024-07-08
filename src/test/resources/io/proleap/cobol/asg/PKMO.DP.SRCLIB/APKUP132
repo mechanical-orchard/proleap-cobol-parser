@@ -1,0 +1,1695 @@
+000100*-----------------------*                                         00010000
+000200 IDENTIFICATION DIVISION.                                         00020000
+000300*-----------------------*                                         00030000
+000400 PROGRAM-ID.    APKUP132.                                         00040000
+000500 AUTHOR.        CHRIS KUNSTMANN  IBS.                             00050000
+000600 DATE-WRITTEN.  11/16/98.                                         00060000
+000700                                                                  00070000
+000800*---------------------------------------------------------------* 00080000
+000900*                                                               * 00090000
+001000*        ADJUSTMENT JOURNAL TRANSACTION BATCH INSERTS           * 00100000
+001100*                                                               * 00110000
+001200*    THIS PROGRAM READS IN THE BATCH ADJUSTMENT JOURNAL SUMMARY * 00120000
+001300*    FILE, DOES SOME FINAL EDITING, AND ASSIGNS THE GL/ML       * 00130000
+001400*    POSTING PERIOD TO THE DATA. A CONTROL CARD WILL CONTAIN A  * 00140000
+001500*    PARAMETER TO ALLOW POSTING TO A PRIOR PERIOD, IF NEEDED.   * 00150000
+001600*    ANY DATA ERRORS ARE WRITTEN TO THE TOUTAPF DB2 TABLE.      * 00160000
+001700*    IF THE DATA IS VALID, ROWS ARE INSERTED INTO DB2 TABLES    * 00170000
+001800*    TADJRNL (JOURNAL ADJUSTMENT HEADER), TADJDIS (JOURNAL      * 00180000
+001900*    ADJUSTMENT DETAIL), AND POSIBLY TAJPSINT (IF TRANCDE HAS   * 00190000
+002000*    AP_PSTD_IND = 'Y'). COMMIT CHECKPOINTS ARE TAKEN FOR EACH  * 00200000
+002100*    VALID SET (1 HEADER + 1 OR MORE DETAILS) THAT IS PROCESSED * 00210000
+002200*    TO COMPLETION. AFTER ALL DETAILS ARE PROCESSED, THE HDR    * 00220000
+002300*    TOTALS MUST MATCH THE ACCUMULATED DTL AMOUNTS. IF NOT, THE * 00230000
+002400*    ENTIRE SET IS CONSIDERED IN ERROR. IF ANY ERROR IS FOUND,  * 00240000
+002500*    AN ERROR RECORD IS WRITTEN TO TOUTAPF, AND ALL INSERTS     * 00250000
+002600*    ARE ROLLED BACK TO THE LAST SUCCESSFUL SET. PROCESSING     * 00260000
+002700*    CONTINUES WITH THE NEXT HEADER.                            * 00270000
+002800*---------------------------------------------------------------* 00280000
+002900*                                                               * 00290000
+003000* INPUT:                                                        * 00300000
+003100*  1. BATCH ADJUSTMENT TRANSACTIONS SUMMARY (APRD045)           * 00310000
+003200*  2. CONTROL CARD                                              * 00320000
+003300*                                                               * 00330000
+003400* DB2 TABLES (INQUIRY ONLY):                                    * 00340000
+003500*  1. AP-PAYMENT CONTROL                    (TAPCNTL)           * 00350000
+003600*  2. AP-TRANSACTION CODE                   (TTRNCDE)           * 00360000
+003700*                                                               * 00370000
+003800*            (INSERTS ONLY):                                    * 00380000
+003900*  3. AP-ADJUSTMENT JOURNAL                 (TADJRNL)           * 00390000
+004000*  4. AP-ADJUSTMENT DISTRIBUTION            (TADJDIS)           * 00400000
+004100*  5. AP-JOURNAL PEOPLESOFT INTERFACE       (TAJPSINT)          * 00410000
+004200*  6. AP-ADJUSTMENT ERROR REPORT OUTPUT     (TOUTAPF)           * 00420000
+004300*      (USE APRD041 RECORD FORMAT)                              * 00430000
+004400*                                                               * 00440000
+004500*            (UPDATES ONLY):                                    * 00450000
+004600*  7. CHECKPOINT RESTART CONTROL TABLE      (TCKRSTCN)          * 00460000
+004700*  8. CHECKPOINT RESTART INFORMATION TABLE  (TCKRSTIN)          * 00470000
+004800*                                                               * 00480000
+004900*---------------------------------------------------------------* 00490000
+005000*  CHANGES:                                                     * 00500000
+005100*     WR 5998      INITIAL PROGRAM                              * 00510000
+005200*                                                               * 00520000
+005300*     WR 20704                                                  * 00530000
+005400*     01/05/00     MARK BURNSIDE                                * 00540000
+005500*     CHANGE MADE:  IN PARAGRAPH C350-PROCESS-HEADER ADDED      * 00550000
+005600*     LOGIC TO INSERT TO THE TAJPSINT DB2 TABLE IF EITHER THE   * 00560000
+005700*     ENTER DATE OR EITHER OF THE REASON FIELDS IS POPULATED.   * 00570000
+005800*                                                               * 00580000
+005900*     WR 20704                                                  * 00590000
+006000*     01/21/00     ROBIN BERNOSKI           WR 20704            * 00600000
+006100*     CHANGE MADE:  MODIFIED THE PROGRAM TO POPULATE THE DUE    * 00610000
+006200*     DATE ON THE TAJPSINT TABLE WITH A NEW FIELD FROM THE      * 00620000
+006300*     APRD045 LAYOUT.  THE INSERT STATEMENT IN I200- WAS        * 00630000
+006400*     CHANGED TO MOVE THE AP045-PYMT-DUE-DTE INTO DUE-DTE       * 00640000
+006500*     INSTEAD OF THE AP045-ENTR-DTE.                            * 00650000
+006600*                                                               * 00660000
+006700*     08/25/2000    JILL JUEL               WR# 20224           * 00670000
+006800*     ADDED LOGIC TO PROCESS THE NEW MOS FIELDS. THE NEW        * 00680000
+006900*     FIELD IS HANDLED THE SAME WAY THE NEW STORE DISCOUNT      * 00690000
+007000*     IS HANDLED.                                               * 00700000
+007100*                                                               * 00710000
+007200*     02/21/2001                                                * 00720000
+007300*     ADDED LOGIC IN THE INITIALIZATION PARAGRAPH TO VERIFY     * 00730000
+007400*     THAT MULTIPLE POSTING PERIODS ARE OPEN BEFORE ALLOWING    * 00740000
+007500*     PREVIOUS POSTING PERIOD TO BE USED.  EVEN IF 'P' IS       * 00750000
+007600*     INDICATED ON THE CONTROL CARD, CURRENT WILL BE USED IF    * 00760000
+007700*     MULTIPLE PERIODS ARE NOT OPEN.  A RETURN CODE OF 4050     * 00770000
+007800*     IS ISSUED IN THIS CASE.                                   * 00780000
+007900*     MADE BY:  NANCY EILBES            WR/IR #: 20419          * 00790000
+008000*                                                               * 00800000
+008100*     07/23/2001                                                * 00810000
+008200*     CHANGED THE LRECL OF THE INPUT FILE FROM 400 TO 500.      * 00820000
+008300*     THIS CHANGE WAS NEEDED BECAUSE COPYBOOK APRD045           * 00830000
+008400*     HAS BEEN INCREASED TO 500.                                * 00840000
+008500*     MADE BY: ALEXIS KEIKER            WR/IR #: 22467          * 00850000
+008600*                                                               * 00860000
+008700*     05/16/2002  KEVIN CATLIN          WR/IR #: 21278          * 00870000
+008800*     CHANGE MADE:  NI-SKU CHANGES.  THE 3 BYTE SKU-SEQ FIELD   * 00880000
+008900*     IS REPLACED WITH A NUMERIC 8 BYTE SKU FIELD.  CHANGES     * 00890000
+009000*     MADE TO PARAGRAPH I300.                                   * 00900000
+009100*                                                               * 00910000
+009200*     09/03/2003                                                * 00920000
+009300*     CHANGE MADE: ADDED AP045-AUTH-NBR TO THE IF STMT CHECKING * 00930000
+009400*     WHEN TO PERFORM THE INSERT TO TAJPSINT.  ALSO REPLACED THE* 00940000
+009500*     CHECK OF ENTR-DTE FOR NON-SPACES WITH CHECKING THE        * 00950000
+009600*     AP045-PYMT-DUE-DTE FOR NON-SPACES (PARA C350-).  ADDED THE* 00960000
+009700*     AUTH_NBR TO THE INSERT STATEMENT IN PARA I200-            * 00970000
+009800*     MADE BY: MIKE BESKE               WR/IR #: 21316          * 00980000
+009900*                                                               * 00990000
+009910*     05/04/2004                                                * 00991000
+009920*     CHANGE MADE: ADDED LOGIC IN I100- TO CHECK POSTING PERIOD.* 00992000
+009930*     IF A TRANSACTION HAS A POSTING PERIOD LOAD IT WITH WHAT   * 00993000
+009940*     CAME IN OTHERWISE USE WHAT WAS CALCD EARLIER.             * 00994000
+009970*     MADE BY: L SCHALLHORN             WR/IR #: P000638605     * 00997000
+009980*                                                               * 00998000
+009990*     09/17/2008                                                * 00999000
+009991*     CHANGE MADE: BACK OUT CODE TO BLOCK SKECHERS TRAN CODE 11.* 00999100
+009994*     MADE BY: R NOHE                   WR/IR #: WR33658        * 00999400
+009995*                                                               * 00999500
+009996*     05/25/2016                                                * 00999614
+009997*     CHANGE MADE: SETTING AJPSINT-DOC-HLD-CDE TO Y OR N BASED  * 00999715
+009998*                  ON AP045-DOC-HLD-CDE VALUE.                    00999817
+010000*     MADE BY: ACCENTURE                WR/IR #:CHG0135353¦     * 01000015
+010010*---------------------------------------------------------------* 01001008
+010100                                                                  01010000
+010200 ENVIRONMENT DIVISION.                                            01020000
+010300 CONFIGURATION SECTION.                                           01030000
+010400 SOURCE-COMPUTER. IBM-3090.                                       01040000
+010500 OBJECT-COMPUTER. IBM-3090.                                       01050000
+010600                                                                  01060000
+010700                                                                  01070000
+010800 INPUT-OUTPUT SECTION.                                            01080000
+010900 FILE-CONTROL.                                                    01090000
+011000                                                                  01100000
+011100     SELECT SUMRY-TRANS-FILE               ASSIGN TO UT-S-INP01.  01110000
+011200                                                                  01120000
+011300 DATA DIVISION.                                                   01130000
+011400 FILE SECTION.                                                    01140000
+011500                                                                  01150000
+011600 FD  SUMRY-TRANS-FILE                                             01160000
+011700     RECORDING MODE IS F                                          01170000
+011800     BLOCK CONTAINS 0 CHARACTERS                                  01180000
+011900     LABEL RECORDS ARE STANDARD                                   01190000
+012000     DATA RECORD IS SUMRY-TRANS-RECORD.                           01200000
+012100                                                                  01210000
+012200 01  SUMRY-TRANS-RECORD           PIC X(500).                     01220000
+012300                                                                  01230000
+012400                                                                  01240000
+012500 WORKING-STORAGE SECTION.                                         01250000
+012600                                                                  01260000
+012700 01  PC-PROGRAM-CONSTANTS.                                        01270000
+012800     05  FILLER                  PIC  X(40)  VALUE                01280000
+012900         '********** WORKING STORAGE **********'.                 01290000
+013000     05  PC-PROGRAM-NAME         PIC  X(08)  VALUE 'APKUP132'.    01300000
+013100     05  PC-RETRY-MAX            PIC S9(04)  VALUE +3             01310000
+013200                                             COMP SYNC.           01320000
+013300                                                                  01330000
+013400 01  PS-PROGRAM-SWITCHES.                                         01340000
+013500     05  PS-SUMRY-TRANS-END-SW   PIC  X(01)  VALUE 'N'.           01350000
+013600         88  PS-SUMRY-TRANS-MORE             VALUE 'N'.           01360000
+013700         88  PS-SUMRY-TRANS-END              VALUE 'Y'.           01370000
+013800     05  PS-TRANCODE-SW          PIC  X(01)  VALUE ' '.           01380000
+013900         88  PS-TRANCODE-INVALID             VALUE 'N'.           01390000
+014000         88  PS-TRANCODE-VALID               VALUE 'Y'.           01400000
+014100     05  PS-PROCESSED-SW         PIC  X(01)  VALUE ' '.           01410000
+014200         88  PS-PROCESSED-HEADER             VALUE 'H'.           01420000
+014300         88  PS-PROCESSED-DETAIL             VALUE 'D'.           01430000
+014400     05  PSTG-PER-OVERRIDE-SW    PIC  X(01)  VALUE ' '.           01440000
+014500         88  PSTG-PER-OVERRIDDEN             VALUE 'Y'.           01450000
+014600                                                                  01460000
+014700 01  PV-PROGRAM-VARIABLES.                                        01470000
+014800     05  PV-COUNTERS             COMP.                            01480000
+014900         10  PV-RETRY-COUNT      PIC S9(04)    VALUE ZEROS.       01490000
+015000                                                                  01500000
+015100         10  PV-AP045-HDR-READ   PIC S9(9)     VALUE ZEROES.      01510000
+015200         10  PV-AP045-DTL-READ   PIC S9(9)     VALUE ZEROES.      01520000
+015300         10  PV-AP045-READ       PIC S9(9)     VALUE ZEROES.      01530000
+015400                                                                  01540000
+015500         10  PV-HDR-TEMP         PIC S9(9)     VALUE ZEROES.      01550000
+015600         10  PV-HDR-INSERT       PIC S9(9)     VALUE ZEROES.      01560000
+015700         10  PV-HDR-BYPASS       PIC S9(9)     VALUE ZEROES.      01570000
+015800                                                                  01580000
+015900         10  PV-AJPSINT-TEMP     PIC S9(9)     VALUE ZEROES.      01590000
+016000         10  PV-AJPSINT-INSERT   PIC S9(9)     VALUE ZEROES.      01600000
+016100         10  PV-AJPSINT-BYPASS   PIC S9(9)     VALUE ZEROES.      01610000
+016200                                                                  01620000
+016300         10  PV-DTL-TEMP         PIC S9(9)     VALUE ZEROES.      01630000
+016400         10  PV-DTL-INSERT       PIC S9(9)     VALUE ZEROES.      01640000
+016500         10  PV-DTL-BYPASS       PIC S9(9)     VALUE ZEROES.      01650000
+016600                                                                  01660000
+016700         10  PV-AP041-WROTE      PIC S9(9)     VALUE ZEROES.      01670000
+016800                                                                  01680000
+016900     05  PV-HOLD-FIELDS.                                          01690000
+017000         10  PV-PSTG-FYR-NBR     PIC  X(04)    VALUE SPACES.      01700000
+017100         10  PV-PSTG-FMN-NBR     PIC  X(02)    VALUE SPACES.      01710000
+017200         10  PV-PSTG-FWK-NBR     PIC  X(02)    VALUE SPACES.      01720000
+017300                                                                  01730000
+017400         10  PV-ENTR-TIMESTAMP.                                   01740000
+017500             15  PV-ENTRDTE-TIMESTAMP                             01750000
+017600                                 PIC  X(10)    VALUE SPACES.      01760000
+017700             15  PV-ENTRTME-TIMESTAMP                             01770000
+017800                                 PIC  X(16)    VALUE SPACES.      01780000
+017900         10  PV-DISTRIB-SEQ-NBR  PIC S9(9)     COMP               01790000
+018000                                               VALUE ZEROES.      01800000
+018100                                                                  01810000
+018200*  HOLDS AMOUNTS FROM HEADER RECORD, WHICH IS READ FIRST. THESE   01820000
+018300*  ARE COMPARED AGAINST THE ACCUMULATED DTL AMOUNTS, TO MAKE SURE 01830000
+018400*  THAT THEY MATCH UP. THE FILLER IS A SPACE KEEPER FOR THE STORE 01840000
+018500*  NUMBER IN AP045-HEADER-FIELDS.                                 01850000
+018600     05  PV-HDR-AMOUNTS          COMP-3.                          01860000
+018700         10  FILLER              PIC S9(9)      VALUE ZEROES.     01870000
+018800         10  PV-HDR-GRO-COST-AMT PIC S9(9)V99   VALUE ZEROES.     01880000
+018900         10  PV-HDR-RETL-AMT     PIC S9(9)V99   VALUE ZEROES.     01890000
+019000         10  PV-HDR-FRGT-AMT     PIC S9(9)V99   VALUE ZEROES.     01900000
+019100         10  PV-HDR-MISC-CHRG-AMT                                 01910000
+019200                                 PIC S9(9)V99   VALUE ZEROES.     01920000
+019300         10  PV-HDR-NET-COST-AMT PIC S9(9)V99   VALUE ZEROES.     01930000
+019400         10  PV-HDR-TERM-DISC-AMT                                 01940000
+019500                                 PIC S9(9)V99   VALUE ZEROES.     01950000
+019600         10  PV-HDR-NW-STR-DISC-AMT                               01960000
+019700                                 PIC S9(9)V99   VALUE ZEROES.     01970000
+019800         10  PV-HDR-TRD-DISC-AMT PIC S9(9)V99   VALUE ZEROES.     01980000
+019900         10  PV-HDR-MOS-DISC-AMT PIC S9(9)V99   VALUE ZEROES.     01990000
+020000                                                                  02000000
+020100*  HOLDS THE ACCUMULATED DETAIL AMOUNTS. AFTER ALL DETAILS ARE    02010000
+020200*  PROCESSED FOR A HEADER, THESE ARE COMPARED AGAINST THE PV-HDR- 02020000
+020300*  AMOUNTS, TO MAKE SURE THAT THEY MATCH UP.                      02030000
+020400     05  PV-DTL-AMOUNTS          COMP-3.                          02040000
+020500         10  PV-DTL-GRO-COST-AMT PIC S9(9)V99   VALUE ZEROES.     02050000
+020600         10  PV-DTL-RETL-AMT     PIC S9(9)V99   VALUE ZEROES.     02060000
+020700         10  PV-DTL-FRGT-AMT     PIC S9(9)V99   VALUE ZEROES.     02070000
+020800         10  PV-DTL-MISC-CHRG-AMT                                 02080000
+020900                                 PIC S9(9)V99   VALUE ZEROES.     02090000
+021000         10  PV-DTL-NET-COST-AMT PIC S9(9)V99   VALUE ZEROES.     02100000
+021100         10  PV-DTL-TERM-DISC-AMT                                 02110000
+021200                                 PIC S9(9)V99   VALUE ZEROES.     02120000
+021300         10  PV-DTL-NW-STR-DISC-AMT                               02130000
+021400                                 PIC S9(9)V99   VALUE ZEROES.     02140000
+021500         10  PV-DTL-TRD-DISC-AMT PIC S9(9)V99   VALUE ZEROES.     02150000
+021600         10  PV-DTL-MOS-DISC-AMT PIC S9(9)V99   VALUE ZEROES.     02160000
+021700                                                                  02170000
+021800     05  PV-DISC-AMT             COMP-3                           02180000
+021900                                 PIC S9(7)V99   VALUE ZEROES.     02190000
+022000                                                                  02200000
+022100* HOLDS THE KEY FIELDS FROM THE HEADER RECORD TO MAKE SURE, THAT  02210000
+022200* ALL THE DETAIL RECORDS HAVE THE SAME VALUES.                    02220000
+022300     05  PV-HDR-KEY-FIELDS.                                       02230000
+022400         10  PV-HDR-VND-NBR      PIC X(9)       VALUE SPACES.     02240000
+022500         10  PV-HDR-DOC-NBR      PIC X(16)      VALUE SPACES.     02250000
+022600         10  PV-HDR-DOC-DTE      PIC X(10)      VALUE SPACES.     02260000
+022700         10  PV-HDR-AP-TRN-CDE   PIC X(2)       VALUE SPACES.     02270000
+022800     05  PV-HDR-ENT-NME-DESC     PIC X(30)      VALUE SPACES.     02280000
+022900                                                                  02290000
+023000* HOLDS THE KEY FIELDS FROM THE LAST RECORD WITH ERRORS.          02300000
+023100     05  PV-ERR-KEY-FIELDS.                                       02310000
+023200         10  PV-ERR-VND-NBR      PIC X(9)       VALUE SPACES.     02320000
+023300         10  PV-ERR-DOC-NBR      PIC X(16)      VALUE SPACES.     02330000
+023400         10  PV-ERR-DOC-DTE      PIC X(10)      VALUE SPACES.     02340000
+023500         10  PV-ERR-AP-TRN-CDE   PIC X(2)       VALUE SPACES.     02350000
+023600     05  PV-ERR-ENT-NME-DESC     PIC X(30)      VALUE SPACES.     02360000
+023700                                                                  02370000
+023800* CHECKPOINT RESTART SWITCH TO DETERMINE PROCESSING.              02380000
+023900 01  CR-CKPT-RESTART-VARS.                                        02390000
+024000     05  CR-CKPT-STAT-CODE       PIC X(01)      VALUE SPACE.      02400000
+024100         88  CR-CKPT-RUN-COMPLETE               VALUE '0'.        02410000
+024200         88  CR-CKPT-IN-PROCESS                 VALUE '9'.        02420000
+024300                                                                  02430000
+024400* CHECKPOINT RESTART FIELDS TO UPDATE TCKRSTIN TABLE.             02440000
+024500 01  CR-CKPT-RESTART-INFO.                                        02450000
+024600     05  CR-KEY-FIELDS           PIC X(37)      VALUE SPACES.     02460000
+024700     05  CR-AP045-HDR-READ       PIC  9(9)      VALUE ZEROES.     02470000
+024800     05  CR-AP045-DTL-READ       PIC  9(9)      VALUE ZEROES.     02480000
+024900     05  CR-AP045-READ           PIC  9(9)      VALUE ZEROES.     02490000
+025000     05  CR-HDR-BYPASS           PIC  9(9)      VALUE ZEROES.     02500000
+025100     05  CR-AJPSINT-BYPASS       PIC  9(9)      VALUE ZEROES.     02510000
+025200     05  CR-DTL-BYPASS           PIC  9(9)      VALUE ZEROES.     02520000
+025300     05  CR-AP041-WROTE          PIC  9(9)      VALUE ZEROES.     02530000
+025400     05  CR-HDR-INSERT           PIC  9(9)      VALUE ZEROES.     02540000
+025500     05  CR-AJPSINT-INSERT       PIC  9(9)      VALUE ZEROES.     02550000
+025600     05  CR-DTL-INSERT           PIC  9(9)      VALUE ZEROES.     02560000
+025700                                                                  02570000
+025800*----------------------------------------------------------------*02580000
+025900*  CONTROL CARD RECORD LAYOUT - INPUT                             02590000
+026000*----------------------------------------------------------------*02600000
+026100 01  CONTROL-CARD.                                                02610000
+026200     05  CC-POSTING-PERIOD       PIC  X.                          02620000
+026300         88  CC-VALID-VALUE                     VALUE 'C', 'P'.   02630000
+026400         88  CC-CURR-PSTG-PER                   VALUE 'C'.        02640000
+026500         88  CC-PREV-PSTG-PER                   VALUE 'P'.        02650000
+026600     05  FILLER                  PIC  X(79).                      02660000
+026700                                                                  02670000
+026800                                                                  02680000
+026900***************************************                           02690000
+027000*    ADJUSTMENT TRANSACTION FILE - INPUT (SUMMARIZED)             02700000
+027100***************************************                           02710000
+027200     COPY APRD045.                                                02720000
+027300                                                                  02730000
+027400***************************************                           02740000
+027500*    BATCH ADJUSTMENT ERROR FILE - OUTPUT                         02750000
+027600***************************************                           02760000
+027700     COPY APRD041.                                                02770000
+027800                                                                  02780000
+027900*----------------------------------------------------------------*02790000
+028000*  PAYMENT CONTROL TABLE                                         *02800000
+028100*----------------------------------------------------------------*02810000
+028200     EXEC SQL                                                     02820000
+028300          INCLUDE TAPCNTL                                         02830000
+028400     END-EXEC.                                                    02840000
+028500                                                                  02850000
+028600                                                                  02860000
+028700*----------------------------------------------------------------*02870000
+028800*  TRANSACTION CODE TABLE                                        *02880000
+028900*----------------------------------------------------------------*02890000
+029000     EXEC SQL                                                     02900000
+029100          INCLUDE TTRNCDE                                         02910000
+029200     END-EXEC.                                                    02920000
+029300                                                                  02930000
+029400*----------------------------------------------------------------*02940000
+029500*  ADJUSTMENT JOURNAL TABLE                                      *02950000
+029600*----------------------------------------------------------------*02960000
+029700     EXEC SQL                                                     02970000
+029800          INCLUDE TADJRNL                                         02980000
+029900     END-EXEC.                                                    02990000
+030000                                                                  03000000
+030100*----------------------------------------------------------------*03010000
+030200*  ADJUSTMENT DISTRIBUTION TABLE                                 *03020000
+030300*----------------------------------------------------------------*03030000
+030400     EXEC SQL                                                     03040000
+030500          INCLUDE TADJDIS                                         03050000
+030600     END-EXEC.                                                    03060000
+030700                                                                  03070000
+030800*----------------------------------------------------------------*03080000
+030900*  ADJUSTMENT ERROR REPORT OUTPUT TABLE                          *03090000
+031000*----------------------------------------------------------------*03100000
+031100     EXEC SQL                                                     03110000
+031200          INCLUDE TOUTAPF                                         03120000
+031300     END-EXEC.                                                    03130000
+031400                                                                  03140000
+031500*----------------------------------------------------------------*03150000
+031600*  JOURNAL PEOPLESOFT INTERFACE                                  *03160000
+031700*----------------------------------------------------------------*03170000
+031800     EXEC SQL                                                     03180000
+031900          INCLUDE TAJPSINT                                        03190000
+032000     END-EXEC.                                                    03200000
+032100                                                                  03210000
+032200*----------------------------------------------------------------*03220000
+032300*  CHECKPOINT RESTART CONTROL TABLE                              *03230000
+032400*----------------------------------------------------------------*03240000
+032500     EXEC SQL                                                     03250000
+032600          INCLUDE TCKRSTCN                                        03260000
+032700     END-EXEC.                                                    03270000
+032800                                                                  03280000
+032900*----------------------------------------------------------------*03290000
+033000*  CHECKPOINT RESTART INFORMATION TABLE                          *03300000
+033100*----------------------------------------------------------------*03310000
+033200     EXEC SQL                                                     03320000
+033300          INCLUDE TCKRSTIN                                        03330000
+033400     END-EXEC.                                                    03340000
+033500                                                                  03350000
+033600*----------------------------------------------------------------*03360000
+033700*    SQL COMMUNICATIONS AREA DCLGEN                               03370000
+033800*----------------------------------------------------------------*03380000
+033900     EXEC SQL                                                     03390000
+034000         INCLUDE SQLCA                                            03400000
+034100     END-EXEC.                                                    03410000
+034200                                                                  03420000
+034300*---------------------------------------------------------------- 03430000
+034400*  ABEND DATA AREAS                                               03440000
+034500*---------------------------------------------------------------- 03450000
+034600 01  ABEND-CODE                  PIC S9(04)  VALUE ZEROS          03460000
+034700                                             COMP SYNC.           03470000
+034800     88  AC-INVALID-CONTROL-CARD             VALUE +4003.         03480000
+034900     88  AC-DB2-ERROR                        VALUE +4013.         03490000
+035000                                                                  03500000
+035100 01  ABEND-AREAS.                                                 03510000
+035200     05  AA-ABEND-LIT            PIC  X(40)  VALUE                03520000
+035300             '*****       ABEND'.                                 03530000
+035400     05  AA-PROGRAM-LIT          PIC  X(40)  VALUE                03540000
+035500             '*****   PROGRAM: APKUP132'.                         03550000
+035600     05  AA-PARAGRAPH-LIT.                                        03560000
+035700         10  FILLER              PIC  X(17)  VALUE                03570000
+035800             '***** PARAGRAPH: '.                                 03580000
+035900         10  AA-PARAGRAPH-NAME   PIC  X(35)  VALUE SPACES.        03590000
+036000     05  AA-MESSAGE-LINE.                                         03600000
+036100         10  FILLER              PIC  X(06)  VALUE '*****'.       03610000
+036200         10  AA-MESSAGE.                                          03620000
+036300             15 AA-MESS-1        PIC  X(30)  VALUE SPACES.        03630000
+036400             15 AA-MESS-2        PIC  X(97)  VALUE SPACES.        03640000
+036500     05  AA-DB2-ERROR-LIT        PIC  X(40)  VALUE                03650000
+036600             '*****    DB2 ERROR'.                                03660000
+036700     05  AA-DB2-OPERATION-LIT.                                    03670000
+036800         10  FILLER              PIC  X(17)  VALUE                03680000
+036900             '***** OPERATION: '.                                 03690000
+037000         10  AA-DB2-OPERATION.                                    03700000
+037100             15  AA-DB2-OP-1     PIC  X(25)  VALUE SPACES.        03710000
+037200             15  AA-DB2-OP-2     PIC  X(25)  VALUE SPACES.        03720000
+037300     05  AA-DB2-TABLE-1          PIC  X(08)  VALUE SPACES.        03730000
+037400     05  AA-DB2-TABLE-2          PIC  X(08)  VALUE SPACES.        03740000
+037500     05  AA-DB2-TABLE-3          PIC  X(08)  VALUE SPACES.        03750000
+037600     05  AA-DB2-TABLE-4          PIC  X(08)  VALUE SPACES.        03760000
+037700                                                                  03770000
+037800*---------------------------------------------------------------- 03780000
+037900*  SQLCA FORMATTED MESSAGE AREA                                   03790000
+038000*---------------------------------------------------------------- 03800000
+038100     COPY DPWS004.                                                03810000
+038200                                                                  03820000
+038300 01  FILLER                      PIC  X(35)  VALUE                03830000
+038400     '**** END OF W/S ** APKUP132 ****'.                          03840000
+038500                                                                  03850000
+038600 PROCEDURE DIVISION.                                              03860000
+038700                                                                  03870000
+038800     PERFORM A100-MAINLINE.                                       03880000
+038900     GOBACK.                                                      03890000
+039000                                                                  03900000
+039100 A100-MAINLINE.                                                   03910000
+039200                                                                  03920000
+039300     PERFORM B100-INITIALIZE.                                     03930000
+039400                                                                  03940000
+039500     PERFORM B200-PROCESS-SUMRY-TRANS-FILE                        03950000
+039600         UNTIL PS-SUMRY-TRANS-END.                                03960000
+039700                                                                  03970000
+039800     PERFORM B300-END-OF-PROGRAM.                                 03980000
+039900                                                                  03990000
+040000                                                                  04000000
+040100 B100-INITIALIZE.                                                 04010000
+040200*---------------------------------------------------------------- 04020000
+040300*    INITIALIZATION PROCESSING                                    04030000
+040400* PROCESS CONTROL CARD HERE.                                      04040000
+040500* GET AP CONTROL DATA HERE.                                       04050000
+040600* IF THIS IS A RESTART, GET THE COUNTERS AND AND READ THE INPUT   04060000
+040700*  FILE TO POINT TO THE NEXT RECORD TO PROCESS.                   04070000
+040800*---------------------------------------------------------------- 04080000
+040900                                                                  04090000
+041000     OPEN INPUT  SUMRY-TRANS-FILE.                                04100000
+041100                                                                  04110000
+041200     INITIALIZE DCLTTRNCDE                                        04120000
+041300                DCLTAPCNTL                                        04130000
+041400                DCLTADJRNL                                        04140000
+041500                DCLTADJDIS                                        04150000
+041600                DCLTOUTAPF                                        04160000
+041700                DCLTAJPSINT                                       04170000
+041800                AP041-RECORD                                      04180000
+041900                CR-CKPT-RESTART-INFO                              04190000
+042000                TCKRSTINF-WORK-STRG-DESC-TEXT                     04200000
+042100                PV-COUNTERS.                                      04210000
+042200                                                                  04220000
+042300* PROCESS CONTROL CARD HERE.                                      04230000
+042400     ACCEPT CONTROL-CARD.                                         04240000
+042500     IF NOT CC-VALID-VALUE                                        04250000
+042600         MOVE 'B100-INITIALIZE'  TO  AA-PARAGRAPH-NAME            04260000
+042700         DISPLAY 'CONTROL CARD INVALID    = ' CONTROL-CARD        04270000
+042800         DISPLAY 'DEFAULTING TO CURRENT POSTING PERIOD '          04280000
+042900         SET AC-INVALID-CONTROL-CARD                              04290000
+043000                                 TO TRUE                          04300000
+043100         PERFORM Z998-ABEND                                       04310000
+043200     END-IF.                                                      04320000
+043300                                                                  04330000
+043400* GET AP CONTROL DATA HERE.  IF CONTROL CARD REQUESTED PREVIOUS   04340000
+043500* POSTING PERIOD, BUT MULTIPLE PERIODS ARE NOT CURRENTLY OPEN,    04350000
+043600* THE CURRENT POSTING PERIOD WILL BE USED AND A RETURN CODE WILL  04360000
+043700* BE ISSUED SO THE SYSTEM SENDING THE DATA CAN BE NOTIFIED.       04370000
+043800                                                                  04380000
+043900     PERFORM S100-SELECT-TAPCNTL.                                 04390000
+044000                                                                  04400000
+044100     IF  CC-CURR-PSTG-PER                                         04410000
+044200         MOVE APCNTL-CURR-PSTG-FYR-NBR TO PV-PSTG-FYR-NBR         04420000
+044300         MOVE APCNTL-CURR-PSTG-FMN-NBR TO PV-PSTG-FMN-NBR         04430000
+044400         MOVE APCNTL-CURR-PSTG-FWK-NBR TO PV-PSTG-FWK-NBR         04440000
+044500     ELSE                                                         04450000
+044600         IF  APCNTL-MULT-PSTG-PER-IND = 'Y'                       04460000
+044700             MOVE APCNTL-PREV-PSTG-FYR-NBR TO PV-PSTG-FYR-NBR     04470000
+044800             MOVE APCNTL-PREV-PSTG-FMN-NBR TO PV-PSTG-FMN-NBR     04480000
+044900             MOVE APCNTL-PREV-PSTG-FWK-NBR TO PV-PSTG-FWK-NBR     04490000
+045000         ELSE                                                     04500000
+045100             MOVE APCNTL-CURR-PSTG-FYR-NBR TO PV-PSTG-FYR-NBR     04510000
+045200             MOVE APCNTL-CURR-PSTG-FMN-NBR TO PV-PSTG-FMN-NBR     04520000
+045300             MOVE APCNTL-CURR-PSTG-FWK-NBR TO PV-PSTG-FWK-NBR     04530000
+045400             SET PSTG-PER-OVERRIDDEN TO TRUE                      04540000
+045500         END-IF                                                   04550000
+045600     END-IF.                                                      04560000
+045700                                                                  04570000
+045800     DISPLAY 'POSTING PERIOD BEING USED = '   PV-PSTG-FYR-NBR     04580000
+045900                                              PV-PSTG-FMN-NBR     04590000
+046000                                              PV-PSTG-FWK-NBR.    04600000
+046100                                                                  04610000
+046200* IF THIS IS A RESTART, GET THE COUNTERS AND AND READ THE INPUT   04620000
+046300*  FILE TO POINT TO THE NEXT RECORD TO PROCESS.                   04630000
+046400     PERFORM X100-GET-CHECKPOINT-CNTL.                            04640000
+046500     IF CR-CKPT-IN-PROCESS                                        04650000
+046600         PERFORM X200-CHCKPNT-RESTART-PROCESS                     04660000
+046700     ELSE                                                         04670000
+046800         PERFORM R100-READ-SUMRY-TRANS-FILE                       04680000
+046900         IF PS-SUMRY-TRANS-END                                    04690000
+047000            DISPLAY '*********APKUP132 IS ENDING*********'        04700000
+047100            DISPLAY 'INPUT FILE IS EMPTY. NO RECORDS TO PROCESS'  04710000
+047200         ELSE                                                     04720000
+047300           IF NOT AP045-HEADER-RECORD                             04730000
+047400               DISPLAY '*************************************'    04740000
+047500               DISPLAY 'THE FIRST RECORD IS NOT A HEADER '        04750000
+047600               DISPLAY '  STOP PROCESSING NOW- FIX THE DATA '     04760000
+047700               MOVE 'B100-INITIALIZE'                             04770000
+047800                                   TO AA-PARAGRAPH-NAME           04780000
+047900               PERFORM Z998-ABEND                                 04790000
+048000           END-IF                                                 04800000
+048100           SET CR-CKPT-IN-PROCESS  TO TRUE                        04810000
+048200           PERFORM U100-UPDATE-TCKRSTCNTL                         04820000
+048300         END-IF                                                   04830000
+048400     END-IF.                                                      04840000
+048500                                                                  04850000
+048600                                                                  04860000
+048700 B200-PROCESS-SUMRY-TRANS-FILE.                                   04870000
+048800*---------------------------------------------------------------- 04880000
+048900*  MAIN PROCESSING HERE.                                          04890000
+049000* FINISH PROCESSING ANY DATA INSERTED INTO A DB2 TABLE (PRIOR SET)04900000
+049100* PROCESS THE CURRENT RECORD (HEADER)                             04910000
+049200* PROCESS THE CURRENT RECORD (DETAIL) AND READ THE NEXT.          04920000
+049300*---------------------------------------------------------------- 04930000
+049400                                                                  04940000
+049500     IF AP045-HEADER-RECORD                                       04950000
+049600* FINISH PROCESSING ANY DATA INSERTED INTO A DB2 TABLE (PRIOR SET)04960000
+049700         IF PV-HDR-TEMP > 0                                       04970000
+049800           OR PV-AJPSINT-TEMP > 0                                 04980000
+049900           OR PV-DTL-TEMP > 0                                     04990000
+050000             PERFORM C200-PROCESS-PRIOR-RECORD                    05000000
+050100         END-IF                                                   05010000
+050200* PROCESS THE CURRENT RECORD (HEADER)                             05020000
+050300         PERFORM C300-PROCESS-CURRENT-RECORD                      05030000
+050400           UNTIL PS-PROCESSED-HEADER                              05040000
+050500           OR    PS-SUMRY-TRANS-END                               05050000
+050600     END-IF.                                                      05060000
+050700                                                                  05070000
+050800     IF PS-SUMRY-TRANS-MORE                                       05080000
+050900       AND AP045-DETAIL-RECORD                                    05090000
+051000* PROCESS THE CURRENT RECORD (DETAIL) AND READ THE NEXT.          05100000
+051100         PERFORM C100-PROCESS-DETAIL-DATA                         05110000
+051200         PERFORM R100-READ-SUMRY-TRANS-FILE                       05120000
+051300     END-IF.                                                      05130000
+051400                                                                  05140000
+051500                                                                  05150000
+051600 B300-END-OF-PROGRAM.                                             05160000
+051700*---------------------------------------------------------------- 05170000
+051800*    END OF PROGRAM                                               05180000
+051900* FINISH PROCESSING ON THE LAST SET.                              05190000
+052000* SET CHECKPOINT/RESTART TO RUN-COMPLETE, UPDATE THE CHECKPOINT/  05200000
+052100*  RESTART TABLE, AND COMMIT THE FINAL UPDATE.                    05210000
+052200*---------------------------------------------------------------- 05220000
+052300                                                                  05230000
+052400* FINISH PROCESSING ON THE LAST SET.                              05240000
+052500     IF PV-HDR-TEMP > 0                                           05250000
+052600       OR PV-AJPSINT-TEMP > 0                                     05260000
+052700       OR PV-DTL-TEMP > 0                                         05270000
+052800         PERFORM C200-PROCESS-PRIOR-RECORD                        05280000
+052900     END-IF.                                                      05290000
+053000                                                                  05300000
+053100* SET CHECKPOINT/RESTART TO RUN-COMPLETE, UPDATE THE CHECKPOINT/  05310000
+053200*  RESTART TABLE, AND COMMIT THE FINAL UPDATE.                    05320000
+053300     SET CR-CKPT-RUN-COMPLETE    TO TRUE.                         05330000
+053400     PERFORM U100-UPDATE-TCKRSTCNTL.                              05340000
+053500     PERFORM U270-COMMIT.                                         05350000
+053600                                                                  05360000
+053700     DISPLAY '**********************************************'.    05370000
+053800     DISPLAY 'HEADER RECORDS READ  = ' PV-AP045-HDR-READ.         05380000
+053900     DISPLAY 'DETAIL RECORDS READ  = ' PV-AP045-DTL-READ.         05390000
+054000     DISPLAY ' '.                                                 05400000
+054100     DISPLAY 'TOTAL  RECORDS READ  = ' PV-AP045-READ.             05410000
+054200     DISPLAY ' '.                                                 05420000
+054300     DISPLAY 'HEADERS  BYPASSED    = ' PV-HDR-BYPASS.             05430000
+054400     DISPLAY 'TAJPSINT BYPASSED    = ' PV-AJPSINT-BYPASS.         05440000
+054500     DISPLAY 'DETAILS  BYPASSED    = ' PV-DTL-BYPASS.             05450000
+054600     DISPLAY ' '.                                                 05460000
+054700     DISPLAY 'TOTAL ERRORS WRITTEN = ' PV-AP041-WROTE.            05470000
+054800     DISPLAY ' '.                                                 05480000
+054900     DISPLAY 'HEADERS  INSERTED    = ' PV-HDR-INSERT.             05490000
+055000     DISPLAY 'TAJPSINT INSERTED    = ' PV-AJPSINT-INSERT.         05500000
+055100     DISPLAY 'DETAILS  INSERTED    = ' PV-DTL-INSERT.             05510000
+055200                                                                  05520000
+055300     CLOSE SUMRY-TRANS-FILE.                                      05530000
+055400                                                                  05540000
+055500     IF PSTG-PER-OVERRIDDEN                                       05550000
+055600        MOVE 4050 TO RETURN-CODE                                  05560000
+055700        DISPLAY ' '                                               05570000
+055800        DISPLAY 'POSTING PERIOD OVERRIDDEN WITH CURRENT'          05580000
+055900     END-IF.                                                      05590000
+056000                                                                  05600000
+056100 C100-PROCESS-DETAIL-DATA.                                        05610000
+056200*---------------------------------------------------------------- 05620000
+056300* IF THIS DETAIL RECORD DOESN'T MATCH THE LAST HEADER KEY,        05630000
+056400*   FINISH PROCESSING ANY DATA INSERTED INTO A DB2 TABLE,         05640000
+056500*   AND PROCESS THE DETAIL RECORD AS AN ERROR.                    05650000
+056600* OTHERWISE, ACCUMULATE THIS DETAIL RECORD,                       05660000
+056700*   AND INSERT THE ROW INTO DB2.                                  05670000
+056800*---------------------------------------------------------------- 05680000
+056900                                                                  05690000
+057000     IF AP045-KEY-DATA-FIELDS NOT = PV-HDR-KEY-FIELDS             05700000
+057100* THIS DETAIL RECORD DOESN'T BELONG TO THE LAST HEADER PROCESSED. 05710000
+057200         IF PV-HDR-TEMP > 0                                       05720000
+057300           OR PV-AJPSINT-TEMP > 0                                 05730000
+057400           OR PV-DTL-TEMP > 0                                     05740000
+057500*   FINISH PROCESSING ANY DATA INSERTED INTO A DB2 TABLE          05750000
+057600             PERFORM C200-PROCESS-PRIOR-RECORD                    05760000
+057700         END-IF                                                   05770000
+057800                                                                  05780000
+057900*   NOW PROCESS THE DETAIL RECORD AS AN ERROR.                    05790000
+058000         ADD +1                  TO PV-DTL-BYPASS                 05800000
+058100         MOVE AP045-KEY-DATA-FIELDS                               05810000
+058200                                 TO PV-ERR-KEY-FIELDS             05820000
+058300                                    CR-KEY-FIELDS                 05830000
+058400         MOVE AP045-ENT-NME-DESC TO PV-ERR-ENT-NME-DESC           05840000
+058500         SET AP041-DTLS-WITH-NO-HDR                               05850000
+058600                                 TO TRUE                          05860000
+058700         PERFORM E100-PROCESS-ERRORS                              05870000
+058800     ELSE                                                         05880000
+058900* OTHERWISE, ACCUMULATE THIS DETAIL RECORD,                       05890000
+059000         ADD AP045-GRO-COST-AMT  TO PV-DTL-GRO-COST-AMT           05900000
+059100         ADD AP045-RETL-AMT      TO PV-DTL-RETL-AMT               05910000
+059200         ADD AP045-FRGT-AMT      TO PV-DTL-FRGT-AMT               05920000
+059300         ADD AP045-MISC-CHRG-AMT TO PV-DTL-MISC-CHRG-AMT          05930000
+059400         ADD AP045-DTL-TERM-DISC-AMT                              05940000
+059500                                 TO PV-DTL-TERM-DISC-AMT          05950000
+059600         ADD AP045-DTL-NW-STR-DISC-AMT                            05960000
+059700                                 TO PV-DTL-NW-STR-DISC-AMT        05970000
+059800         ADD AP045-DTL-TRD-DISC-AMT                               05980000
+059900                                 TO PV-DTL-TRD-DISC-AMT           05990000
+060000         ADD AP045-DTL-MOS-DISC-AMT                               06000000
+060100                                 TO PV-DTL-MOS-DISC-AMT           06010000
+060200                                                                  06020000
+060300         COMPUTE PV-DISC-AMT = ( AP045-DTL-TERM-DISC-AMT +        06030000
+060400           + AP045-DTL-NW-STR-DISC-AMT + AP045-DTL-TRD-DISC-AMT   06040000
+060500           + AP045-DTL-MOS-DISC-AMT )                             06050000
+060600                                                                  06060000
+060700         ADD AP045-NET-COST-AMT  TO PV-DTL-NET-COST-AMT           06070000
+060800                                                                  06080000
+060900*   AND INSERT THE ROW INTO DB2.                                  06090000
+061000         PERFORM I300-INSERT-TADJDIS-ROW                          06100000
+061100         ADD +1                  TO PV-DISTRIB-SEQ-NBR            06110000
+061200         SET PS-PROCESSED-DETAIL TO TRUE                          06120000
+061300     END-IF.                                                      06130000
+061400                                                                  06140000
+061500                                                                  06150000
+061600 C200-PROCESS-PRIOR-RECORD.                                       06160000
+061700*----------------------------------------------------------------*06170000
+061800* IF THE LAST RECORD PROCESSED WAS A HEADER, IT'S AN ERROR.       06180000
+061900* OTHERWISE, VERIFY THAT AMOUNTS BALANCE, IF NOT, IT'S AN ERROR.  06190000
+062000* IF NO ERROR CONDITIONS EXIST, COMMIT LAST HDR/DTLS PROCESSED.   06200000
+062100*----------------------------------------------------------------*06210000
+062200                                                                  06220000
+062300     MOVE PV-HDR-KEY-FIELDS      TO CR-KEY-FIELDS.                06230000
+062400     IF PS-PROCESSED-HEADER                                       06240000
+062500* IF THE LAST RECORD PROCESSED WAS A HEADER, PROCESS AS AN ERROR. 06250000
+062600         MOVE PV-HDR-KEY-FIELDS  TO PV-ERR-KEY-FIELDS             06260000
+062700         MOVE PV-HDR-ENT-NME-DESC                                 06270000
+062800                                 TO PV-ERR-ENT-NME-DESC           06280000
+062900         SET AP041-HDRS-WITH-NO-DTL                               06290000
+063000                                 TO TRUE                          06300000
+063100         MOVE SPACES             TO PS-PROCESSED-SW               06310000
+063200         PERFORM U800-ROLLBACK                                    06320000
+063300         PERFORM E100-PROCESS-ERRORS                              06330000
+063400     ELSE                                                         06340000
+063500                                                                  06350000
+063600* VERIFY THAT AMOUNTS BALANCE, IF NOT WRITE ERROR                 06360000
+063700         PERFORM C250-VERIFY-BALANCES                             06370000
+063800         IF AP041-HDR-DTL-OUT-OF-BALANCE                          06380000
+063900             MOVE PV-HDR-KEY-FIELDS                               06390000
+064000                                 TO PV-ERR-KEY-FIELDS             06400000
+064100             MOVE PV-HDR-ENT-NME-DESC                             06410000
+064200                                 TO PV-ERR-ENT-NME-DESC           06420000
+064300             PERFORM U800-ROLLBACK                                06430000
+064400             PERFORM E100-PROCESS-ERRORS                          06440000
+064500         ELSE                                                     06450000
+064600* COMMIT LAST HDR/DTLS PROCESSED,                                 06460000
+064700             PERFORM U200-CHECKPOINT-COMMIT                       06470000
+064800         END-IF                                                   06480000
+064900     END-IF.                                                      06490000
+065000                                                                  06500000
+065100                                                                  06510000
+065200 C250-VERIFY-BALANCES.                                            06520000
+065300*----------------------------------------------------------------*06530000
+065400*  IF HDR AMOUNTS DON'T EQUAL ACCUMULATED DETAIL AMOUNTS, IT'S   *06540000
+065500*   AN ERROR. SET THE OUT-OF-BALANCE SWITCH(S) HERE.             *06550000
+065600*----------------------------------------------------------------*06560000
+065700                                                                  06570000
+065800     IF PV-HDR-GRO-COST-AMT NOT = PV-DTL-GRO-COST-AMT             06580000
+065900         SET AP041-HDR-DTL-OUT-OF-BALANCE                         06590000
+066000             AP041-OB-GRO-COST-AMT              TO TRUE           06600000
+066100     END-IF.                                                      06610000
+066200                                                                  06620000
+066300     IF PV-HDR-RETL-AMT NOT = PV-DTL-RETL-AMT                     06630000
+066400         SET AP041-HDR-DTL-OUT-OF-BALANCE       TO TRUE           06640000
+066500         IF AP041-OB-NOT-FOUND                                    06650000
+066600             SET AP041-OB-RETL-AMT              TO TRUE           06660000
+066700         ELSE                                                     06670000
+066800             SET AP041-OB-MULT-AMTS             TO TRUE           06680000
+066900         END-IF                                                   06690000
+067000     END-IF.                                                      06700000
+067100                                                                  06710000
+067200     IF PV-HDR-FRGT-AMT NOT = PV-DTL-FRGT-AMT                     06720000
+067300         SET AP041-HDR-DTL-OUT-OF-BALANCE       TO TRUE           06730000
+067400         IF AP041-OB-NOT-FOUND                                    06740000
+067500             SET AP041-OB-FRGT-AMT              TO TRUE           06750000
+067600         ELSE                                                     06760000
+067700             SET AP041-OB-MULT-AMTS             TO TRUE           06770000
+067800         END-IF                                                   06780000
+067900     END-IF.                                                      06790000
+068000                                                                  06800000
+068100     IF PV-HDR-MISC-CHRG-AMT NOT = PV-DTL-MISC-CHRG-AMT           06810000
+068200         SET AP041-HDR-DTL-OUT-OF-BALANCE       TO TRUE           06820000
+068300         IF AP041-OB-NOT-FOUND                                    06830000
+068400             SET AP041-OB-MISC-CHRG-AMT         TO TRUE           06840000
+068500         ELSE                                                     06850000
+068600             SET AP041-OB-MULT-AMTS             TO TRUE           06860000
+068700         END-IF                                                   06870000
+068800     END-IF.                                                      06880000
+068900                                                                  06890000
+069000     IF PV-HDR-NET-COST-AMT NOT = PV-DTL-NET-COST-AMT             06900000
+069100         SET AP041-HDR-DTL-OUT-OF-BALANCE       TO TRUE           06910000
+069200         IF AP041-OB-NOT-FOUND                                    06920000
+069300             SET AP041-OB-NET-COST-AMT          TO TRUE           06930000
+069400         ELSE                                                     06940000
+069500             SET AP041-OB-MULT-AMTS             TO TRUE           06950000
+069600         END-IF                                                   06960000
+069700     END-IF.                                                      06970000
+069800                                                                  06980000
+069900     IF PV-HDR-TERM-DISC-AMT NOT = PV-DTL-TERM-DISC-AMT           06990000
+070000         SET AP041-HDR-DTL-OUT-OF-BALANCE       TO TRUE           07000000
+070100         IF AP041-OB-NOT-FOUND                                    07010000
+070200             SET AP041-OB-TERM-DISC-AMT         TO TRUE           07020000
+070300         ELSE                                                     07030000
+070400             SET AP041-OB-MULT-AMTS             TO TRUE           07040000
+070500         END-IF                                                   07050000
+070600     END-IF.                                                      07060000
+070700                                                                  07070000
+070800     IF PV-HDR-NW-STR-DISC-AMT NOT = PV-DTL-NW-STR-DISC-AMT       07080000
+070900         SET AP041-HDR-DTL-OUT-OF-BALANCE       TO TRUE           07090000
+071000         IF AP041-OB-NOT-FOUND                                    07100000
+071100             SET AP041-OB-NW-STR-DISC-AMT       TO TRUE           07110000
+071200         ELSE                                                     07120000
+071300             SET AP041-OB-MULT-AMTS             TO TRUE           07130000
+071400         END-IF                                                   07140000
+071500     END-IF.                                                      07150000
+071600                                                                  07160000
+071700     IF PV-HDR-TRD-DISC-AMT NOT = PV-DTL-TRD-DISC-AMT             07170000
+071800         SET AP041-HDR-DTL-OUT-OF-BALANCE       TO TRUE           07180000
+071900         IF AP041-OB-NOT-FOUND                                    07190000
+072000             SET AP041-OB-TRD-DISC-AMT          TO TRUE           07200000
+072100         ELSE                                                     07210000
+072200             SET AP041-OB-MULT-AMTS             TO TRUE           07220000
+072300         END-IF                                                   07230000
+072400     END-IF.                                                      07240000
+072500                                                                  07250000
+072600     IF PV-HDR-MOS-DISC-AMT NOT = PV-DTL-MOS-DISC-AMT             07260000
+072700         SET AP041-HDR-DTL-OUT-OF-BALANCE       TO TRUE           07270000
+072800         IF AP041-OB-NOT-FOUND                                    07280000
+072900             SET AP041-OB-MOS-DISC-AMT          TO TRUE           07290000
+073000         ELSE                                                     07300000
+073100             SET AP041-OB-MULT-AMTS             TO TRUE           07310000
+073200         END-IF                                                   07320000
+073300     END-IF.                                                      07330000
+073400                                                                  07340000
+073500 C300-PROCESS-CURRENT-RECORD.                                     07350000
+073600*----------------------------------------------------------------*07360000
+073700*  THIS PARAGRAPH IS PERFORMED UNTIL WE FIND A HEADER WITH A     *07370000
+073800*   VALID TRANS CODE.                                            *07380000
+073900*  IF THIS IS A HEADER RECORD;                                   *07390000
+074000*    VERIFY THAT THE TRANS CODE IS VALID,                        *07400000
+074100*      FINISH PROCESSING THE HEADER,                             *07410000
+074200*      AND READ THE NEXT INPUT                                   *07420000
+074300*    IF THE TRANS CODE ISN'T VALID,                              *07430000
+074400*      SET UP THE ERROR FIELDS FOR THIS HEADER,                  *07440000
+074500*      READ THE INPUT FILE UNTIL A HEADER IS FOUND,              *07450000
+074600*      AND WRITE AN ERROR RECORD TO THE FLAT FILE                *07460000
+074700*  IF THIS ISN'T A HEADER RECORD;                                *07470000
+074800*    WRITE AN ERROR RECORD TO THE FLAT FILE,                     *07480000
+074900*    AND READ THE NEXT INPUT                                     *07490000
+075000*----------------------------------------------------------------*07500000
+075100                                                                  07510000
+075200     IF AP045-HEADER-RECORD                                       07520000
+075300         IF AP045-AP-TRN-CDE NOT = PV-HDR-AP-TRN-CDE              07530000
+075400             PERFORM S200-GET-TRANCODE                            07540000
+075500         END-IF                                                   07550000
+075600         IF PS-TRANCODE-VALID                                     07560000
+075700             PERFORM C350-PROCESS-HEADER                          07570000
+075800             PERFORM R100-READ-SUMRY-TRANS-FILE                   07580000
+075900         ELSE                                                     07590000
+076000             ADD +1              TO PV-HDR-BYPASS                 07600000
+076100             MOVE AP045-KEY-DATA-FIELDS                           07610000
+076200                                 TO PV-ERR-KEY-FIELDS             07620000
+076300                                    CR-KEY-FIELDS                 07630000
+076400             MOVE AP045-ENT-NME-DESC                              07640000
+076500                                 TO PV-ERR-ENT-NME-DESC           07650000
+076600             SET AP041-INVALID-AP-TRN-CDE                         07660000
+076700                                 TO TRUE                          07670000
+076800* THE HEADER WE'RE PROCESSING IS INVALID, READ THE NEXT RECORD.   07680000
+076900*  IF IT'S A HEADER, WE SKIP THE PERFORM UNTIL LOOP, AND WE DON'T 07690000
+077000*  INCREMENT THE DTL-BYPASS COUNTER. OTHERWISE, PROCESS THE LOOP, 07700000
+077100*  AND INCREMENT THE COUNTER FOR EACH RECORD READ.                07710000
+077200             PERFORM R100-READ-SUMRY-TRANS-FILE                   07720000
+077300                                                                  07730000
+077400             PERFORM                                              07740000
+077500               UNTIL AP045-KEY-DATA-FIELDS > PV-ERR-KEY-FIELDS    07750000
+077600               OR    AP045-HEADER-RECORD                          07760000
+077700               OR    PS-SUMRY-TRANS-END                           07770000
+077800                                                                  07780000
+077900                 PERFORM R100-READ-SUMRY-TRANS-FILE               07790000
+078000                 ADD +1          TO PV-DTL-BYPASS                 07800000
+078100             END-PERFORM                                          07810000
+078200                                                                  07820000
+078300* PROCESS THE ERROR LAST SO THAT ALL RECORDS BYPASSED ARE COUNTED 07830000
+078400*  AND INCLUDED IN THE RESTART ROW.                               07840000
+078500             PERFORM E100-PROCESS-ERRORS                          07850000
+078600         END-IF                                                   07860000
+078700     ELSE                                                         07870000
+078800         MOVE AP045-KEY-DATA-FIELDS                               07880000
+078900                                 TO PV-ERR-KEY-FIELDS             07890000
+079000                                    CR-KEY-FIELDS                 07900000
+079100         MOVE AP045-ENT-NME-DESC TO PV-ERR-ENT-NME-DESC           07910000
+079200         SET AP041-DTLS-WITH-NO-HDR                               07920000
+079300                                 TO TRUE                          07930000
+079400         PERFORM E100-PROCESS-ERRORS                              07940000
+079500         PERFORM R100-READ-SUMRY-TRANS-FILE                       07950000
+079600     END-IF.                                                      07960000
+079700                                                                  07970000
+079800                                                                  07980000
+079900 C350-PROCESS-HEADER.                                             07990000
+080000*---------------------------------------------------------------* 08000000
+080100*  PROCESS THIS HEADER WITH A VALID TRANS CODE.                 * 08010000
+080200*   SET UP COMMIT & HOLD FIELDS FOR NEW HEADER BEING PROCESSED, * 08020000
+080300*   INSERT A ROW INTO TADJRNL,                                  * 08030000
+080400*   INSERT A ROW INTO TAJPSINT, IF APPROPRIATE,                 * 08040000
+080500*   AND INITIALIZE THE PV-DTL-* FIELDS.                         * 08050000
+080600*---------------------------------------------------------------* 08060000
+080700                                                                  08070000
+080800     MOVE AP045-KEY-DATA-FIELDS  TO CR-KEY-FIELDS                 08080000
+080900                                    PV-HDR-KEY-FIELDS.            08090000
+081000     MOVE AP045-ENT-NME-DESC     TO PV-HDR-ENT-NME-DESC.          08100000
+081100     MOVE AP045-HEADER-FIELDS    TO PV-HDR-AMOUNTS.               08110000
+081200                                                                  08120000
+081300     PERFORM I100-INSERT-TADJRNL-ROW.                             08130000
+081400                                                                  08140000
+081500*    IF TRNCDE-AP-PSTG-IND = 'Y'                                  08150000
+081600*    IF AP045-ENTR-DTE > SPACES OR                                08160000
+081700     IF AP045-PYMT-DUE-DTE    > SPACES OR                         08170000
+081800        AP045-AUTH-NBR        > SPACES OR                         08180000
+081900        AP045-RSN-1ST-LNE-TXT > SPACES OR                         08190000
+082000        AP045-RSN-2ND-LNE-TXT > SPACES OR                         08200001
+082010        AP045-VND-HLD OR AP045-DOC-HLD                            08201001
+082020      IF AP045-VND-HLD OR AP045-DOC-HLD                           08202014
+082030         MOVE 'Y' TO AJPSINT-DOC-HLD-CDE                          08203014
+082040      ELSE                                                        08204014
+082050         MOVE 'N' TO AJPSINT-DOC-HLD-CDE                          08205014
+082060      END-IF                                                      08206014
+082100         PERFORM I200-INSERT-TAJPSINT-ROW                         08210000
+082200     END-IF.                                                      08220000
+082300                                                                  08230000
+082400     SET PS-PROCESSED-HEADER     TO TRUE.                         08240000
+082500     MOVE +1                     TO PV-DISTRIB-SEQ-NBR.           08250000
+082600                                                                  08260000
+082700     INITIALIZE PV-DTL-GRO-COST-AMT                               08270000
+082800                PV-DTL-RETL-AMT                                   08280000
+082900                PV-DTL-FRGT-AMT                                   08290000
+083000                PV-DTL-MISC-CHRG-AMT                              08300000
+083100                PV-DTL-TERM-DISC-AMT                              08310000
+083200                PV-DTL-NW-STR-DISC-AMT                            08320000
+083300                PV-DTL-TRD-DISC-AMT                               08330000
+083400                PV-DTL-NET-COST-AMT                               08340000
+083500                PV-DTL-MOS-DISC-AMT.                              08350000
+083600                                                                  08360000
+083700                                                                  08370000
+083800 E100-PROCESS-ERRORS.                                             08380000
+083900*----------------------------------------------------------------*08390000
+084000*  IF AN ERROR ALREADY EXISTS WITH THIS KEY, DON'T DUPLICATE     *08400000
+084100*   IT ON THE TOUTAPF TABLE.                                     *08410000
+084200*  PERFORM A CHECKPOINT COMMIT. SO THAT IF A RESTART IS          *08420000
+084300*   NECESSARY, DON'T PROCESS THAT ERROR AGAIN.                   *08430000
+084400*----------------------------------------------------------------*08440000
+084500                                                                  08450000
+084600     IF PV-ERR-KEY-FIELDS NOT = AP041-KEY-FIELDS                  08460000
+084700         MOVE PV-ERR-KEY-FIELDS  TO AP041-KEY-FIELDS              08470000
+084800         MOVE PV-ERR-ENT-NME-DESC                                 08480000
+084900                                 TO AP041-VENDOR-NAME             08490000
+085000                                                                  08500000
+085100          PERFORM I400-INSERT-TOUTAPF-ROW                         08510000
+085200     END-IF.                                                      08520000
+085300                                                                  08530000
+085400     PERFORM U200-CHECKPOINT-COMMIT.                              08540000
+085500     MOVE SPACES                 TO AP041-ERROR-CDE               08550000
+085600                                    AP041-OB-FIELD-CDE.           08560000
+085700                                                                  08570000
+085800                                                                  08580000
+085900 I100-INSERT-TADJRNL-ROW.                                         08590000
+086000*---------------------------------------------------------------- 08600000
+086100*    INSERTS A ROW INTO THE TADJRNL TABLE. HEADER DATA.           08610000
+086200*---------------------------------------------------------------- 08620000
+086300                                                                  08630000
+086400     MOVE 'I100-INSERT-TADJRNL-ROW'                               08640000
+086500                                 TO AA-PARAGRAPH-NAME             08650000
+086600                                                                  08660000
+086700     INITIALIZE DCLTADJRNL.                                       08670000
+086800                                                                  08680000
+086810     IF AP045-PSTG-FYR-NBR = APCNTL-CURR-PSTG-FYR-NBR AND         08681000
+086820        AP045-PSTG-FMN-NBR = APCNTL-CURR-PSTG-FMN-NBR AND         08682000
+086830        AP045-PSTG-FWK-NBR = APCNTL-CURR-PSTG-FWK-NBR             08683000
+086840        CONTINUE                                                  08684000
+086850     ELSE                                                         08685000
+086851        IF AP045-PSTG-FYR-NBR = APCNTL-PREV-PSTG-FYR-NBR AND      08685100
+086852           AP045-PSTG-FMN-NBR = APCNTL-PREV-PSTG-FMN-NBR AND      08685200
+086853           AP045-PSTG-FWK-NBR = APCNTL-PREV-PSTG-FWK-NBR AND      08685300
+086854           APCNTL-MULT-PSTG-PER-IND = 'Y'                         08685400
+086855           CONTINUE                                               08685500
+086856        ELSE                                                      08685600
+086857           MOVE PV-PSTG-FYR-NBR TO AP045-PSTG-FYR-NBR             08685700
+086858           MOVE PV-PSTG-FMN-NBR TO AP045-PSTG-FMN-NBR             08685800
+086859           MOVE PV-PSTG-FWK-NBR TO AP045-PSTG-FWK-NBR             08685900
+086860        END-IF                                                    08686000
+086861     END-IF.                                                      08686100
+086870                                                                  08687000
+086900     MOVE AP045-ENTR-DTE         TO PV-ENTRDTE-TIMESTAMP.         08690000
+087000     MOVE AP045-ENTR-TME         TO PV-ENTRTME-TIMESTAMP.         08700000
+087100     MOVE PV-ENTR-TIMESTAMP      TO ADJRNL-ENTR-TMST.             08710000
+087200                                                                  08720000
+087300     MOVE AP045-PO-NBR           TO ADJRNL-PO-NBR.                08730000
+087400     MOVE AP045-HDR-STR-NBR      TO ADJRNL-STR-NBR.               08740000
+087500     MOVE AP045-ENT-ID           TO ADJRNL-ENT-ID.                08750000
+087600     MOVE AP045-PS-BTCH-NBR      TO ADJRNL-PS-BTCH-NBR.           08760000
+087700                                                                  08770000
+087800     PERFORM WITH TEST AFTER                                      08780000
+087900       VARYING PV-RETRY-COUNT FROM 1 BY 1                         08790000
+088000       UNTIL   PV-RETRY-COUNT > PC-RETRY-MAX OR                   08800000
+088100                 SQLCODE = ZERO                                   08810000
+088200         EXEC SQL                                                 08820000
+088300             INSERT INTO TADJRNL                                  08830000
+088400                     (VND_NBR                                     08840000
+088500                    , DOC_NBR                                     08850000
+088600                    , DOC_DTE                                     08860000
+088700                    , AP_TRN_CDE                                  08870000
+088800                    , PO_NBR                                      08880000
+088900                    , DEPT_NBR                                    08890000
+089000                    , GL_ACCT_NBR                                 08900000
+089100                    , STR_NBR                                     08910000
+089200                    , ENTR_TMST                                   08920000
+089300                    , ENTR_ID                                     08930000
+089400                    , ORGN_CDE                                    08940000
+089500                    , GRO_COST_AMT                                08950000
+089600                    , RTL_AMT                                     08960000
+089700                    , FRGT_AMT                                    08970000
+089800                    , MISC_CHRG_AMT                               08980000
+089900                    , TERM_DISC_PCT                               08990000
+090000                    , TERM_DISC_AMT                               09000000
+090100                    , NW_STR_DISC_PCT                             09010000
+090200                    , NW_STR_DISC_AMT                             09020000
+090300                    , TRD_DISC_PCT                                09030000
+090400                    , TRD_DISC_AMT                                09040000
+090500                    , NET_COST_AMT                                09050000
+090600                    , INV_CTOFF_DTE                               09060000
+090700                    , TRN_TYP_CDE                                 09070000
+090800                    , PSTG_FYR_NBR                                09080000
+090900                    , PSTG_FMN_NBR                                09090000
+091000                    , PSTG_FWK_NBR                                09100000
+091100                    , BRCDE_NBR                                   09110000
+091200                    , PS_BTCH_NBR                                 09120000
+091300                    , ENT_ID                                      09130000
+091400                    , MOS_DISC_PCT                                09140000
+091500                    , MOS_DISC_AMT)                               09150000
+091600             VALUES  (:AP045-VND-NBR                              09160000
+091700                    , :AP045-DOC-NBR                              09170000
+091800                    , :AP045-DOC-DTE                              09180000
+091900                    , :AP045-AP-TRN-CDE                           09190000
+092000                    , :ADJRNL-PO-NBR                              09200000
+092100                    , :AP045-DEPT-NBR                             09210000
+092200                    , :AP045-GL-ACCT-NBR                          09220000
+092300                    , :ADJRNL-STR-NBR                             09230000
+092400                    , :ADJRNL-ENTR-TMST                           09240000
+092500                    , :AP045-ENTR-ID                              09250000
+092600                    , :AP045-ORGN-CDE                             09260000
+092700                    , :AP045-TOT-GRO-COST-AMT                     09270000
+092800                    , :AP045-TOT-RETL-AMT                         09280000
+092900                    , :AP045-TOT-FRGT-AMT                         09290000
+093000                    , :AP045-TOT-MISC-CHRG-AMT                    09300000
+093100                    , :AP045-TERM-DISC-PCT                        09310000
+093200                    , :AP045-TOT-TERM-DISC-AMT                    09320000
+093300                    , :AP045-NW-STR-DISC-PCT                      09330000
+093400                    , :AP045-TOT-NW-STR-DISC-AMT                  09340000
+093500                    , :AP045-TRD-DISC-PCT                         09350000
+093600                    , :AP045-TOT-TRD-DISC-AMT                     09360000
+093700                    , :AP045-TOT-NET-COST-AMT                     09370000
+093800                    , :AP045-INV-CUTOFF-DTE                       09380000
+093900                    , :AP045-TRN-TYP-CDE                          09390000
+094000                    , :AP045-PSTG-FYR-NBR                         09400000
+094100                    , :AP045-PSTG-FMN-NBR                         09410000
+094200                    , :AP045-PSTG-FWK-NBR                         09420000
+094300                    , :AP045-BAR-CDE                              09430000
+094400                    , :ADJRNL-PS-BTCH-NBR                         09440000
+094500                    , :ADJRNL-ENT-ID                              09450000
+094600                    , :AP045-MOS-DISC-PCT                         09460000
+094700                    , :AP045-TOT-MOS-DISC-AMT)                    09470000
+094800         END-EXEC                                                 09480000
+094900                                                                  09490000
+095000         EVALUATE TRUE                                            09500000
+095100             WHEN SQLCODE = ZERO                                  09510000
+095200                  ADD 1          TO PV-HDR-TEMP                   09520000
+095300             WHEN SQLCODE = -904                                  09530000
+095400             WHEN SQLCODE = -913                                  09540000
+095500                  CONTINUE                                        09550000
+095600                                                                  09560000
+095700             WHEN SQLWARN0 NOT = SPACES                           09570000
+095800             WHEN SQLCODE      NOT = ZERO                         09580000
+095900                 MOVE 'UNSUCCESSFUL INSERT'                       09590000
+096000                                 TO AA-DB2-OPERATION              09600000
+096100                 MOVE 'TADJRNL'  TO AA-DB2-TABLE-1                09610000
+096200                 MOVE SPACES     TO AA-DB2-TABLE-2                09620000
+096300                                    AA-DB2-TABLE-3                09630000
+096400                 PERFORM Z999-DB2-ABEND                           09640000
+096500         END-EVALUATE                                             09650000
+096600     END-PERFORM.                                                 09660000
+096700                                                                  09670000
+096800     IF PV-RETRY-COUNT > PC-RETRY-MAX                             09680000
+096900         MOVE 'MAX RETRIES EXCEEDED ON INSERT'                    09690000
+097000                                 TO AA-DB2-OPERATION              09700000
+097100         MOVE 'TADJRNL'          TO AA-DB2-TABLE-1                09710000
+097200         MOVE SPACES             TO AA-DB2-TABLE-2                09720000
+097300                                    AA-DB2-TABLE-3                09730000
+097400         PERFORM Z999-DB2-ABEND                                   09740000
+097500     END-IF.                                                      09750000
+097600                                                                  09760000
+097700                                                                  09770000
+097800 I200-INSERT-TAJPSINT-ROW.                                        09780000
+097900*---------------------------------------------------------------- 09790000
+098000*    INSERTS A ROW INTO THE TAJPSINT TABLE. HEADER DATA.          09800000
+098100*---------------------------------------------------------------- 09810000
+098200                                                                  09820000
+098300     MOVE 'I200-INSERT-TAJPSINT-ROW'                              09830000
+098400                                 TO AA-PARAGRAPH-NAME             09840000
+098500                                                                  09850000
+098600*    INITIALIZE DCLTAJPSINT.                                      09860016
+098700                                                                  09870000
+098800     PERFORM WITH TEST AFTER                                      09880000
+098900         VARYING PV-RETRY-COUNT FROM 1 BY 1                       09890000
+099000         UNTIL   PV-RETRY-COUNT > PC-RETRY-MAX OR                 09900000
+099100                 SQLCODE = ZERO                                   09910000
+099200                                                                  09920000
+099300         EXEC SQL                                                 09930000
+099400             INSERT INTO TAJPSINT                                 09940000
+099500                    ( VND_NBR                                     09950000
+099600                    , DOC_NBR                                     09960000
+099700                    , DOC_DTE                                     09970000
+099800                    , AP_TRN_CDE                                  09980000
+099900                    , DUE_DTE                                     09990000
+099910                    , DOC_HLD_CDE                                 09991014
+100000                    , RSN_1ST_LNE_TXT                             10000000
+100100                    , RSN_2ND_LNE_TXT                             10010000
+100200                    , AUTH_NBR)                                   10020000
+100300             VALUES  (:AP045-VND-NBR                              10030000
+100400                    , :AP045-DOC-NBR                              10040000
+100500                    , :AP045-DOC-DTE                              10050000
+100600                    , :AP045-AP-TRN-CDE                           10060000
+100700                    , :AP045-PYMT-DUE-DTE                         10070000
+100710                    , :AJPSINT-DOC-HLD-CDE                        10071015
+100800                    , :AP045-RSN-1ST-LNE-TXT                      10080000
+100900                    , :AP045-RSN-2ND-LNE-TXT                      10090000
+101000                    , :AP045-AUTH-NBR)                            10100000
+101100         END-EXEC                                                 10110000
+101200                                                                  10120000
+101300         EVALUATE TRUE                                            10130000
+101400             WHEN SQLCODE = ZERO                                  10140000
+101500                  ADD 1          TO PV-AJPSINT-TEMP               10150000
+101600             WHEN SQLCODE = -904                                  10160000
+101700             WHEN SQLCODE = -913                                  10170000
+101800                  CONTINUE                                        10180000
+102000             WHEN SQLWARN0 NOT = SPACES                           10200000
+102100             WHEN SQLCODE  NOT = ZERO                             10210000
+102200                 MOVE 'UNSUCCESSFUL INSERT'                       10220000
+102300                                 TO AA-DB2-OPERATION              10230000
+102400                 MOVE 'TAJPSINT' TO AA-DB2-TABLE-1                10240000
+102500                 MOVE SPACES     TO AA-DB2-TABLE-2                10250000
+102600                                    AA-DB2-TABLE-3                10260000
+102700                 PERFORM Z999-DB2-ABEND                           10270000
+102800         END-EVALUATE                                             10280000
+102900     END-PERFORM.                                                 10290000
+103000                                                                  10300000
+103100     IF PV-RETRY-COUNT > PC-RETRY-MAX                             10310000
+103200         MOVE 'MAX RETRIES EXCEEDED ON INSERT'                    10320000
+103300                                 TO AA-DB2-OPERATION              10330000
+103400         MOVE 'TAJPSINT'         TO AA-DB2-TABLE-1                10340000
+103500         MOVE SPACES             TO AA-DB2-TABLE-2                10350000
+103600                                    AA-DB2-TABLE-3                10360000
+103700         PERFORM Z999-DB2-ABEND                                   10370000
+103800     END-IF.                                                      10380000
+103900                                                                  10390000
+104000                                                                  10400000
+104100 I300-INSERT-TADJDIS-ROW.                                         10410000
+104200*---------------------------------------------------------------- 10420000
+104300*    INSERTS A ROW INTO THE TADJDIS TABLE. DETAIL DATA.           10430000
+104400*---------------------------------------------------------------- 10440000
+104500                                                                  10450000
+104600     MOVE 'I300-INSERT-TADJDIS-ROW'                               10460000
+104700                                 TO AA-PARAGRAPH-NAME             10470000
+104800                                                                  10480000
+104900     INITIALIZE DCLTADJDIS.                                       10490000
+105000                                                                  10500000
+105100     MOVE AP045-STR-NBR          TO ADJDIS-STR-NBR.               10510000
+105200     MOVE AP045-SKU-NBR          TO ADJDIS-SKU-NBR.               10520000
+105300                                                                  10530000
+105400     PERFORM WITH TEST AFTER                                      10540000
+105500         VARYING PV-RETRY-COUNT FROM 1 BY 1                       10550000
+105600         UNTIL   PV-RETRY-COUNT > PC-RETRY-MAX OR                 10560000
+105700                 SQLCODE = ZERO                                   10570000
+105800                                                                  10580000
+105900         EXEC SQL                                                 10590000
+106000             INSERT INTO TADJDIS                                  10600000
+106100                    ( VND_NBR                                     10610000
+106200                    , DOC_NBR                                     10620000
+106300                    , DOC_DTE                                     10630000
+106400                    , AP_TRN_CDE                                  10640000
+106500                    , DISTRB_SEQ_NBR                              10650000
+106600                    , STR_NBR                                     10660000
+106700                    , DEPT_NBR                                    10670000
+106800                    , CL_NBR                                      10680000
+106900                    , SKU_NBR                                     10690000
+107000                    , GRO_COST_AMT                                10700000
+107100                    , RTL_AMT                                     10710000
+107200                    , FRGT_AMT                                    10720000
+107300                    , MISC_CHRG_AMT                               10730000
+107400                    , DISC_AMT                                    10740000
+107500                    , NET_COST_AMT)                               10750000
+107600             VALUES  (:AP045-VND-NBR                              10760000
+107700                    , :AP045-DOC-NBR                              10770000
+107800                    , :AP045-DOC-DTE                              10780000
+107900                    , :AP045-AP-TRN-CDE                           10790000
+108000                    , :PV-DISTRIB-SEQ-NBR                         10800000
+108100                    , :ADJDIS-STR-NBR                             10810000
+108200                    , :AP045-DEPT-NBR                             10820000
+108300                    , :AP045-CL-NBR                               10830000
+108400                    , :ADJDIS-SKU-NBR                             10840000
+108500                    , :AP045-GRO-COST-AMT                         10850000
+108600                    , :AP045-RETL-AMT                             10860000
+108700                    , :AP045-FRGT-AMT                             10870000
+108800                    , :AP045-MISC-CHRG-AMT                        10880000
+108900                    , :PV-DISC-AMT                                10890000
+109000                    , :AP045-NET-COST-AMT)                        10900000
+109100         END-EXEC                                                 10910000
+109200                                                                  10920000
+109300         EVALUATE TRUE                                            10930000
+109400             WHEN SQLCODE = ZERO                                  10940000
+109500                  ADD 1          TO PV-DTL-TEMP                   10950000
+109600             WHEN SQLCODE = -904                                  10960000
+109700             WHEN SQLCODE = -913                                  10970000
+109800                  CONTINUE                                        10980000
+109900                                                                  10990000
+110000             WHEN SQLWARN0 NOT = SPACES                           11000000
+110100             WHEN SQLCODE  NOT = ZERO                             11010000
+110200                 MOVE 'UNSUCCESSFUL INSERT'                       11020000
+110300                                 TO AA-DB2-OPERATION              11030000
+110400                 MOVE 'TADJDIS'  TO AA-DB2-TABLE-1                11040000
+110500                 MOVE SPACES     TO AA-DB2-TABLE-2                11050000
+110600                                    AA-DB2-TABLE-3                11060000
+110700                 PERFORM Z999-DB2-ABEND                           11070000
+110800         END-EVALUATE                                             11080000
+110900     END-PERFORM.                                                 11090000
+111000                                                                  11100000
+111100     IF PV-RETRY-COUNT > PC-RETRY-MAX                             11110000
+111200         MOVE 'MAX RETRIES EXCEEDED ON INSERT'                    11120000
+111300                                 TO AA-DB2-OPERATION              11130000
+111400         MOVE 'TADJDIS '         TO AA-DB2-TABLE-1                11140000
+111500         MOVE SPACES             TO AA-DB2-TABLE-2                11150000
+111600                                    AA-DB2-TABLE-3                11160000
+111700         PERFORM Z999-DB2-ABEND                                   11170000
+111800     END-IF.                                                      11180000
+111900                                                                  11190000
+112000                                                                  11200000
+112100 I400-INSERT-TOUTAPF-ROW.                                         11210000
+112200*---------------------------------------------------------------- 11220000
+112300*    INSERTS A ROW INTO THE TOUTAPF TABLE. ERROR DATA.            11230000
+112400*---------------------------------------------------------------- 11240000
+112500                                                                  11250000
+112600     MOVE 'I400-INSERT-TOUTAPF-ROW'                               11260000
+112700                                 TO AA-PARAGRAPH-NAME             11270000
+112800                                                                  11280000
+112900     INITIALIZE DCLTOUTAPF.                                       11290000
+113000                                                                  11300000
+113100     MOVE AP041-RECORD           TO OUTAPF-ADJ-ERR-RPT-ODR.       11310000
+113200                                                                  11320000
+113300     PERFORM WITH TEST AFTER                                      11330000
+113400         VARYING PV-RETRY-COUNT FROM 1 BY 1                       11340000
+113500         UNTIL   PV-RETRY-COUNT > PC-RETRY-MAX OR                 11350000
+113600                 SQLCODE = ZERO                                   11360000
+113700                                                                  11370000
+113800         EXEC SQL                                                 11380000
+113900             INSERT INTO TOUTAPF                                  11390000
+114000                    ( ADJ_ERR_RPT_ODR )                           11400000
+114100             VALUES ( :OUTAPF-ADJ-ERR-RPT-ODR)                    11410000
+114200         END-EXEC                                                 11420000
+114300                                                                  11430000
+114400         EVALUATE TRUE                                            11440000
+114500             WHEN SQLCODE = ZERO                                  11450000
+114600                  ADD +1         TO PV-AP041-WROTE                11460000
+114700             WHEN SQLCODE = -904                                  11470000
+114800             WHEN SQLCODE = -913                                  11480000
+114900                  CONTINUE                                        11490000
+115000                                                                  11500000
+115100             WHEN SQLWARN0 NOT = SPACES                           11510000
+115200             WHEN SQLCODE  NOT = ZERO                             11520000
+115300                 MOVE 'UNSUCCESSFUL INSERT'                       11530000
+115400                                 TO AA-DB2-OPERATION              11540000
+115500                 MOVE 'TOUTAPF'  TO AA-DB2-TABLE-1                11550000
+115600                 MOVE SPACES     TO AA-DB2-TABLE-2                11560000
+115700                                    AA-DB2-TABLE-3                11570000
+115800                 PERFORM Z999-DB2-ABEND                           11580000
+115900         END-EVALUATE                                             11590000
+116000     END-PERFORM.                                                 11600000
+116100                                                                  11610000
+116200     IF PV-RETRY-COUNT > PC-RETRY-MAX                             11620000
+116300         MOVE 'MAX RETRIES EXCEEDED ON INSERT'                    11630000
+116400                                 TO AA-DB2-OPERATION              11640000
+116500         MOVE 'TOUTAPF '         TO AA-DB2-TABLE-1                11650000
+116600         MOVE SPACES             TO AA-DB2-TABLE-2                11660000
+116700                                    AA-DB2-TABLE-3                11670000
+116800         PERFORM Z999-DB2-ABEND                                   11680000
+116900     END-IF.                                                      11690000
+117000                                                                  11700000
+117100                                                                  11710000
+117200 R100-READ-SUMRY-TRANS-FILE.                                      11720000
+117300*---------------------------------------------------------------* 11730000
+117400*    READ THE ADJ-TRANS-FILE INTO COPYBOOK APRD045              * 11740000
+117500*---------------------------------------------------------------* 11750000
+117600                                                                  11760000
+117700     MOVE 'R100-READ-SUMRY-TRANS-FILE'                            11770000
+117800                                 TO AA-PARAGRAPH-NAME             11780000
+117900                                                                  11790000
+118000     IF PS-SUMRY-TRANS-MORE                                       11800000
+118100         READ SUMRY-TRANS-FILE INTO AP045-TRANSACTION-FILE        11810000
+118200           AT END                                                 11820000
+118300             SET PS-SUMRY-TRANS-END TO TRUE                       11830000
+118400                                                                  11840000
+118500           NOT AT END                                             11850000
+118600             ADD 1               TO PV-AP045-READ                 11860000
+118700             IF AP045-HEADER-RECORD                               11870000
+118800                 ADD +1          TO PV-AP045-HDR-READ             11880000
+118900             ELSE                                                 11890000
+119000                 ADD +1          TO PV-AP045-DTL-READ             11900000
+119100             END-IF                                               11910000
+119200         END-READ                                                 11920000
+119300     END-IF.                                                      11930000
+119400                                                                  11940000
+119500                                                                  11950000
+119600 S100-SELECT-TAPCNTL.                                             11960000
+119700***************************************************************** 11970000
+119800*     SELECT INFORMATION FROM TAPCNTL TABLE                       11980000
+119900***************************************************************** 11990000
+120000                                                                  12000000
+120100     MOVE 'S100-SELECT-TAPCNTL'  TO AA-PARAGRAPH-NAME.            12010000
+120200                                                                  12020000
+120300     EXEC SQL                                                     12030000
+120400         SELECT   CURR_PSTG_FYR_NBR                               12040000
+120500                , CURR_PSTG_FMN_NBR                               12050000
+120600                , CURR_PSTG_FWK_NBR                               12060000
+120700                , PREV_PSTG_FYR_NBR                               12070000
+120800                , PREV_PSTG_FMN_NBR                               12080000
+120900                , PREV_PSTG_FWK_NBR                               12090000
+121000                , MULT_PSTG_PER_IND                               12100000
+121100         INTO    :APCNTL-CURR-PSTG-FYR-NBR                        12110000
+121200                ,:APCNTL-CURR-PSTG-FMN-NBR                        12120000
+121300                ,:APCNTL-CURR-PSTG-FWK-NBR                        12130000
+121400                ,:APCNTL-PREV-PSTG-FYR-NBR                        12140000
+121500                ,:APCNTL-PREV-PSTG-FMN-NBR                        12150000
+121600                ,:APCNTL-PREV-PSTG-FWK-NBR                        12160000
+121700                ,:APCNTL-MULT-PSTG-PER-IND                        12170000
+121800         FROM   TAPCNTL                                           12180000
+121900     END-EXEC.                                                    12190000
+122000                                                                  12200000
+122100     EVALUATE TRUE                                                12210000
+122200         WHEN SQLCODE = ZERO                                      12220000
+122300              CONTINUE                                            12230000
+122400                                                                  12240000
+122500         WHEN SQLWARN0 NOT = SPACES                               12250000
+122600         WHEN SQLCODE  NOT = ZERO                                 12260000
+122700             MOVE 'UNSUCCESSFUL SELECT OF PAYMENT CONTROL TBL'    12270000
+122800                                 TO AA-DB2-OPERATION              12280000
+122900             MOVE 'TAPCNTL'      TO AA-DB2-TABLE-1                12290000
+123000             MOVE SPACES         TO AA-DB2-TABLE-2                12300000
+123100             PERFORM Z999-DB2-ABEND                               12310000
+123200     END-EVALUATE.                                                12320000
+123300                                                                  12330000
+123400                                                                  12340000
+123500 S200-GET-TRANCODE.                                               12350000
+123600*---------------------------------------------------------------- 12360000
+123700*   SELECTS TRANCODE FROM TTRNCDE                                 12370000
+123800*---------------------------------------------------------------- 12380000
+123900                                                                  12390000
+124000     MOVE 'S200-GET-TRANCODE   '                                  12400000
+124100                                 TO AA-PARAGRAPH-NAME.            12410000
+124200                                                                  12420000
+124300     EXEC SQL                                                     12430000
+124400         SELECT                                                   12440000
+124500             AP_TRN_CDE                                           12450000
+124600            ,AP_PSTG_IND                                          12460000
+124700         INTO                                                     12470000
+124800             :TRNCDE-AP-TRN-CDE                                   12480000
+124900            ,:TRNCDE-AP-PSTG-IND                                  12490000
+125000         FROM TTRNCDE                                             12500000
+125100         WHERE AP_TRN_CDE   =  :AP045-AP-TRN-CDE                  12510000
+125200         AND   EFF_STRT_DTE <= CURRENT DATE                       12520000
+125300         AND   EFF_END_DTE  >  CURRENT DATE                       12530000
+125400     END-EXEC.                                                    12540000
+125500                                                                  12550000
+125600     EVALUATE TRUE                                                12560000
+125700         WHEN SQLCODE = ZERO                                      12570000
+125800             SET PS-TRANCODE-VALID                                12580000
+125900                                 TO TRUE                          12590000
+126000         WHEN SQLCODE = +100                                      12600000
+126100             SET PS-TRANCODE-INVALID                              12610000
+126200                                 TO TRUE                          12620000
+126300                                                                  12630000
+126400         WHEN SQLWARN0 NOT = SPACES                               12640000
+126500         WHEN SQLCODE  NOT = ZERO                                 12650000
+126600             MOVE 'UNSUCCESSFUL SELECT FOR TRAN CODE    '         12660000
+126700                                 TO AA-DB2-OPERATION              12670000
+126800             MOVE 'TTRNCDE'      TO AA-DB2-TABLE-1                12680000
+126900             MOVE SPACES         TO AA-DB2-TABLE-2                12690000
+127000                                    AA-DB2-TABLE-3                12700000
+127100             PERFORM Z999-DB2-ABEND                               12710000
+127200     END-EVALUATE.                                                12720000
+127300                                                                  12730000
+127400                                                                  12740000
+127500 U100-UPDATE-TCKRSTCNTL.                                          12750000
+127600*----------------------------------------------------------------*12760000
+127700*    UPDATES THE CHECKPOINT RESTART CONTROL TABLE.  THE STATUS   *12770000
+127800*    CODE IS SET TO '9' (RUN IN PROGRESS) OR '0' (RUN COMPLETE). *12780000
+127900*----------------------------------------------------------------*12790000
+128000                                                                  12800000
+128100     MOVE 'U100-UPDATE-TCKRSTCNTL'                                12810000
+128200                                 TO AA-PARAGRAPH-NAME.            12820000
+128300                                                                  12830000
+128400     PERFORM WITH TEST AFTER                                      12840000
+128500         VARYING PV-RETRY-COUNT FROM 1 BY 1                       12850000
+128600         UNTIL   PV-RETRY-COUNT > PC-RETRY-MAX OR                 12860000
+128700                 SQLCODE = ZERO                                   12870000
+128800                                                                  12880000
+128900         EXEC SQL                                                 12890000
+129000             UPDATE TCKRSTCNTL                                    12900000
+129100             SET CKPT_STAT_CODE     = :CR-CKPT-STAT-CODE          12910000
+129200             WHERE PLAN_NAME        = :PC-PROGRAM-NAME            12920000
+129300         END-EXEC                                                 12930000
+129400                                                                  12940000
+129500         EVALUATE TRUE                                            12950000
+129600             WHEN SQLCODE = ZERO                                  12960000
+129700             WHEN SQLCODE = -904                                  12970000
+129800             WHEN SQLCODE = -913                                  12980000
+129900                  CONTINUE                                        12990000
+130000                                                                  13000000
+130100             WHEN SQLWARN0 NOT = SPACES                           13010000
+130200             WHEN SQLCODE      NOT = ZERO                         13020000
+130300                 DISPLAY '******** PLAN_NAME:'                    13030000
+130400                          PC-PROGRAM-NAME                         13040000
+130500                 MOVE 'UNSUCCESSFUL UPDATE'                       13050000
+130600                                 TO AA-DB2-OPERATION              13060000
+130700                 MOVE 'TCKRSTCNTL' TO AA-DB2-TABLE-1              13070000
+130800                 MOVE SPACES     TO AA-DB2-TABLE-2                13080000
+130900                                    AA-DB2-TABLE-3                13090000
+131000                 PERFORM Z999-DB2-ABEND                           13100000
+131100         END-EVALUATE                                             13110000
+131200     END-PERFORM.                                                 13120000
+131300                                                                  13130000
+131400     IF PV-RETRY-COUNT > PC-RETRY-MAX                             13140000
+131500         DISPLAY '******** PLAN_NAME:'                            13150000
+131600                  PC-PROGRAM-NAME                                 13160000
+131700         MOVE 'MAX RETRIES EXCEEDED ON UPDATE'                    13170000
+131800                                 TO AA-DB2-OPERATION              13180000
+131900         MOVE 'TCKRSTCNTL'       TO AA-DB2-TABLE-1                13190000
+132000         MOVE SPACES             TO AA-DB2-TABLE-2                13200000
+132100                                    AA-DB2-TABLE-3                13210000
+132200         PERFORM Z999-DB2-ABEND                                   13220000
+132300     END-IF.                                                      13230000
+132400                                                                  13240000
+132500                                                                  13250000
+132600 U200-CHECKPOINT-COMMIT.                                          13260000
+132700*----------------------------------------------------------------*13270000
+132800*    DO THE CHECKPOINT UPDATE AND THE COMMIT.                    *13280000
+132900*----------------------------------------------------------------*13290000
+133000                                                                  13300000
+133100     MOVE 'U200-CHECKPOINT-COMMIT'                                13310000
+133200                                 TO AA-PARAGRAPH-NAME.            13320000
+133300                                                                  13330000
+133400     ADD PV-HDR-TEMP               TO PV-HDR-INSERT.              13340000
+133500     ADD PV-AJPSINT-TEMP           TO PV-AJPSINT-INSERT.          13350000
+133600     ADD PV-DTL-TEMP               TO PV-DTL-INSERT.              13360000
+133700     INITIALIZE PV-HDR-TEMP                                       13370000
+133800                PV-AJPSINT-TEMP                                   13380000
+133900                PV-DTL-TEMP.                                      13390000
+134000                                                                  13400000
+134100     PERFORM U260-UPDATE-TCKRSTINF.                               13410000
+134200     PERFORM U270-COMMIT.                                         13420000
+134300                                                                  13430000
+134400                                                                  13440000
+134500 U260-UPDATE-TCKRSTINF.                                           13450000
+134600*----------------------------------------------------------------*13460000
+134700*    UPDATES THE CHECKPOINT RESTART INFO TABLE.  THE WORKING     *13470000
+134800*    STORAGE DESCRIPTION FIELD IS UPDATED WITH THE CURRENT INPUT *13480000
+134900*    FILE RECORD COUNTS AND THE LAST KEY DATA PROCESSED.         *13490000
+135000*----------------------------------------------------------------*13500000
+135100                                                                  13510000
+135200     MOVE 'U260-UPDATE-TCKRSTINF'                                 13520000
+135300                                 TO AA-PARAGRAPH-NAME.            13530000
+135400                                                                  13540000
+135500     MOVE PV-AP045-READ          TO CR-AP045-READ.                13550000
+135600     MOVE PV-AP045-HDR-READ      TO CR-AP045-HDR-READ.            13560000
+135700     MOVE PV-AP045-DTL-READ      TO CR-AP045-DTL-READ.            13570000
+135800     MOVE PV-HDR-INSERT          TO CR-HDR-INSERT.                13580000
+135900     MOVE PV-AJPSINT-INSERT      TO CR-AJPSINT-INSERT.            13590000
+136000     MOVE PV-DTL-INSERT          TO CR-DTL-INSERT.                13600000
+136100     MOVE PV-HDR-BYPASS          TO CR-HDR-BYPASS.                13610000
+136200     MOVE PV-AJPSINT-BYPASS      TO CR-AJPSINT-BYPASS.            13620000
+136300     MOVE PV-DTL-BYPASS          TO CR-DTL-BYPASS.                13630000
+136400     MOVE PV-AP041-WROTE         TO CR-AP041-WROTE.               13640000
+136500                                                                  13650000
+136600     MOVE CR-CKPT-RESTART-INFO   TO TCKRSTINF-WORK-STRG-DESC-TEXT.13660000
+136700     MOVE 4022                   TO TCKRSTINF-WORK-STRG-DESC-LEN. 13670000
+136800                                                                  13680000
+136900     PERFORM WITH TEST AFTER                                      13690000
+137000         VARYING PV-RETRY-COUNT FROM 1 BY 1                       13700000
+137100         UNTIL   PV-RETRY-COUNT > PC-RETRY-MAX OR                 13710000
+137200                 SQLCODE = ZERO                                   13720000
+137300                                                                  13730000
+137400         EXEC SQL                                                 13740000
+137500             UPDATE TCKRSTINF                                     13750000
+137600             SET WORK_STRG_DESC   = :TCKRSTINF-WORK-STRG-DESC     13760000
+137700             WHERE PLAN_NAME      = :PC-PROGRAM-NAME              13770000
+137800         END-EXEC                                                 13780000
+137900                                                                  13790000
+138000         EVALUATE TRUE                                            13800000
+138100             WHEN SQLCODE = ZERO                                  13810000
+138200             WHEN SQLCODE = -904                                  13820000
+138300             WHEN SQLCODE = -913                                  13830000
+138400                  CONTINUE                                        13840000
+138500                                                                  13850000
+138600             WHEN SQLWARN0     NOT = SPACES                       13860000
+138700             WHEN SQLCODE      NOT = ZERO                         13870000
+138800                 DISPLAY '******** PLAN_NAME:'                    13880000
+138900                          PC-PROGRAM-NAME                         13890000
+139000                 MOVE 'UNSUCCESSFUL UPDATE'                       13900000
+139100                                 TO AA-DB2-OPERATION              13910000
+139200                 MOVE 'TCKRSTINF' TO AA-DB2-TABLE-1               13920000
+139300                 MOVE SPACES     TO AA-DB2-TABLE-2                13930000
+139400                                    AA-DB2-TABLE-3                13940000
+139500                 PERFORM Z999-DB2-ABEND                           13950000
+139600         END-EVALUATE                                             13960000
+139700     END-PERFORM.                                                 13970000
+139800                                                                  13980000
+139900     IF PV-RETRY-COUNT > PC-RETRY-MAX                             13990000
+140000         DISPLAY '******** PLAN_NAME:'                            14000000
+140100                  PC-PROGRAM-NAME                                 14010000
+140200         MOVE 'MAX RETRIES EXCEEDED ON UPDATE'                    14020000
+140300                                 TO AA-DB2-OPERATION              14030000
+140400         MOVE 'TCKRSTINF'        TO AA-DB2-TABLE-1                14040000
+140500         MOVE SPACES             TO AA-DB2-TABLE-2                14050000
+140600                                    AA-DB2-TABLE-3                14060000
+140700         PERFORM Z999-DB2-ABEND                                   14070000
+140800     END-IF.                                                      14080000
+140900                                                                  14090000
+141000                                                                  14100000
+141100 U270-COMMIT.                                                     14110000
+141200*----------------------------------------------------------------*14120000
+141300*    COMMITS DB2 UPDATES FOR THE DATA PROCESSED.                 *14130000
+141400*----------------------------------------------------------------*14140000
+141500                                                                  14150000
+141600     MOVE 'U270-COMMIT                '                           14160000
+141700                                 TO AA-PARAGRAPH-NAME.            14170000
+141800                                                                  14180000
+141900     EXEC SQL                                                     14190000
+142000         COMMIT                                                   14200000
+142100     END-EXEC.                                                    14210000
+142200                                                                  14220000
+142300     EVALUATE TRUE                                                14230000
+142400         WHEN SQLCODE = ZEROS                                     14240000
+142500              CONTINUE                                            14250000
+142600         WHEN OTHER                                               14260000
+142700             MOVE 'UNSUCCESSFUL COMMIT'                           14270000
+142800                                 TO AA-DB2-OPERATION              14280000
+142900             MOVE SPACES         TO AA-DB2-TABLE-1                14290000
+143000                                    AA-DB2-TABLE-2                14300000
+143100                                    AA-DB2-TABLE-3                14310000
+143200             PERFORM Z999-DB2-ABEND                               14320000
+143300     END-EVALUATE.                                                14330000
+143400                                                                  14340000
+143500                                                                  14350000
+143600 U800-ROLLBACK.                                                   14360000
+143700*----------------------------------------------------------------*14370000
+143800*    ROLLBACK DB2 UPDATES FOR THE KEY PROCESSED.                 *14380000
+143900*----------------------------------------------------------------*14390000
+144000                                                                  14400000
+144100     MOVE 'U800-ROLLBACK           '                              14410000
+144200                                 TO AA-PARAGRAPH-NAME.            14420000
+144300                                                                  14430000
+144400     ADD PV-HDR-TEMP             TO PV-HDR-BYPASS.                14440000
+144500     ADD PV-AJPSINT-TEMP         TO PV-AJPSINT-BYPASS.            14450000
+144600     ADD PV-DTL-TEMP             TO PV-DTL-BYPASS.                14460000
+144700                                                                  14470000
+144800     INITIALIZE PV-HDR-TEMP                                       14480000
+144900                PV-AJPSINT-TEMP                                   14490000
+145000                PV-DTL-TEMP.                                      14500000
+145100                                                                  14510000
+145200     EXEC SQL                                                     14520000
+145300         ROLLBACK                                                 14530000
+145400     END-EXEC.                                                    14540000
+145500                                                                  14550000
+145600     EVALUATE TRUE                                                14560000
+145700         WHEN SQLCODE = ZEROS                                     14570000
+145800              CONTINUE                                            14580000
+145900         WHEN OTHER                                               14590000
+146000             MOVE 'UNSUCCESSFUL ROLLBACK'                         14600000
+146100                                 TO AA-DB2-OPERATION              14610000
+146200             MOVE SPACES         TO AA-DB2-TABLE-1                14620000
+146300                                    AA-DB2-TABLE-2                14630000
+146400                                    AA-DB2-TABLE-3                14640000
+146500             PERFORM Z999-DB2-ABEND                               14650000
+146600     END-EVALUATE.                                                14660000
+146700                                                                  14670000
+146800                                                                  14680000
+146900 X100-GET-CHECKPOINT-CNTL.                                        14690000
+147000*----------------------------------------------------------------*14700000
+147100*    SELECT CHECKPOINT RESTART CONTROL INFO.                     *14710000
+147200*----------------------------------------------------------------*14720000
+147300                                                                  14730000
+147400     MOVE 'X100-GET-CHECKPOINT-CNTL'                              14740000
+147500                                 TO AA-PARAGRAPH-NAME.            14750000
+147600                                                                  14760000
+147700     PERFORM WITH TEST AFTER                                      14770000
+147800       VARYING PV-RETRY-COUNT FROM 1 BY 1                         14780000
+147900       UNTIL   PV-RETRY-COUNT > PC-RETRY-MAX                      14790000
+148000       OR      SQLCODE = ZERO                                     14800000
+148100                                                                  14810000
+148200         EXEC SQL                                                 14820000
+148300          SELECT CKPT_STAT_CODE                                   14830000
+148400           INTO :CR-CKPT-STAT-CODE                                14840000
+148500           FROM TCKRSTCNTL                                        14850000
+148600           WHERE PLAN_NAME = :PC-PROGRAM-NAME                     14860000
+148700         END-EXEC                                                 14870000
+148800                                                                  14880000
+148900         EVALUATE TRUE                                            14890000
+149000             WHEN SQLCODE = ZERO                                  14900000
+149100             WHEN SQLCODE = -904                                  14910000
+149200             WHEN SQLCODE = -913                                  14920000
+149300                  CONTINUE                                        14930000
+149400                                                                  14940000
+149500             WHEN SQLWARN0 NOT = SPACES                           14950000
+149600             WHEN SQLCODE  NOT = ZERO                             14960000
+149700                 DISPLAY '******** PLAN_NAME:'                    14970000
+149800                              PC-PROGRAM-NAME                     14980000
+149900                 MOVE 'UNSUCCESSFUL SELECT'                       14990000
+150000                                      TO AA-DB2-OPERATION         15000000
+150100                 MOVE 'CKRSTCNTL'     TO AA-DB2-TABLE-1           15010000
+150200                 MOVE SPACES          TO AA-DB2-TABLE-2           15020000
+150300                                         AA-DB2-TABLE-3           15030000
+150400                 PERFORM Z999-DB2-ABEND                           15040000
+150500         END-EVALUATE                                             15050000
+150600     END-PERFORM.                                                 15060000
+150700                                                                  15070000
+150800     IF PV-RETRY-COUNT > PC-RETRY-MAX                             15080000
+150900         DISPLAY '******** PLAN_NAME:'                            15090000
+151000                  PC-PROGRAM-NAME                                 15100000
+151100         MOVE 'MAX RETRIES EXCEEDED ON SELECT'                    15110000
+151200                             TO AA-DB2-OPERATION                  15120000
+151300         MOVE 'CKRSTCNTL'    TO AA-DB2-TABLE-1                    15130000
+151400         PERFORM Z999-DB2-ABEND                                   15140000
+151500     END-IF.                                                      15150000
+151600                                                                  15160000
+151700                                                                  15170000
+151800 X200-CHCKPNT-RESTART-PROCESS.                                    15180000
+151900*---------------------------------------------------------------* 15190000
+152000*  GET THE CHECKPOINT INFO FROM THE TABLE.                      * 15200000
+152100*  PERFORM R100-READ-SUMRY-TRANS-FILE UNTIL YOU GET THE NEXT    * 15210000
+152200*   RECORD TO BE PROCESSED.                                     * 15220000
+152300*  USE THE CR-* RESTART FIELDS TO POPULATE THE COUNTERS.        * 15230000
+152400*---------------------------------------------------------------* 15240000
+152500                                                                  15250000
+152600     PERFORM X250-GET-CHECKPOINT-INFO.                            15260000
+152700     MOVE TCKRSTINF-WORK-STRG-DESC-TEXT                           15270000
+152800                                 TO CR-CKPT-RESTART-INFO.         15280000
+152900                                                                  15290000
+153000     PERFORM R100-READ-SUMRY-TRANS-FILE                           15300000
+153100       UNTIL ( AP045-KEY-DATA-FIELDS > CR-KEY-FIELDS )            15310000
+153200       OR    PS-SUMRY-TRANS-END.                                  15320000
+153300                                                                  15330000
+153400     DISPLAY '***********************************************'.   15340000
+153500     DISPLAY '** APKUP132 CHECKPOINT RESTART **'                  15350000
+153600     DISPLAY '** KEY DATA ON RESTART = '  AP045-KEY-DATA-FIELDS.  15360000
+153700     DISPLAY '***********************************************'.   15370000
+153800                                                                  15380000
+153900     MOVE CR-AP045-READ           TO PV-AP045-READ.               15390000
+154000     MOVE CR-AP045-HDR-READ       TO PV-AP045-HDR-READ.           15400000
+154100     MOVE CR-AP045-DTL-READ       TO PV-AP045-DTL-READ.           15410000
+154200     MOVE CR-HDR-INSERT           TO PV-HDR-INSERT.               15420000
+154300     MOVE CR-AJPSINT-INSERT       TO PV-AJPSINT-INSERT.           15430000
+154400     MOVE CR-DTL-INSERT           TO PV-DTL-INSERT.               15440000
+154500     MOVE CR-HDR-BYPASS           TO PV-HDR-BYPASS.               15450000
+154600     MOVE CR-AJPSINT-BYPASS       TO PV-AJPSINT-BYPASS.           15460000
+154700     MOVE CR-DTL-BYPASS           TO PV-DTL-BYPASS.               15470000
+154800     MOVE CR-AP041-WROTE          TO PV-AP041-WROTE.              15480000
+154900                                                                  15490000
+155000     DISPLAY 'RESTARTING PROGRAM WITH THE FOLLOWING COUNTS '.     15500000
+155100     DISPLAY 'HEADER RECORDS READ  = ' PV-AP045-HDR-READ.         15510000
+155200     DISPLAY 'DETAIL RECORDS READ  = ' PV-AP045-DTL-READ.         15520000
+155300     DISPLAY ' '.                                                 15530000
+155400     DISPLAY 'TOTAL  RECORDS READ  = ' PV-AP045-READ.             15540000
+155500     DISPLAY ' '.                                                 15550000
+155600     DISPLAY 'HEADERS  BYPASSED    = ' PV-HDR-BYPASS.             15560000
+155700     DISPLAY 'TAJPSINT BYPASSED    = ' PV-AJPSINT-BYPASS.         15570000
+155800     DISPLAY 'DETAILS  BYPASSED    = ' PV-DTL-BYPASS.             15580000
+155900     DISPLAY ' '.                                                 15590000
+156000     DISPLAY 'TOTAL ERRORS WRITTEN = ' PV-AP041-WROTE.            15600000
+156100     DISPLAY ' '.                                                 15610000
+156200     DISPLAY 'HEADERS  INSERTED    = ' PV-HDR-INSERT.             15620000
+156300     DISPLAY 'TAJPSINT INSERTED    = ' PV-AJPSINT-INSERT.         15630000
+156400     DISPLAY 'DETAILS  INSERTED    = ' PV-DTL-INSERT.             15640000
+156500     DISPLAY ' '.                                                 15650000
+156600                                                                  15660000
+156700                                                                  15670000
+156800 X250-GET-CHECKPOINT-INFO.                                        15680000
+156900*----------------------------------------------------------------*15690000
+157000*    SELECT CHECKPOINT RESTART WORKING STORAGE DESCRIPTION INFO  *15700000
+157100*----------------------------------------------------------------*15710000
+157200                                                                  15720000
+157300     MOVE 'X250-GET-CHECKPOINT-INFO    '                          15730000
+157400                                 TO AA-PARAGRAPH-NAME.            15740000
+157500                                                                  15750000
+157600     PERFORM WITH TEST AFTER                                      15760000
+157700       VARYING PV-RETRY-COUNT FROM 1 BY 1                         15770000
+157800       UNTIL   PV-RETRY-COUNT > PC-RETRY-MAX                      15780000
+157900       OR      SQLCODE = ZERO                                     15790000
+158000                                                                  15800000
+158100         EXEC SQL                                                 15810000
+158200          SELECT WORK_STRG_DESC                                   15820000
+158300           INTO :TCKRSTINF-WORK-STRG-DESC                         15830000
+158400           FROM TCKRSTINF                                         15840000
+158500           WHERE PLAN_NAME = :PC-PROGRAM-NAME                     15850000
+158600         END-EXEC                                                 15860000
+158700                                                                  15870000
+158800         EVALUATE TRUE                                            15880000
+158900             WHEN SQLCODE = ZERO                                  15890000
+159000             WHEN SQLCODE = -904                                  15900000
+159100             WHEN SQLCODE = -913                                  15910000
+159200                  CONTINUE                                        15920000
+159300                                                                  15930000
+159400             WHEN SQLWARN0 NOT = SPACES                           15940000
+159500             WHEN SQLCODE  NOT = ZERO                             15950000
+159600                 DISPLAY '******** PLAN_NAME:'                    15960000
+159700                              PC-PROGRAM-NAME                     15970000
+159800                 MOVE 'UNSUCCESSFUL SELECT'                       15980000
+159900                                         TO AA-DB2-OPERATION      15990000
+160000                 MOVE 'TCKRSTINF'        TO AA-DB2-TABLE-1        16000000
+160100                 MOVE SPACES             TO AA-DB2-TABLE-2        16010000
+160200                                            AA-DB2-TABLE-3        16020000
+160300                 PERFORM Z999-DB2-ABEND                           16030000
+160400         END-EVALUATE                                             16040000
+160500     END-PERFORM.                                                 16050000
+160600                                                                  16060000
+160700     IF PV-RETRY-COUNT > PC-RETRY-MAX                             16070000
+160800         DISPLAY '******** PLAN_NAME:'                            16080000
+160900                  PC-PROGRAM-NAME                                 16090000
+161000         MOVE 'MAX RETRIES EXCEEDED ON SELECT'                    16100000
+161100                             TO AA-DB2-OPERATION                  16110000
+161200         MOVE 'TCKRSTINF'    TO AA-DB2-TABLE-1                    16120000
+161300         MOVE SPACES         TO AA-DB2-TABLE-2                    16130000
+161400                                AA-DB2-TABLE-3                    16140000
+161500         PERFORM Z999-DB2-ABEND                                   16150000
+161600     END-IF.                                                      16160000
+161700                                                                  16170000
+161800                                                                  16180000
+161900 Z998-ABEND.                                                      16190000
+162000*---------------------------------------------------------------- 16200000
+162100*    ABEND ROUTINE FOR NON DB2 ERRORS                             16210000
+162200*---------------------------------------------------------------- 16220000
+162300                                                                  16230000
+162400     CLOSE SUMRY-TRANS-FILE.                                      16240000
+162500     DISPLAY 'TRANS BEING PROCESSED = ' AP045-KEY-FIELDS.         16250000
+162600     DISPLAY 'PO BEING PROCESSED    = ' AP045-PO-NBR.             16260000
+162700     DISPLAY AA-ABEND-LIT.                                        16270000
+162800     DISPLAY AA-MESSAGE-LINE.                                     16280000
+162900     DISPLAY AA-PROGRAM-LIT.                                      16290000
+163000     DISPLAY AA-PARAGRAPH-LIT.                                    16300000
+163100                                                                  16310000
+163200     CALL 'ILBOABN0' USING ABEND-CODE.                            16320000
+163300                                                                  16330000
+163400                                                                  16340000
+163500 Z999-DB2-ABEND.                                                  16350000
+163600*---------------------------------------------------------------- 16360000
+163700*    ABEND ROUTINE FOR DB2 ERRORS                                 16370000
+163800*---------------------------------------------------------------- 16380000
+163900                                                                  16390000
+164000     CLOSE SUMRY-TRANS-FILE.                                      16400000
+164100     DISPLAY 'TRANS BEING PROCESSED = ' AP045-KEY-FIELDS.         16410000
+164200     DISPLAY 'PO BEING PROCESSED    = ' AP045-PO-NBR.             16420000
+164300     DISPLAY AA-ABEND-LIT.                                        16430000
+164400     DISPLAY AA-MESSAGE-LINE.                                     16440000
+164500     DISPLAY AA-DB2-ERROR-LIT.                                    16450000
+164600     DISPLAY AA-PROGRAM-LIT.                                      16460000
+164700     DISPLAY AA-PARAGRAPH-LIT.                                    16470000
+164800     DISPLAY AA-DB2-OPERATION-LIT.                                16480000
+164900     DISPLAY AA-DB2-TABLE-1.                                      16490000
+165000     DISPLAY AA-DB2-TABLE-2.                                      16500000
+165100     DISPLAY AA-DB2-TABLE-3.                                      16510000
+165200     SET AC-DB2-ERROR TO TRUE.                                    16520000
+165300                                                                  16530000
+165400     COPY DPPD004.                                                16540000
+165500                                                                  16550000
+165600     CALL 'ILBOABN0' USING ABEND-CODE.                            16560000
+165700                                                                  16570000

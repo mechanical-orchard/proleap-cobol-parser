@@ -1,0 +1,704 @@
+      ******************************************************************        
+       IDENTIFICATION DIVISION.                                                 
+      ******************************************************************        
+                                                                                
+       PROGRAM-ID.             ARKUP905.                                        
+       AUTHOR.                 JIM HUNTER.                                      
+       INSTALLATION.           KOHLS DEPARTMENT STORES.                         
+       DATE-WRITTEN            JULY, 2023.                                      
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *  NOTE: THIS PROGRAM CALLS PROTEGRITY TO ENCRYPT AND TOKENIZE            
+      *  SENSITIVE DATA.  WITHOUT SPECIAL ACCESS GRANTED BY THE SECURITY        
+      *  TEAM, THIS PROGRAM WILL NOT WORK EVEN AGAINST TEST DATA.               
+      *  THE TOKENIZATION WILL WORK IN TEST, BUT THE NAME ENCRYPTION            
+      *  WILL FAIL WITH RC = 4, RS = 3, WHICH IS AN ACCESS DENIED ERROR.        
+      ******************************************************************        
+      *  PURPOSE:                                                               
+      *  TO INSERT MISSING EMPLOYEE DISCOUNT RECORDS TO THE ART_EMP_DISC        
+      *  DB2 TABLE.                                                             
+      *  THE INPUT MUST BE BUILT FROM DATA FOUND IN WORKDAY AND FISERV.         
+      *  THE OUTPUT FILE ISN'T REQUIRED, BUT WILL BE HELPUL FOR TESTING         
+      *  AND POSSIBLY AS A RECORD OF WHAT HAS BEEN MANUALLY ADDED.              
+      *  THIS PROGRAM WILL TOKENIZE THE SSN NUMBER AND ACCOUNT NUMBER           
+      *  FIELDS AND ENCRYPT THE ASSOCIATE NAME BEFORE INSERTING THE             
+      *  RECORDS TO THE ART_EMP_DISC TABLE.                                     
+      *  PROTEGRITY MODULE WILL BE INVOKED TO DO THIS.                          
+      *                                                                         
+      *  ARKUT075 WAS USED AS A TEMPLATE FOR THIS PROGRAM.                      
+      *  ARKUT067 LOGIC WAS COPIED TO TOKENIZE THE ACCOUNT NUMBER.              
+      *  ARKUT072 LOGIC WAS COPIED TO INSERT THE ART_EMP_DISC RECORDS.          
+      *                                                                         
+      *  SINCE THIS PROGRAM WILL NEED TO BE RUN AS A PROD JOB FROM              
+      *  PROCLIBE, BAD RETURNS ON INSERTS WILL NOT CAUSE AN ABEND.              
+      *  *** ABEND LOGIC WAS ADDED DURING TESTING TO HELP DEBUG. ***            
+      *  THE PROGRAM WILL CONTINUE, DISPLAYS WILL BE WRITTEN AND AS             
+      *  MANY INSERTS WILL BE PERFORMED AS POSSIBLE.                            
+      *                                                                         
+      *  THE VOLUME OF RECORDS MANUALLY INSERTED SHOULD BE LOW, BUT             
+      *  COMMITS WILL BE TAKEN EVERY 500 RECORDS TO BE SAFE.                    
+      *                                                                         
+      *  INITIALLY, EDITS OF ALL OF THE FIELDS HAVE NOT BEEN ADDED.             
+      *  THIS MIGHT CHANGE DEPENDING ON HOW THE TESTING GOES.                   
+      *  DUE TO VARYING LENGTHS OF DATA, IT MIGHT BE IMPOSSIBLE TO              
+      *  EVEN ADD NUMERIC CHECKS?  DB2 INSERT ERRORS WOULD BE OK,               
+      *  BUT SOC7'S OR OTHER ABENDS NEED TO BE PREVENTED.                       
+      *                                                                         
+      *  INPUT FILES  :   EMP-FILE                  DDNAME = INP01              
+      *  OUTPUT FILES :   EMP-TOKEN-FILE            DDNAME = OUT01              
+      ******************************************************************        
+      *----------------------------------------------------------------*        
+      *                                                                *        
+      * DATE:        07/13/2023                                        *        
+      * WR/IR#:      CHG0291034                                        *        
+      * PROGRAMMER:  JIM HUNTER                                        *        
+      * DESCRIPTION: INITIAL VERSION                                   *        
+      *                                                                *        
+      * DATE:        09/08/2023                                        *        
+      * WR/IR#:      CHG0293300                                        *        
+      * PROGRAMMER:  JIM HUNTER                                        *        
+      * DESCRIPTION: ADDING LOGIC TO SET TERM DATES TO NULL FOR        *        
+      *              ACTIVE EMPLOYEES.                                 *        
+      *                                                                *        
+      * DATE:        02/26/2024                                        *        
+      * WR/IR#:      CHG0302079                                        *        
+      * PROGRAMMER:  JIM HUNTER                                        *        
+      * DESCRIPTION: TEMPORARILY USING DISC-DTE INSTEAD OF CURRENT DATE*        
+      *              SO THAT CMDM DOESN'T PICK UP INSERTS FOR EMP ID'S *        
+      *              ALREADY SET TO 0000001 IN CMDM.                   *        
+      *              2 INSERTS. (FIND TEMP)                            *        
+      *----------------------------------------------------------------*        
+      ******************************************************************        
+       ENVIRONMENT DIVISION.                                                    
+      ******************************************************************        
+                                                                                
+       CONFIGURATION SECTION.                                                   
+                                                                                
+       SOURCE-COMPUTER.        IBM-3090.                                        
+                                                                                
+       OBJECT-COMPUTER.        IBM-3090.                                        
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT EMP-FILE                                                      
+               ASSIGN TO INP01.                                                 
+                                                                                
+           SELECT EMP-TOKEN-FILE                                                
+               ASSIGN TO OUT01.                                                 
+                                                                                
+      ******************************************************************        
+       DATA DIVISION.                                                           
+      ******************************************************************        
+                                                                                
+       FILE SECTION.                                                            
+                                                                                
+       FD  EMP-FILE                                                             
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS                                             
+           LABEL RECORDS ARE STANDARD.                                          
+                                                                                
+       01  EMP-RECORD                  PIC X(235).                              
+                                                                                
+       FD  EMP-TOKEN-FILE                                                       
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS                                             
+           LABEL RECORDS ARE STANDARD.                                          
+                                                                                
+       01  EMP-TOKEN-RECORD            PIC X(235).                              
+                                                                                
+      ******************************************************************        
+       WORKING-STORAGE SECTION.                                                 
+      ******************************************************************        
+       01  FILLER                            PIC X(50)  VALUE                   
+           ' *** WORKING STORAGE STARTS HERE FOR ARKUP905 *** '.                
+                                                                                
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-END-OF-FILE-SW          PIC X(01)  VALUE 'N'.                 
+               88  PS-NOT-END-OF-FILE                VALUE 'N'.                 
+               88  PS-END-OF-FILE                    VALUE 'Y'.                 
+           05  PS-ACCT-SSN                PIC X(08)  VALUE SPACES.              
+               88  PS-ACCT-NBR                       VALUE 'ACCT NBR'.          
+               88  PS-SSN-NBR                        VALUE 'SSN NBR'.           
+                                                                                
+       01  PC-CONSTANTS.                                                        
+           05  PC-PROGRAM-NAME               PIC  X(08) VALUE                   
+                                                       'ARKUP905'.              
+       01  PV-PROGRAM-VARIABLES.                                                
+           05  PV-READ-COUNT                 PIC  9(05) VALUE ZEROES.           
+           05  PV-WRITE-COUNT                PIC  9(05) VALUE ZEROES.           
+           05  PV-INSERT-COUNT               PIC  9(05) VALUE ZEROES.           
+           05  PV-DUP-COUNT                  PIC  9(05) VALUE ZEROES.           
+           05  PV-COMMIT-COUNTER             PIC  9(05) VALUE ZEROES.           
+           05  PV-DISPLAY-NUMERIC            PIC  9(10) VALUE ZEROES.           
+           05  PV-DISPLAY-SQLCODE            PIC  9(04) VALUE ZEROES.           
+           05  PV-INPUT-LEN                  PIC  9(09) VALUE ZEROES.           
+           05  PV-OUTPUT-RECORD              PIC  X(235) VALUE SPACES.          
+           05  PV-PARAGRAPH-NAME             PIC  X(30) VALUE SPACES.           
+           05  PV-OPERATION-MSG-1            PIC  X(40) VALUE SPACE.            
+           05  PV-OPERATION-MSG-2            PIC  X(40) VALUE SPACE.            
+           05  PV-ASCII                      PIC  X(50).                        
+           05  PV-IN-LENGTH                  PIC  9(09) VALUE ZEROES.           
+           05  PV-INPUT-TEXT                 PIC  X(88).                        
+           05  PV-OUTPUT-TEXT                PIC  X(88) VALUE SPACES.           
+           05  PV-ENC-TEXT                   PIC  X(50) VALUE SPACES.           
+           05  PV-ACTUAL-LEN          PIC S9(03) COMP-3 VALUE ZEROES.           
+           05  PV-ACCT-NBR-12.                                                  
+               10  PV-ACCT-NBR-10            PIC  X(10) VALUE SPACES.           
+               10  FILLER                    PIC  X(02) VALUE '00'.             
+                                                                                
+       01  ABEND-CODE                        PIC S9(04) VALUE ZERO              
+                                                        COMP SYNC.              
+           88  ABEND-4008-CONVERSION-ERROR              VALUE +4008.            
+                                                                                
+      ******************************************************************        
+      * RECORD LAYOUT FOR INPUT AND OUTPUT RECORDS                     *        
+      ******************************************************************        
+       01  EMPLOYEE-DISCOUNT-REC.                                               
+           10 REC-ACCT-NBR                PIC   X(10)  VALUE SPACES.            
+           10 REC-EMP-ID                  PIC   X(11)  VALUE SPACES.            
+           10 REC-DISC-STAT-CDE           PIC   X(01)  VALUE SPACES.            
+           10 REC-COMMENT                 PIC   X(80)  VALUE SPACES.            
+           10 REC-SSN-NBR                 PIC   X(09)  VALUE SPACES.            
+           10 REC-EMP-NM                  PIC   X(88)  VALUE SPACES.            
+           10 REC-EMP-STAT-CDE            PIC   X(01)  VALUE SPACES.            
+           10 REC-EMP-TYP-CDE             PIC   X(01)  VALUE SPACES.            
+           10 REC-LOC-NBR                 PIC   X(04)  VALUE SPACES.            
+           10 REC-DISC-DTE                PIC   X(10)  VALUE SPACES.            
+           10 REC-TERM-DTE                PIC   X(10)  VALUE SPACES.            
+           10 FILLER                      PIC   X(10)  VALUE SPACES.            
+                                                                                
+      ******************************************************************        
+      * LAYOUT THAT DEFINES THE PARAMETERS NEEDED TO INVOKE PROTEGRITY *        
+      * MODULE                                                         *        
+      ******************************************************************        
+           COPY PTYCCSIP.                                                       
+                                                                                
+      ******************************************************************        
+      * LAYOUT THAT DEFINES THE WORKING VARIABLES TO INVOKE PROTEGRITY *        
+      * MODULE                                                         *        
+      ******************************************************************        
+           COPY DPWS031.                                                        
+                                                                                
+      ******************************************************************        
+      * LAYOUT THAT DEFINES THE WORKING VARIABLES TO CONVERT FROM BASE64        
+      * TO BINARY & VICE VERSA                                                  
+      ******************************************************************        
+           COPY DPWS022.                                                        
+                                                                                
+      ******************************************************************        
+      * LAYOUT THAT DEFINES THE WORKING VARIABLES TO CONVERT FROM EBCDIC        
+      * TO ASCII & VICE VERSA                                                   
+      ******************************************************************        
+           COPY DPWS053.                                                        
+      ******************************************************************        
+                                                                                
+      ******************************************************************        
+      * DPWS004 VARIABLES REQUIRED FOR THE FORMAT SQLCA ROUTINE DPPD004         
+      ******************************************************************        
+           COPY DPWS004.                                                        
+                                                                                
+      ******************************************************************        
+      * DB2 MESSAGE AREA                                                        
+      ******************************************************************        
+           COPY SQLCA2.                                                         
+                                                                                
+      ******************************************************************        
+      *                     SQL DECLARATIONS                                    
+      ******************************************************************        
+                                                                                
+      ******************************************************************        
+      *  STANDARD LAYOUT FOR THE SQL COMMUNICATIONS AREA                        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+      ******************************************************************        
+      *                     ART_EMP_DISC                                        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE ART00001                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+       PROCEDURE DIVISION.                                                      
+                                                                                
+       0000-MAINLINE-PARA.                                                      
+                                                                                
+           PERFORM 1000-INITIALIZE.                                             
+                                                                                
+           PERFORM 2000-PROCESS-PARA                                            
+                 UNTIL PS-END-OF-FILE.                                          
+                                                                                
+           PERFORM 9000-EOJ-ROUTINE.                                            
+                                                                                
+           STOP RUN.                                                            
+                                                                                
+      ******************************************************************        
+      * 1000-INITIALIZE                                                         
+      *     INITIALIZE THE VARIABLES, OPEN THE INPUT AND OUTPUT FILES           
+      *     AND READ THE INPUT FILE                                             
+      ******************************************************************        
+       1000-INITIALIZE.                                                         
+                                                                                
+           DISPLAY 'PROGRAM - ' PC-PROGRAM-NAME.                                
+           INITIALIZE PV-PROGRAM-VARIABLES.                                     
+           MOVE PC-PROGRAM-NAME               TO DP031-PROGRAM-NAME.            
+                                                                                
+           OPEN INPUT  EMP-FILE                                                 
+                OUTPUT EMP-TOKEN-FILE.                                          
+                                                                                
+           PERFORM 2100-READ-FILE.                                              
+                                                                                
+      ******************************************************************        
+      * 2000-PROCESS-PARA                                                       
+      *   1. TOKENIZE SSN NUMBER                                                
+      *   2. TOKENIZE ACCOUNT NUMBER                                            
+      *   3. ENCRYPT EMPLOYEE NAME                                              
+      *   4. WRITE OUTPUT RECORD                                                
+      *   5. INSERT ROW TO ART_EMP_DISC                                         
+      *   6. READ NEXT RECORD                                                   
+      ******************************************************************        
+       2000-PROCESS-PARA.                                                       
+                                                                                
+      ***  TOKENIZE SSN                                                         
+           INITIALIZE PV-INPUT-LEN.                                             
+           INSPECT FUNCTION REVERSE (REC-SSN-NBR)                               
+                  TALLYING PV-INPUT-LEN FOR LEADING SPACES.                     
+           COMPUTE PV-INPUT-LEN = LENGTH OF REC-SSN-NBR -                       
+                                            PV-INPUT-LEN.                       
+           IF PV-INPUT-LEN NOT = 9                                              
+              CONTINUE                                                          
+           ELSE                                                                 
+              SET PS-SSN-NBR TO TRUE                                            
+              PERFORM 3000-TOKENIZE-DATA                                        
+           END-IF.                                                              
+                                                                                
+      ***  TOKENIZE ACCT NBR                                                    
+           INITIALIZE PV-ACCT-NBR-12                                            
+                      PV-INPUT-LEN.                                             
+           MOVE REC-ACCT-NBR TO PV-ACCT-NBR-10.                                 
+           SET PS-ACCT-NBR     TO TRUE.                                         
+           PERFORM 3000-TOKENIZE-DATA.                                          
+                                                                                
+      ***  ENCRYPT EMPLOYEE NAME                                                
+           IF REC-EMP-NM             EQUAL SPACES                               
+              CONTINUE                                                          
+           ELSE                                                                 
+              PERFORM 4000-ENCRYPT-EMPNAME                                      
+              MOVE PV-OUTPUT-TEXT         TO REC-EMP-NM                         
+           END-IF.                                                              
+                                                                                
+           PERFORM 2200-WRITE-FILE.                                             
+           IF REC-TERM-DTE = SPACES                                             
+               PERFORM 5000-INSERT-ART-EMP-DISC-NULL                            
+           ELSE                                                                 
+               PERFORM 5010-INSERT-ART-EMP-DISC                                 
+           END-IF.                                                              
+           IF PV-COMMIT-COUNTER > 499                                           
+               PERFORM 6000-COMMIT-DB2                                          
+               MOVE ZEROES TO PV-COMMIT-COUNTER                                 
+           END-IF.                                                              
+           PERFORM 2100-READ-FILE.                                              
+                                                                                
+      ******************************************************************        
+      * 2100-READ-FILE                                                          
+      *      READ THE RECORDS IN EMPLOYEE WORKDAY FILE                          
+      ******************************************************************        
+       2100-READ-FILE.                                                          
+                                                                                
+           READ EMP-FILE INTO EMPLOYEE-DISCOUNT-REC                             
+              AT END                                                            
+                 SET PS-END-OF-FILE  TO TRUE                                    
+              NOT AT END                                                        
+                 ADD 1               TO PV-READ-COUNT                           
+           END-READ.                                                            
+                                                                                
+      ******************************************************************        
+      * 2200-WRITE-FILE                                                         
+      *      WRITE THE RECORDS TO OUTPUT                                        
+      ******************************************************************        
+       2200-WRITE-FILE.                                                         
+                                                                                
+           INITIALIZE PV-OUTPUT-RECORD.                                         
+           MOVE EMPLOYEE-DISCOUNT-REC    TO PV-OUTPUT-RECORD.                   
+                                                                                
+           WRITE EMP-TOKEN-RECORD FROM PV-OUTPUT-RECORD.                        
+           ADD 1                       TO PV-WRITE-COUNT.                       
+                                                                                
+      ******************************************************************        
+      * 3000-TOKENIZE-DATA                                                      
+      *    TOKENIZE SSN NUMBERS                                                 
+      ******************************************************************        
+       3000-TOKENIZE-DATA.                                                      
+                                                                                
+           INITIALIZE CSI-PARAMETERS                                            
+                      DP031-PROTEG-PGM-PARAMETERS.                              
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN PS-ACCT-NBR                                                  
+                MOVE 'ACCT-NBR'         TO DP031-FIELD                          
+                MOVE PV-ACCT-NBR-12     TO DP031-CLEAR-TEXT                     
+                MOVE 12                 TO DP031-INPUT-LEN                      
+                SET DP031-ACCTNBR       TO TRUE                                 
+              WHEN PS-SSN-NBR                                                   
+                MOVE 'SSN-NBR'          TO DP031-FIELD                          
+                MOVE REC-SSN-NBR        TO DP031-CLEAR-TEXT                     
+                MOVE PV-INPUT-LEN       TO DP031-INPUT-LEN                      
+                SET DP031-SSN           TO TRUE                                 
+           END-EVALUATE.                                                        
+                                                                                
+           SET CSI-ENCRYPT-FUNCTION     TO TRUE.                                
+           PERFORM DP031-0000-PROTG-TOKEN-DETOKEN.                              
+                                                                                
+           IF CSI-RETURN-CODE = ZERO                                            
+              IF PS-ACCT-NBR                                                    
+                 MOVE DP031-CIPHER-TEXT TO PV-ACCT-NBR-12                       
+                 MOVE PV-ACCT-NBR-10    TO REC-ACCT-NBR                         
+              ELSE                                                              
+                 MOVE DP031-CIPHER-TEXT TO REC-SSN-NBR                          
+              END-IF                                                            
+           ELSE                                                                 
+              DISPLAY 'ISSUE IN RECORD# : ' PV-READ-COUNT                       
+              PERFORM DP031-9999-ABEND                                          
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      * ENCRYPT THE EMPL NAME TO BASE64                                *        
+      *****************************************************************A        
+       4000-ENCRYPT-EMPNAME.                                                    
+                                                                                
+           INITIALIZE CSI-PARAMETERS                                            
+                      DP031-PROTEG-PGM-PARAMETERS.                              
+                                                                                
+           MOVE REC-EMP-NM                   TO PV-ENC-TEXT.                    
+           MOVE 'REC-EMP-NM'                 TO DP031-FIELD.                    
+           SET DP031-CUST-INFO               TO TRUE.                           
+           PERFORM 4100-ENCRYPT-TEXT.                                           
+                                                                                
+      ******************************************************************        
+      * 4100-ENCRYPT-TEXT                                                       
+      *      ENCRYPT THE DATA                                                   
+      ******************************************************************        
+       4100-ENCRYPT-TEXT.                                                       
+                                                                                
+           INITIALIZE PV-ACTUAL-LEN.                                            
+                                                                                
+           INSPECT FUNCTION REVERSE(PV-ENC-TEXT)                                
+                TALLYING PV-ACTUAL-LEN  FOR LEADING SPACES.                     
+           COMPUTE PV-ACTUAL-LEN  = 50 - PV-ACTUAL-LEN.                         
+                                                                                
+           PERFORM 4200-EBCDIC-ASCII.                                           
+           PERFORM 4300-CALL-PROTEGRITY.                                        
+           PERFORM 4400-BINARY-BASE64.                                          
+                                                                                
+      ******************************************************************        
+      * 4200-EBCDIC-ASCII                                                       
+      *      CONVERT EBCDIC TO ASCII                                            
+      ******************************************************************        
+       4200-EBCDIC-ASCII.                                                       
+                                                                                
+           INITIALIZE DP053-EBCDIC-ASCII-PARMS.                                 
+                                                                                
+           SET  DP053-CT-EBCDIC-TO-ASCII    TO TRUE.                            
+           MOVE PV-ENC-TEXT           TO DP053-INPUT-FIELD.                     
+           MOVE PV-ACTUAL-LEN         TO DP053-FIELD-LENGTH.                    
+                                                                                
+           CALL DP053-EBCDIC-ASCII-ROUTINE USING DP053-CONVERSION-TYPE          
+                                                 DP053-FIELD-LENGTH             
+                                                 DP053-INPUT-FIELD              
+                                                 DP053-OUTPUT-FIELD             
+                                                 DP053-RETURN-CODE.             
+           IF DP053-RC-SUCCESSFUL                                               
+              CONTINUE                                                          
+           ELSE                                                                 
+              DISPLAY 'ERROR WHILE CONVERTING EBCDIC TO ASCII'                  
+              DISPLAY 'RETURN CODE        - ' DP053-RETURN-CODE                 
+              DISPLAY 'INPUT LENGTH       - ' PV-ACTUAL-LEN                     
+              DISPLAY REC-EMP-ID ' ERROR WITH CONVERSION OF NAME '              
+              SET ABEND-4008-CONVERSION-ERROR TO TRUE                           
+              PERFORM 9999-ABEND                                                
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 4300-CALL-PROTEGRITY                                                    
+      *      CALL PROTEGRITY TO ENCRYPT THE NAME                                
+      ******************************************************************        
+       4300-CALL-PROTEGRITY.                                                    
+                                                                                
+           SET CSI-ENCRYPT-FUNCTION   TO TRUE.                                  
+                                                                                
+           MOVE DP053-OUTPUT-FIELD    TO DP031-CLEAR-TEXT.                      
+           MOVE PV-ACTUAL-LEN         TO CSI-CLEAR-TEXT-LENGTH.                 
+      ***  MOVE LENGTH OF DP031-CLEAR-TEXT   TO CSI-CLEAR-TEXT-LENGTH.          
+           MOVE LENGTH OF DP031-CIPHER-TEXT                                     
+                                      TO CSI-CIPHER-TEXT-LENGTH.                
+           PERFORM DP031-1000-PROTG-ENCRYP-DECRYP.                              
+           IF CSI-RETURN-CODE = 0                                               
+              CONTINUE                                                          
+           ELSE                                                                 
+              DISPLAY ' '                                                       
+              DISPLAY 'ERROR ON PROTEGRITY CALL ' DP031-FIELD                   
+              DISPLAY 'INPUT LENGTH    ' CSI-CLEAR-TEXT-LENGTH                  
+              DISPLAY 'PROCESSING INCOMPLETE  *'                                
+              DISPLAY 'REC NAME                 = ' REC-EMP-NM                  
+              DISPLAY 'PV-ENC-TEXT              = ' PV-ENC-TEXT                 
+              DISPLAY 'DP053-OUTPUT-FIELD ASCII = ' DP053-OUTPUT-FIELD          
+              DISPLAY REC-EMP-ID ' ERROR WITH CONVERSION OF NAME '              
+              PERFORM DP031-9999-ABEND                                          
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 4400-BINARY-BASE64                                                      
+      *      CONVERT BINARY TO BASE64                                           
+      ******************************************************************        
+       4400-BINARY-BASE64.                                                      
+                                                                                
+           INITIALIZE PV-INPUT-TEXT                                             
+                      PV-OUTPUT-TEXT.                                           
+                                                                                
+           MOVE DP031-CIPHER-TEXT      TO PV-INPUT-TEXT.                        
+           MOVE CSI-CIPHER-TEXT-LENGTH TO DP022-INLEN.                          
+           MOVE 120                    TO DP022-OUTLEN-IN.                      
+                                                                                
+           CALL DP022-MGCXB2R USING DP022-PARMS,                                
+                                    PV-INPUT-TEXT,                              
+                                    PV-OUTPUT-TEXT.                             
+                                                                                
+           IF RETURN-CODE EQUAL 0                                               
+              CONTINUE                                                          
+           ELSE                                                                 
+              DISPLAY ' '                                                       
+              DISPLAY 'ERROR WHILE CONVERTING TO BASE64'                        
+              DISPLAY 'RC ' RETURN-CODE                                         
+              DISPLAY 'PV-INPUT-TEXT ' PV-INPUT-TEXT                            
+              DISPLAY 'INPUT-LEN  ' DP022-INLEN                                 
+              DISPLAY 'NAME = ' REC-EMP-NM                                      
+              DISPLAY REC-EMP-ID ' ERROR WITH CONVERSION OF NAME '              
+              SET ABEND-4008-CONVERSION-ERROR TO TRUE                           
+              PERFORM 9999-ABEND                                                
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      * 5000-INSERT-ART-EMP-DISC-NULL DB2 ROW.                                  
+      ******************************************************************        
+       5000-INSERT-ART-EMP-DISC-NULL.                                           
+                                                                                
+           MOVE REC-ACCT-NBR        TO ART00001-ACCT-NBR.                       
+           MOVE REC-EMP-ID          TO ART00001-EMP-ID.                         
+           MOVE REC-DISC-STAT-CDE   TO ART00001-DISC-STAT-CDE.                  
+           MOVE 80                  TO ART00001-CMNT-TXT-LEN.                   
+           MOVE REC-COMMENT         TO ART00001-CMNT-TXT-TEXT.                  
+           MOVE REC-SSN-NBR         TO ART00001-SSN-NBR.                        
+           MOVE REC-EMP-NM          TO ART00001-EMP-NM.                         
+           MOVE REC-EMP-STAT-CDE    TO ART00001-EMP-STAT-CDE.                   
+           MOVE REC-EMP-TYP-CDE     TO ART00001-EMP-TYP-CDE.                    
+           MOVE REC-LOC-NBR         TO ART00001-LOC-NBR.                        
+           MOVE REC-DISC-DTE        TO ART00001-DISC-DTE.                       
+           MOVE REC-TERM-DTE        TO ART00001-TERM-DTE.                       
+                                                                                
+           EXEC SQL                                                             
+               INSERT INTO ART_EMP_DISC                                         
+                 (ACCT_NBR                                                      
+                 ,EMP_ID                                                        
+                 ,DISC_STAT_CDE                                                 
+                 ,LAST_UPD_DTE                                                  
+                 ,CMNT_TXT                                                      
+                 ,SSN_NBR                                                       
+                 ,EMP_NM                                                        
+                 ,EMP_STAT_CDE                                                  
+                 ,EMP_TYP_CDE                                                   
+                 ,LOC_NBR                                                       
+                 ,DISC_DTE                                                      
+                 ,TERM_DTE)                                                     
+                VALUES                                                          
+                 (:ART00001-ACCT-NBR                                            
+                 ,:ART00001-EMP-ID                                              
+                 ,:ART00001-DISC-STAT-CDE                                       
+TEMP             ,:ART00001-DISC-DTE                                            
+                 ,:ART00001-CMNT-TXT                                            
+                 ,:ART00001-SSN-NBR                                             
+                 ,:ART00001-EMP-NM                                              
+                 ,:ART00001-EMP-STAT-CDE                                        
+                 ,:ART00001-EMP-TYP-CDE                                         
+                 ,:ART00001-LOC-NBR                                             
+                 ,:ART00001-DISC-DTE                                            
+                 ,NULL)                                                         
+           END-EXEC.                                                            
+                                                                                
+TEMP  ** TEMPORARILY USING DISC-DTE INSTEAD OF CURRENT DATE SO THAT CMDM        
+TEMP  ** DOESN'T PICK UP INSERTS FOR EMP ID'S ALREADY SET TO 0000001 IN CMDM.   
+TEMP  **         ,CURRENT DATE                                                  
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = 0                                                  
+                 ADD 1                         TO PV-INSERT-COUNT               
+                                                  PV-COMMIT-COUNTER             
+              WHEN SQLCODE = -803                                               
+                 ADD 1                         TO PV-DUP-COUNT                  
+                 DISPLAY '5000 INSERT FAILED, ROW EXISTS FOR EMP_ID '           
+                          ART00001-EMP-ID                                       
+              WHEN OTHER                                                        
+                 MOVE SQLCODE                  TO PV-DISPLAY-SQLCODE            
+                 DISPLAY '5000 INSERT FAILED FOR EMP_ID '                       
+                          ART00001-EMP-ID                                       
+                         ' WITH CODE ' PV-DISPLAY-SQLCODE                       
+                 PERFORM 9990-DB2-ABEND                                         
+           END-EVALUATE.                                                        
+                                                                                
+                                                                                
+      ******************************************************************        
+      * 5010-INSERT-ART-EMP-DISC DB2 ROW.                                       
+      ******************************************************************        
+       5010-INSERT-ART-EMP-DISC.                                                
+                                                                                
+           MOVE REC-ACCT-NBR        TO ART00001-ACCT-NBR.                       
+           MOVE REC-EMP-ID          TO ART00001-EMP-ID.                         
+           MOVE REC-DISC-STAT-CDE   TO ART00001-DISC-STAT-CDE.                  
+           MOVE 80                  TO ART00001-CMNT-TXT-LEN.                   
+           MOVE REC-COMMENT         TO ART00001-CMNT-TXT-TEXT.                  
+           MOVE REC-SSN-NBR         TO ART00001-SSN-NBR.                        
+           MOVE REC-EMP-NM          TO ART00001-EMP-NM.                         
+           MOVE REC-EMP-STAT-CDE    TO ART00001-EMP-STAT-CDE.                   
+           MOVE REC-EMP-TYP-CDE     TO ART00001-EMP-TYP-CDE.                    
+           MOVE REC-LOC-NBR         TO ART00001-LOC-NBR.                        
+           MOVE REC-DISC-DTE        TO ART00001-DISC-DTE.                       
+           MOVE REC-TERM-DTE        TO ART00001-TERM-DTE.                       
+                                                                                
+           EXEC SQL                                                             
+               INSERT INTO ART_EMP_DISC                                         
+                 (ACCT_NBR                                                      
+                 ,EMP_ID                                                        
+                 ,DISC_STAT_CDE                                                 
+                 ,LAST_UPD_DTE                                                  
+                 ,CMNT_TXT                                                      
+                 ,SSN_NBR                                                       
+                 ,EMP_NM                                                        
+                 ,EMP_STAT_CDE                                                  
+                 ,EMP_TYP_CDE                                                   
+                 ,LOC_NBR                                                       
+                 ,DISC_DTE                                                      
+                 ,TERM_DTE)                                                     
+                VALUES                                                          
+                 (:ART00001-ACCT-NBR                                            
+                 ,:ART00001-EMP-ID                                              
+                 ,:ART00001-DISC-STAT-CDE                                       
+TEMP             ,:ART00001-DISC-DTE                                            
+                 ,:ART00001-CMNT-TXT                                            
+                 ,:ART00001-SSN-NBR                                             
+                 ,:ART00001-EMP-NM                                              
+                 ,:ART00001-EMP-STAT-CDE                                        
+                 ,:ART00001-EMP-TYP-CDE                                         
+                 ,:ART00001-LOC-NBR                                             
+                 ,:ART00001-DISC-DTE                                            
+                 ,:ART00001-TERM-DTE)                                           
+           END-EXEC.                                                            
+                                                                                
+TEMP  ** TEMPORARILY USING DISC-DTE INSTEAD OF CURRENT DATE SO THAT CMDM        
+TEMP  ** DOESN'T PICK UP INSERTS FOR EMP ID'S ALREADY SET TO 0000001 IN CMDM.   
+TEMP  **         ,CURRENT DATE                                                  
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = 0                                                  
+                 ADD 1                         TO PV-INSERT-COUNT               
+                                                  PV-COMMIT-COUNTER             
+              WHEN SQLCODE = -803                                               
+                 ADD 1                         TO PV-DUP-COUNT                  
+                 DISPLAY '5010 INSERT FAILED, ROW EXISTS FOR EMP_ID '           
+                          ART00001-EMP-ID                                       
+              WHEN OTHER                                                        
+                 MOVE SQLCODE                  TO PV-DISPLAY-SQLCODE            
+                 DISPLAY '5010 INSERT FAILED FOR EMP_ID '                       
+                          ART00001-EMP-ID                                       
+                         ' WITH CODE ' PV-DISPLAY-SQLCODE                       
+                 PERFORM 9990-DB2-ABEND                                         
+           END-EVALUATE.                                                        
+                                                                                
+                                                                                
+      ******************************************************************        
+      * 6000-COMMIT-DB2 SFTER EVERY 500 INSERTS.                                
+      *     COMMIT THE INSERTED ROWS IN ART_EMP_DISC                            
+      ******************************************************************        
+       6000-COMMIT-DB2.                                                         
+                                                                                
+           EXEC SQL                                                             
+              COMMIT                                                            
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE     = +0                                                  
+              DISPLAY 'COMMIT TAKEN'                                            
+           ELSE                                                                 
+              MOVE SQLCODE                   TO PV-DISPLAY-SQLCODE              
+              DISPLAY 'COMMIT RETURN CODE = '   PV-DISPLAY-SQLCODE              
+              MOVE '6000-COMMIT-DB2'         TO PV-PARAGRAPH-NAME               
+              MOVE 'ERROR ON DB2 COMMIT'     TO PV-OPERATION-MSG-1              
+              PERFORM 9999-ABEND                                                
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 9000-EOJ-ROUTINE                                                        
+      *      CLOSE THE INPUT AND OUTPUT FILES, DISPLAY THE MESSAGES             
+      *      AND TERMINATE THE PROCESS.                                         
+      ******************************************************************        
+       9000-EOJ-ROUTINE.                                                        
+                                                                                
+           CLOSE EMP-FILE                                                       
+                 EMP-TOKEN-FILE.                                                
+                                                                                
+           IF PV-READ-COUNT = 0                                                 
+              DISPLAY 'INPUT FILE IS EMPTY'                                     
+           ELSE                                                                 
+              DISPLAY 'RECORDS READ    : ' PV-READ-COUNT                        
+              DISPLAY 'RECORDS WRITTEN : ' PV-WRITE-COUNT                       
+              DISPLAY 'ROWS INSERTED   : ' PV-INSERT-COUNT                      
+              DISPLAY 'DUP ROWS FAILED : ' PV-DUP-COUNT                         
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 9990-DB2-ABEND                                                          
+      ******************************************************************        
+       9990-DB2-ABEND.                                                          
+                                                                                
+      ******************************************************************        
+      *  THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-           
+      *  MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE                
+      * 'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE             
+      *  FORMAT.                                                                
+      ******************************************************************        
+           COPY DPPD004.                                                        
+                                                                                
+           MOVE SQLCODE    TO SQLCODE2.                                         
+           MOVE SQLERRD(3) TO SQLERRD3.                                         
+                                                                                
+           DISPLAY '** ABEND           ** = SQLABEND'.                          
+           DISPLAY '** PROGRAM         ** = ' PC-PROGRAM-NAME.                  
+           DISPLAY '** PARAGRAPH       ** = ' PV-PARAGRAPH-NAME.                
+           DISPLAY '** OPERATION       ** = ' PV-OPERATION-MSG-1.               
+           DISPLAY '** SQLCODE         ** = ' SQLCODE2.                         
+           DISPLAY '** ROWS PROCESSED  ** = ' SQLERRD3.                         
+           DISPLAY '** SQLERRM         ** = ' SQLERRM.                          
+           DISPLAY '** SQLERRMC        ** = ' SQLERRMC.                         
+                                                                                
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    
+                                                                                
+      ******************************************************************        
+      * 9999-ABEND                                                              
+      ******************************************************************        
+                                                                                
+       9999-ABEND.                                                              
+           DISPLAY '** ABEND           **'.                                     
+           DISPLAY '** PROGRAM         ** = ' PC-PROGRAM-NAME.                  
+           DISPLAY '** PARAGRAPH       ** = ' PV-PARAGRAPH-NAME.                
+           DISPLAY '** OPERATION       ** = ' PV-OPERATION-MSG-1.               
+           DISPLAY '**                 ** = ' PV-OPERATION-MSG-2.               
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    
+                                                                                
+      ******************************************************************        
+      *    COPY MEMBER DPPD031 CONTAINS STATEMENTS NEEDED TO INVOKE             
+      *    PROTEGRITY MODULE FOR PROTECTION/UNPROTECTION                        
+      ******************************************************************        
+           COPY DPPD031.                                                        
+                                                                                
+      ******************************************************************        

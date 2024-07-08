@@ -1,0 +1,1588 @@
+000100 IDENTIFICATION DIVISION.                                         00010000
+000200 PROGRAM-ID.      APKUT371.                                       00020000
+000300 AUTHOR.          COGNIZANT.                                      00030000
+000400 INSTALLATION.    KOHLS DEPARTMENT STORES.                        00040000
+000500 DATE-WRITTEN.    MARCH 2020.                                     00050000
+000600*----------------------------------------------------------------*00060000
+000700*   ADJUSTMENT BUILD FOR IMPORT FREIGHT INVOICES                 *00070003
+000800*----------------------------------------------------------------*00080000
+000900*                  COBOL390 WITH DB2 SQL                         *00090000
+001000*----------------------------------------------------------------*00100000
+001100* FOR EACH INVOICE ON THE INPUT FILE, LOOK UP EXISTING INVOICES  *00110003
+001101* ON THE AP INVOICE DATABASE AND THEIR RELATED AP-PROCESS-CODE.  *00110103
+001110* FOR POS WHERE THE INVOICES INDICATE THAT THE PO IS ALREADY     *00111003
+001200* JOURNALIZED IN AP, THE FREIGHT AMOUNT ON THE INCOMING INVOICE  *00120003
+001300* NEED TO BE POSTED DIRECTLY TO THE MERCH LEDGER. A TRANSACTION  *00130003
+001400* WITH AP TRANCODE 5F WILL BE GENERATED.                         *00140003
+001401*                                                                *00140103
+001402* WHEN THE INVOICES INDICATE THAT THE PO HAS NOT BEEN JOURNALIZED*00140203
+001410* ADJUSTMENT TRANSACTIONS WILL BE GENERATED FOR EACH CHARGE CODE *00141003
+001500* AND GL ACCOUNT COMBINATION USING AP TRANCODE QQ.  THE PURPOSE  *00150003
+001510* OF THESE TRANSACTIONS IS TO POST THE COST TO THE APPROPRIATE   *00151003
+001600* PRE-PAID IMPORT COST ACCOUNT.                                  *00160003
+001700*                                                                *00170003
+001701* AN OFFSET TRANSACTION WILL BE GENERATED FOR THE TOTAL INVOICE  *00170103
+001710* AMOUNT, USING AP TRANCODE QP.  THIS TRANSACTION WILL BE        *00171003
+001800* GENERATED REGARDLESS OF WHETHER THE ORIGINAL TRANSACTIONS ARE  *00180003
+001900* POSTING TO TO ML OR THE GL.  THIS OFFSET IS TO FUND THE ACCOUNT*00190003
+001910* THAT TI WILL BE PAID FROM.                                     *00191003
+002300*----------------------------------------------------------------*00230000
+002400*                                                                *00240000
+002500* DB2 TABLES:                                                    *00250000
+002600*  1. INVOICE TABLE                   (TINVOIC TABLE)            *00260000
+002700*  2. PURCHASE ORDER TABLE            (TPURCHS TABLE)            *00270000
+002800*  3. TRANSACTION CODE TABLE          (TTRNCDE TABLE)            *00280000
+002900*  4. EXTERNAL ENTERPRISE TABLE       (TEXTENT TABLE)            *00290000
+003000*  5. EXTERNAL ENTERPRISE NAME TABLE  (TENTNME TABLE)            *00300000
+003100*  6. PURCHASE ORDER ITEM TABLE       (TPURITM TABLE)            *00310000
+003200*  7. ACCOUNTS PAYABLE CONTROL TABLE  (TAPCNTL TABLE)            *00320000
+003300*  8. AP ACCOUNT/CHARGE TYPE TABLE    (TACCTYP TABLE)            *00330000
+003400*                                                                *00340000
+003500* INPUT FILE:                                                    *00350000
+003600*  1. IMPORT FREIGHT INVOICE          (COPYBOOK APRD016)         *00360000
+003700*                                                                *00370000
+003800* OUTPUT FILE:                                                   *00380000
+003900*  1. INVOICES READY TO LOAD          (COPYBOOK APRD016)         *00390000
+004000*  2. ADJUSTMENT DETAILS              (COPYBOOK APRD045)         *00400000
+004100*                                                                *00410000
+004200*----------------------------------------------------------------*00420000
+004300                                                                  00430000
+004400 ENVIRONMENT DIVISION.                                            00440000
+004500                                                                  00450000
+004600 CONFIGURATION SECTION.                                           00460000
+004700 SOURCE-COMPUTER. IBM-3090.                                       00470000
+004800 OBJECT-COMPUTER. IBM-3090.                                       00480000
+004900                                                                  00490000
+005000 INPUT-OUTPUT SECTION.                                            00500000
+005100 FILE-CONTROL.                                                    00510000
+005200     SELECT VALID-IMP-INV-FILE ASSIGN TO INP01.                   00520000
+005300     SELECT INVOICE-LOAD-FILE ASSIGN TO OUT01.                    00530000
+005400     SELECT ADJUST-JRNL-FILE ASSIGN TO OUT02.                     00540000
+005500                                                                  00550000
+005600 DATA DIVISION.                                                   00560000
+005700                                                                  00570000
+005800 FILE SECTION.                                                    00580000
+005900                                                                  00590000
+006000 FD  VALID-IMP-INV-FILE                                           00600000
+006100     RECORDING MODE IS F                                          00610000
+006200     LABEL RECORDS ARE STANDARD                                   00620000
+006300     BLOCK CONTAINS 0 RECORDS                                     00630000
+006400     DATA RECORD IS INPUT-INVC-RECORD.                            00640000
+006500                                                                  00650000
+006600 01  VALID-IMP-INV-RECORD      PIC X(476).                        00660000
+006700                                                                  00670000
+006800 FD  INVOICE-LOAD-FILE                                            00680000
+006900     RECORDING MODE F                                             00690000
+007000     LABEL RECORDS ARE STANDARD                                   00700000
+007100     DATA RECORD IS OUTPUT-INVC-RECORD.                           00710000
+007200 01  INVOICE-LOAD-RECORD       PIC X(476).                        00720000
+007300                                                                  00730000
+007400 FD  ADJUST-JRNL-FILE                                             00740000
+007500     RECORDING MODE F                                             00750000
+007600     LABEL RECORDS ARE STANDARD                                   00760000
+007700     DATA RECORD IS ADJUST-JRNL-RECORD.                           00770000
+007800 01  ADJUST-JRNL-RECORD         PIC X(500).                       00780000
+007900                                                                  00790000
+008000                                                                  00800000
+008100 WORKING-STORAGE SECTION.                                         00810000
+008200                                                                  00820000
+008300 01  WS-RETRY-COUNTER                 PIC S9(4) COMP VALUE +0.    00830000
+008400 01  WS-RETRY-MAX                     PIC S9(4) COMP VALUE +3.    00840000
+008500                                                                  00850000
+008600 01  DISPLAY-PO-NBR                   PIC 9(9).                   00860000
+008700                                                                  00870000
+008800 01  PV-PROGRAM-VARIABLES.                                        00880000
+008900     05  PV-PREV-PO-NBR             PIC S9(9) COMP VALUE +0.      00890000
+009000     05  PV-PREV-REMIT-TO-DUN-NBR   PIC X(09) VALUE SPACES.       00900000
+009100     05  PV-CURR-TMST               PIC X(26) VALUE SPACES.       00910000
+009200     05  PV-ENTR-DTE                PIC X(10) VALUE SPACES.       00920000
+009300     05  PV-HOLD-TRANCODE           PIC X(2)  VALUE SPACES.       00930000
+009400     05  PV-INVC-ID                 PIC X(25)  VALUE SPACES.      00940000
+009500     05  PV-CL-NBR                  PIC X(2)  VALUE SPACES.       00950000
+009600     05  PV-CHANGE-CL-NBR REDEFINES PV-CL-NBR.                    00960000
+009700         10  PV-FIRST-CL-NBR        PIC X(1).                     00970000
+009800         10  PV-SEC-CL-NBR          PIC X(1).                     00980000
+009900     05  PV-NET-COST                PIC S9(8)V99 COMP-3 VALUE +0. 00990000
+010000     05  PV-START                   PIC S9(04)   COMP VALUE +0.   01000000
+010100     05  PV-COMM-POS                PIC 9(03)    VALUE ZEROS.     01010000
+010200     05  PV-OFF                     PIC X(03)    VALUE 'OFF'.     01020000
+010300                                                                  01030000
+010400 01  PROGRAM-COUNTERS.                                            01040000
+010500     05  COUNT-INVOIC-ROWS            PIC S9(04) COMP VALUE +0.   01050000
+010600     05  AP-PRC-J-COUNT               PIC S9(04)      VALUE +0.   01060000
+010700     05  AP-PRC-SPACE-COUNT           PIC S9(04)      VALUE +0.   01070000
+010800     05  INPUT-COUNT                  PIC 9(09) VALUE 0.          01080000
+010900     05  OUT-INVOICE-COUNT            PIC 9(09) VALUE 0.          01090000
+011000     05  OUT-ADJUSTMENT-COUNT         PIC 9(09) VALUE 0.          01100000
+011100                                                                  01110000
+011200 01  TRAN-CDE-AREA.                                               01120000
+011300     05  TRAN-CDE-TABLE OCCURS 10 TIMES INDEXED BY PV-TRAN-IDX.   01130000
+011400         10  PV-AP-TRN-CDE            PIC X(02).                  01140000
+011500         10  PV-PSTG-TYP-CDE          PIC X(02).                  01150000
+011600         10  PV-TRN-TYP-CDE           PIC X(03).                  01160000
+011700         10  PV-AUTO-OFFST-TRN-CDE    PIC X(03).                  01170000
+011710         10  PV-TR-GL-ACCT-NBR        PIC X(07).                  01171001
+011800                                                                  01180000
+011900 01  CHRG-CDE-AREA.                                               01190000
+012000     05  CHRG-ACCT-TABLE OCCURS 10 TIMES INDEXED BY PV-CHRG-IDX.  01200000
+012100         10  PV-ALW-CHRG-CDE          PIC X(03).                  01210000
+012200         10  PV-GL-ACCT-NBR           PIC X(07).                  01220000
+012300         10  PV-CHRG-TOTAL-AMT        PIC S9(8)V99 COMP-3         01230000
+012400                                      VALUE +0.                   01240000
+012500                                                                  01250000
+012600 01  PS-PROGRAM-SWITCHES.                                         01260000
+012700     05  INVOICE-CURSOR-SW            PIC X(01)      VALUE 'N'.   01270000
+012800         88  END-OF-INVOICE-CSR                      VALUE 'Y'.   01280000
+012900     05  TRANCODE-CSR-SW              PIC X(01)      VALUE 'N'.   01290000
+013000         88  END-OF-TRANCODE-CSR                     VALUE 'Y'.   01300000
+013100     05  CHRGCODE-CSR-SW              PIC X(01)      VALUE 'N'.   01310000
+013200         88  END-OF-CHRGCODE-CSR                     VALUE 'Y'.   01320000
+013300     05  PS-EMPTY-INVOIC-CSR          PIC X(01)      VALUE ' '.   01330000
+013400         88  EMPTY-INVOIC-CSR                        VALUE 'Y'.   01340000
+013500     05  PS-INVOICE-EOF               PIC X(01)      VALUE 'N'.   01350000
+013600         88  INVOICE-EOF                             VALUE 'Y'.   01360000
+013700     05  PS-OUTPUT-IND                PIC X(01)      VALUE ' '.   01370000
+013800         88  PS-OUTPUT-INVOICE                       VALUE 'I'.   01380000
+013900         88  PS-OUTPUT-ADJUST                        VALUE 'A'.   01390000
+014000                                                                  01400000
+014100 01  WS-ABEND-FIELDS.                                             01410000
+014200     05  WS-ABEND-LITERAL          PIC  X(40)   VALUE             01420000
+014300             '*****       ABEND'.                                 01430000
+014400     05  WS-ABEND-PROGRAM-MSG.                                    01440000
+014500         10  FILLER                PIC X(17)    VALUE             01450000
+014600             '*****   PROGRAM: '.                                 01460000
+014700         10  WS-ABEND-PROGRAM      PIC X(8)   VALUE 'APKUT371'.   01470000
+014800     05  WS-ABEND-PARAGRAPH-MSG.                                  01480000
+014900         10  FILLER                PIC  X(17)   VALUE             01490000
+015000             '***** PARAGRAPH: '.                                 01500000
+015100         10  WS-ABEND-PARAGRAPH    PIC X(35)  VALUE SPACES.       01510000
+015200     05  WS-ABEND-OPERATION-MSG.                                  01520000
+015300         10  FILLER                PIC  X(17)   VALUE             01530000
+015400             '***** OPERATION: '.                                 01540000
+015500         10  WS-ABEND-OPERATION    PIC X(50)  VALUE SPACES.       01550000
+015600     05  WS-ABEND-TABLE1-MSG.                                     01560000
+015700         10  FILLER                PIC  X(15)   VALUE             01570000
+015800             '***** TABLE 1: '.                                   01580000
+015900         10  WS-ABEND-STRUCTURE-1  PIC X(8)   VALUE SPACES.       01590000
+016000     05  WS-ABEND-TABLE2-MSG.                                     01600000
+016100         10  FILLER                PIC  X(15)   VALUE             01610000
+016200             '***** TABLE 2: '.                                   01620000
+016300         10  WS-ABEND-STRUCTURE-2  PIC X(8)   VALUE SPACES.       01630000
+016400     05  WS-ABEND-STATUS           PIC XX     VALUE SPACES.       01640000
+016500     05  WS-MESSAGE-LINE-1.                                       01650000
+016600         10  FILLER                PIC  X(06)   VALUE '*****'.    01660000
+016700         10  WS-MESSAGE-1          PIC  X(80)   VALUE SPACES.     01670000
+016800     05  WS-MESSAGE-LINE-2.                                       01680000
+016900         10  FILLER                PIC  X(06)   VALUE '*****'.    01690000
+017000         10  WS-MESSAGE-2          PIC  X(80)   VALUE SPACES.     01700000
+017100                                                                  01710000
+017200 01  ABEND-CODE                    PIC S9(4)  COMP SYNC           01720000
+017300                                              VALUE ZEROS.        01730000
+017400     88 AP-TABLE-FULL              VALUE +4004.                   01740000
+017500     88 AP-TABLE1-FULL             VALUE +4003.                   01750000
+017600     88 AP-EMPTY-FILE              VALUE +4005.                   01760000
+017700     88 AP-TABLE-NOTFND            VALUE +4006.                   01770000
+017800     88 AP-DB2-ERROR               VALUE +4013.                   01780000
+017900                                                                  01790000
+018000                                                                  01800000
+018100*----------------------------------------------------------------*01810000
+018200* DB2 SQL ERROR MESSAGE FORMAT AREA                               01820000
+018300*----------------------------------------------------------------*01830000
+018400                                                                  01840000
+018500     COPY DPWS004.                                                01850000
+018600                                                                  01860000
+018700*----------------------------------------------------------------*01870000
+018800* INVOICE AND IMPORT EXPENSE INVOICES FILE LAYOUT                 01880000
+018900*----------------------------------------------------------------*01890000
+019000                                                                  01900000
+019100     COPY APRD016.                                                01910000
+019200                                                                  01920000
+019300*----------------------------------------------------------------*01930000
+019400* ADJUSTMENT JOURNAL DETAIL TRANSACTION RESULTS FILE LAYOUT       01940000
+019500*----------------------------------------------------------------*01950000
+019600                                                                  01960000
+019700     COPY APRD045.                                                01970000
+019800                                                                  01980000
+019900*----------------------------------------------------------------*01990000
+020000* INVOICE TABLE                                                   02000000
+020100*----------------------------------------------------------------*02010000
+020200                                                                  02020000
+020300     EXEC SQL                                                     02030000
+020400         INCLUDE TINVOIC                                          02040000
+020500     END-EXEC.                                                    02050000
+020600                                                                  02060000
+020700*----------------------------------------------------------------*02070000
+020800* PURCHASE ORDER TABLE                                            02080000
+020900*----------------------------------------------------------------*02090000
+021000                                                                  02100000
+021100     EXEC SQL                                                     02110000
+021200         INCLUDE TPURCHS                                          02120000
+021300     END-EXEC.                                                    02130000
+021400                                                                  02140000
+021500*----------------------------------------------------------------*02150000
+021600* TRANSACTION CODE TABLE                                          02160000
+021700*----------------------------------------------------------------*02170000
+021800                                                                  02180000
+021900     EXEC SQL                                                     02190000
+022000         INCLUDE TTRNCDE                                          02200000
+022100     END-EXEC.                                                    02210000
+022200                                                                  02220000
+022300*----------------------------------------------------------------*02230000
+022400* EXTERNAL ENTERPRISE TABLE                                       02240000
+022500*----------------------------------------------------------------*02250000
+022600                                                                  02260000
+022700     EXEC SQL                                                     02270000
+022800         INCLUDE TEXTENT                                          02280000
+022900     END-EXEC.                                                    02290000
+023000                                                                  02300000
+023100*----------------------------------------------------------------*02310000
+023200* EXTERNAL ENTERPRISE NAME TABLE                                  02320000
+023300*----------------------------------------------------------------*02330000
+023400                                                                  02340000
+023500     EXEC SQL                                                     02350000
+023600         INCLUDE TENTNME                                          02360000
+023700     END-EXEC.                                                    02370000
+023800                                                                  02380000
+023900*----------------------------------------------------------------*02390000
+024000* PURCHASE ORDER ITEM TABLE                                       02400000
+024100*----------------------------------------------------------------*02410000
+024200                                                                  02420000
+024300     EXEC SQL                                                     02430000
+024400         INCLUDE TPURITM                                          02440000
+024500     END-EXEC.                                                    02450000
+024600                                                                  02460000
+024700*----------------------------------------------------------------*02470000
+024800* ACCOUNTS PAYABLE CONTROL TABLE                                  02480000
+024900*----------------------------------------------------------------*02490000
+025000                                                                  02500000
+025100     EXEC SQL                                                     02510000
+025200         INCLUDE TAPCNTL                                          02520000
+025300     END-EXEC.                                                    02530000
+025400                                                                  02540000
+025500*----------------------------------------------------------------*02550000
+025600* AP ACCOUNT/CHARGE TYPE TABLE                                    02560000
+025700*----------------------------------------------------------------*02570000
+025800                                                                  02580000
+025900     EXEC SQL                                                     02590000
+026000         INCLUDE TACCTYP                                          02600000
+026100     END-EXEC.                                                    02610000
+026200                                                                  02620000
+026300*----------------------------------------------------------------*02630000
+026400* DB2 COMMUNICATION AREA                                          02640000
+026500*----------------------------------------------------------------*02650000
+026600                                                                  02660000
+026700     EXEC SQL                                                     02670000
+026800         INCLUDE SQLCA                                            02680000
+026900     END-EXEC.                                                    02690000
+027000                                                                  02700000
+027100*----------------------------------------------------------------*02710000
+027200* DB2 COMMUNICATION AREA2                                         02720000
+027300*----------------------------------------------------------------*02730000
+027400                                                                  02740000
+027500     COPY SQLCA2.                                                 02750000
+027600                                                                  02760000
+027700*----------------------------------------------------------------*02770000
+027800*  INVOICE CURSOR SELECTS THE AP PROCESS CODE AND COUNTS HOW      02780000
+027900*  MANY RECORDS ARE EITHER 'J' (FOR JOURNALIZED RECORDS) OR ' '   02790000
+028000*  (FOR UNJOURNALIZED RECORDS).                                   02800000
+028100*----------------------------------------------------------------*02810000
+028200                                                                  02820000
+028300     EXEC SQL                                                     02830000
+028400       DECLARE INVOIC_CSR CURSOR FOR                              02840000
+028500         SELECT   AP_PRC_CDE                                      02850000
+028600                , COUNT(*)                                        02860000
+028700         FROM     TINVOIC                                         02870000
+028800         WHERE    PO_NBR = :AP016-PO-NBR                          02880000
+028900                  AND STATUS_CDE <> 'DE'                          02890000
+029000         GROUP BY AP_PRC_CDE                                      02900000
+029100     END-EXEC.                                                    02910000
+029200                                                                  02920000
+029300*----------------------------------------------------------------*02930000
+029400*  TRAN INFO CURSOR SELECTS THE POSTING TYPE CODE, THE            02940000
+029500*  TRANSACTION TYPE CODE, AND THE TRANCODE FROM THE TTRNCDE TABLE.02950000
+029600*  IT ONLY SELECTS THE POSTING TYPE CODES AND THE TRANSACTION     02960000
+029700*  TYPE CODES IF THE TRANCODE IS A '5F','QQ','QP'.                02970000
+029800*----------------------------------------------------------------*02980000
+029900                                                                  02990000
+030000     EXEC SQL                                                     03000000
+030100       DECLARE TRANCODE_CSR CURSOR FOR                            03010000
+030200         SELECT   PSTG_TYP_CDE                                    03020000
+030300                , TRN_TYP_CDE                                     03030000
+030400                , AP_TRN_CDE                                      03040000
+030500                , AUTO_OFFST_TRN_CDE                              03050000
+030510                , GL_ACCT_NBR                                     03051001
+030600         FROM     TTRNCDE                                         03060000
+030700         WHERE    AP_TRN_CDE IN ('5F','QQ','QP')                  03070000
+030800           AND CURRENT DATE  BETWEEN EFF_STRT_DTE AND             03080000
+030900                                     EFF_END_DTE                  03090000
+031000     END-EXEC.                                                    03100000
+031100                                                                  03110000
+031200*----------------------------------------------------------------*03120000
+031300*  CHRG INFO CURSOR SELECTS THE CHARGE CODE AND ACCOUNT NUMBER    03130000
+031400*  FROM THE TACCTYP TABLE.                                        03140000
+031500*  IT ONLY SELECTS THE CHARGE CODES AND GL ACCOUNT NUMBER         03150000
+031600*  IF THE CHRGCODE IS A 'OAF','OCF','DRA','MIS'.                  03160000
+031700*----------------------------------------------------------------*03170000
+031800                                                                  03180000
+031900     EXEC SQL                                                     03190000
+032000       DECLARE CHRGCODE_CSR CURSOR FOR                            03200000
+032100         SELECT   ALW_CHRG_CDE                                    03210000
+032200                , GL_ACCT_NBR                                     03220000
+032300         FROM     TACCTYP                                         03230000
+032400         WHERE    ALW_CHRG_CDE IN ('OAF','OCF','DRA','MIS')       03240000
+032500           AND EFF_END_DTE = '9999-09-09'                         03250000
+032600     END-EXEC.                                                    03260000
+032700                                                                  03270000
+032800 PROCEDURE DIVISION.                                              03280000
+032900                                                                  03290000
+033000 A100-PROGRAM-MAINLINE.                                           03300000
+033100                                                                  03310000
+033200     PERFORM B100-HOUSEKEEPING.                                   03320000
+033300                                                                  03330000
+033400     PERFORM B200-PROCESS-INVOICE-REC                             03340000
+033500         UNTIL INVOICE-EOF.                                       03350000
+033600                                                                  03360000
+033700     PERFORM B300-END-OF-JOB.                                     03370000
+033800                                                                  03380000
+033900     GOBACK.                                                      03390000
+034000                                                                  03400000
+034100*----------------------------------------------------------------*03410000
+034200*  B100-HOUSEKEEPING  OPEN FILES, INITIALIZE THE NECESSARY        03420000
+034300*  FIELDS, PROCESS THE INVOICE FILE FOR THE FIRST RECORD, AND     03430000
+034400*  OPENS THE CURSOR FOR THE FIRST RECORD.                         03440000
+034500*----------------------------------------------------------------*03450000
+034600                                                                  03460000
+034700 B100-HOUSEKEEPING.                                               03470000
+034800                                                                  03480000
+034900     OPEN INPUT  VALID-IMP-INV-FILE                               03490000
+035000          OUTPUT INVOICE-LOAD-FILE                                03500000
+035100                 ADJUST-JRNL-FILE.                                03510000
+035200                                                                  03520000
+035300     INITIALIZE AP016-INVOICE-LOAD-RECORD                         03530000
+035400                AP045-TRANSACTION-FILE.                           03540000
+035500                                                                  03550000
+035600     PERFORM S400-SELECT-DATES.                                   03560000
+035700     PERFORM S500-SET-CURRENT-TMST.                               03570000
+035800                                                                  03580000
+035900     SET PV-TRAN-IDX TO 1.                                        03590000
+036000                                                                  03600000
+036100     PERFORM Y300-OPEN-TRANCODE-CSR.                              03610000
+036200     PERFORM R300-FETCH-TRANCODE-CSR.                             03620000
+036300                                                                  03630000
+036400     PERFORM UNTIL END-OF-TRANCODE-CSR                            03640000
+036500       OR PV-TRAN-IDX > 10                                        03650000
+036600          MOVE TRNCDE-AP-TRN-CDE TO PV-AP-TRN-CDE(PV-TRAN-IDX)    03660000
+036700          MOVE TRNCDE-PSTG-TYP-CDE TO PV-PSTG-TYP-CDE(PV-TRAN-IDX)03670000
+036800          MOVE TRNCDE-TRN-TYP-CDE TO PV-TRN-TYP-CDE(PV-TRAN-IDX)  03680000
+036900          MOVE TRNCDE-AUTO-OFFST-TRN-CDE TO                       03690000
+037000                               PV-AUTO-OFFST-TRN-CDE(PV-TRAN-IDX) 03700000
+037010          MOVE TRNCDE-GL-ACCT-NBR                                 03701001
+037011                                TO PV-TR-GL-ACCT-NBR(PV-TRAN-IDX) 03701101
+037100          SET PV-TRAN-IDX UP BY 1                                 03710000
+037200          PERFORM R300-FETCH-TRANCODE-CSR                         03720000
+037300     END-PERFORM.                                                 03730000
+037400                                                                  03740000
+037500     IF PV-TRAN-IDX > 10                                          03750000
+037600        SET AP-TABLE-FULL TO TRUE                                 03760000
+037700        MOVE 'B100-HOUSEKEEPING ' TO WS-ABEND-PARAGRAPH           03770000
+037800        MOVE 'OVERFLOW ON TRANCODE TABLE ' TO WS-MESSAGE-1        03780000
+037900        MOVE 'MORE TRANCODES SELECTED THAN OCCURS IN ARRAY'       03790000
+038000                                  TO WS-MESSAGE-2                 03800000
+038100        PERFORM Z998-ABEND                                        03810000
+038200     END-IF.                                                      03820000
+038300                                                                  03830000
+038400     PERFORM Y400-CLOSE-TRANCODE-CSR.                             03840000
+038500                                                                  03850000
+038600                                                                  03860000
+038700     SET PV-CHRG-IDX TO 1.                                        03870000
+038800                                                                  03880000
+038900     PERFORM Y500-OPEN-CHRGCODE-CSR.                              03890000
+039000     PERFORM R400-FETCH-CHRGCODE-CSR.                             03900000
+039100                                                                  03910000
+039200     PERFORM UNTIL END-OF-CHRGCODE-CSR                            03920000
+039300       OR PV-CHRG-IDX > 10                                        03930000
+039400          MOVE ACCTYP-ALW-CHRG-CDE                                03940000
+039500                                 TO PV-ALW-CHRG-CDE(PV-CHRG-IDX)  03950000
+039600          MOVE ACCTYP-GL-ACCT-NBR                                 03960000
+039700                                 TO PV-GL-ACCT-NBR(PV-CHRG-IDX)   03970000
+039800          SET PV-CHRG-IDX UP BY 1                                 03980000
+039900          PERFORM R400-FETCH-CHRGCODE-CSR                         03990000
+040000     END-PERFORM.                                                 04000000
+040100                                                                  04010000
+040200     IF PV-CHRG-IDX > 10                                          04020000
+040300        SET AP-TABLE1-FULL TO TRUE                                04030000
+040400        MOVE 'B100-HOUSEKEEPING ' TO WS-ABEND-PARAGRAPH           04040000
+040500        MOVE 'OVERFLOW ON CHRGCODE TABLE ' TO WS-MESSAGE-1        04050000
+040600        MOVE 'MORE CHARGE CODES SELECTED THAN OCCURS IN ARRAY'    04060000
+040700                                  TO WS-MESSAGE-2                 04070000
+040800        PERFORM Z998-ABEND                                        04080000
+040900     END-IF.                                                      04090000
+041000                                                                  04100000
+041100     PERFORM Y600-CLOSE-CHRGCODE-CSR.                             04110000
+041200                                                                  04120000
+041300     PERFORM R100-READ-VALID-IMP-INV-FILE.                        04130000
+041400                                                                  04140000
+041500*---------------------------------------------------------------* 04150000
+041600*  B200-PROCESS-INVOICE-REC                                     * 04160000
+041700*  PROCESSES RECORDS FROM THE INVOICE FILE.                     * 04170000
+041800*---------------------------------------------------------------* 04180000
+041900                                                                  04190000
+042000 B200-PROCESS-INVOICE-REC.                                        04200000
+042100                                                                  04210000
+042200     IF (AP016-PO-NBR NOT = PV-PREV-PO-NBR) OR                    04220000
+042300        (AP016-REMIT-TO-DUN-NBR NOT = PV-PREV-REMIT-TO-DUN-NBR)   04230000
+042400        MOVE AP016-PO-NBR TO PV-PREV-PO-NBR                       04240000
+042500        MOVE AP016-REMIT-TO-DUN-NBR TO PV-PREV-REMIT-TO-DUN-NBR   04250000
+042600        PERFORM S300-SELECT-ENT-ID                                04260000
+042700        PERFORM C100-SET-OUTPUT-DESTINATION                       04270000
+042800        IF PS-OUTPUT-ADJUST                                       04280000
+042900           PERFORM S100-SELECT-DEPT                               04290000
+043000           PERFORM S200-SELECT-CLASS-NBR                          04300000
+043100        END-IF                                                    04310000
+043200     END-IF.                                                      04320000
+043300                                                                  04330000
+043400     PERFORM C200-PROCESS-OUTPUT-RECORDS.                         04340000
+043500                                                                  04350000
+043600     PERFORM R100-READ-VALID-IMP-INV-FILE.                        04360000
+043700                                                                  04370000
+043800*---------------------------------------------------------------* 04380000
+043900*  B300-END-OF-JOB  CLOSES THE INPUT FILE AND THE TWO OUTPUT      04390000
+044000*  FILES.                                                         04400000
+044100*---------------------------------------------------------------* 04410000
+044200                                                                  04420000
+044300 B300-END-OF-JOB.                                                 04430000
+044400                                                                  04440000
+044500     CLOSE VALID-IMP-INV-FILE                                     04450000
+044600           INVOICE-LOAD-FILE                                      04460000
+044700           ADJUST-JRNL-FILE.                                      04470000
+044800                                                                  04480000
+044900     DISPLAY 'INVOICE RECORDS READ = ' INPUT-COUNT.               04490000
+045000     DISPLAY 'INVOICE LOAD RECORDS WRITTEN = ' OUT-INVOICE-COUNT. 04500000
+045100     DISPLAY 'ADJUSTMENT RECORDS WRITTEN = ' OUT-ADJUSTMENT-COUNT.04510000
+045200                                                                  04520000
+045300*----------------------------------------------------------------*04530000
+045400*  C100-SET-OUTPUT-DESTINATION OPENS THE INVOICE CURSOR AND      *04540000
+045500*  FETCHES THROUGH IT UNTIL END.  BASED ON WHAT DATA IS OR IS    *04550000
+045600*  NOT FOUND ON THE CURSOR, SWITCHES ARE SET TO SHOW WHICH FILE  *04560000
+045700*  THE INVOICES FOR THIS PO BELONG ON - THE INVOICE LOAD OR THE  *04570000
+045800*  ADJUSTMENT FILE.  IF NO INVOICES ARE FOUND, OR ANY OF THE     *04580000
+045900*  INVOICE FOUND HAVE NOT BEEN PROCESSED (AP-PRC-CDE = ' '),     *04590000
+046000*  THE INVOICES GO ON THE INVOICE LOAD FILE.  IF ALL OF THE      *04600000
+046100*  INVOICES FOUND HAVE BEEN PROCESSED (AP-PRC-CDE = 'J') THEN    *04610000
+046200*  THE INVOICES (EXCEPT THOSE IN PENDING REVIEW STATUS) WILL BE  *04620000
+046300*  CONVERTED INTO ADJUSTMENT RECORDS.                            *04630000
+046400*----------------------------------------------------------------*04640000
+046500                                                                  04650000
+046600 C100-SET-OUTPUT-DESTINATION.                                     04660000
+046700                                                                  04670000
+046800     INITIALIZE COUNT-INVOIC-ROWS                                 04680000
+046900                INVOICE-CURSOR-SW                                 04690000
+047000                PS-EMPTY-INVOIC-CSR                               04700000
+047100                AP-PRC-J-COUNT                                    04710000
+047200                AP-PRC-SPACE-COUNT                                04720000
+047300                PS-OUTPUT-IND.                                    04730000
+047400                                                                  04740000
+047500     PERFORM Y100-OPEN-INVOIC-CSR.                                04750000
+047600                                                                  04760000
+047700     PERFORM R200-FETCH-INVOIC-CSR.                               04770000
+047800                                                                  04780000
+047900     IF END-OF-INVOICE-CSR                                        04790000
+048000        SET EMPTY-INVOIC-CSR TO TRUE                              04800000
+048100     ELSE                                                         04810000
+048200        PERFORM UNTIL END-OF-INVOICE-CSR                          04820000
+048300          EVALUATE INVOIC-AP-PRC-CDE                              04830000
+048400            WHEN 'J'                                              04840000
+048500              MOVE COUNT-INVOIC-ROWS TO AP-PRC-J-COUNT            04850000
+048600            WHEN ' '                                              04860000
+048700              MOVE COUNT-INVOIC-ROWS TO AP-PRC-SPACE-COUNT        04870000
+048800            WHEN OTHER                                            04880000
+048900              ADD  COUNT-INVOIC-ROWS TO AP-PRC-J-COUNT            04890000
+049000          END-EVALUATE                                            04900000
+049100          PERFORM R200-FETCH-INVOIC-CSR                           04910000
+049200        END-PERFORM                                               04920000
+049300     END-IF.                                                      04930000
+049400                                                                  04940000
+049500     PERFORM Y200-CLOSE-INVOIC-CSR.                               04950000
+049600                                                                  04960000
+049700     IF EMPTY-INVOIC-CSR                                          04970000
+049800     OR AP-PRC-SPACE-COUNT > 0                                    04980000
+049900        SET PS-OUTPUT-INVOICE TO TRUE                             04990000
+050000     ELSE                                                         05000000
+050100        IF AP-PRC-SPACE-COUNT = 0                                 05010000
+050200        AND AP-PRC-J-COUNT > 0                                    05020000
+050300           SET PS-OUTPUT-ADJUST TO TRUE                           05030000
+050400        END-IF                                                    05040000
+050500     END-IF.                                                      05050000
+050600                                                                  05060000
+050700                                                                  05070000
+050800*---------------------------------------------------------------* 05080000
+050900*  C200-PROCESS-OUTPUT-RECORDS                                  * 05090000
+051000*                                                               * 05100000
+051100*  ADJUSTMENT RECORDS WILL NEED TO BE CREATED BOTH WHEN PO HAS  * 05110000
+051200*  NOT BEEN JOURNALIZED, THE INVOICE LOAD TRANSACTION           * 05120000
+051300*  REWRITTEN AND ADJUSTMENT LOAD TRANSACTIONS TO UPDATE PREPAID * 05130000
+051400*  IMPORT ACCOUNTS WILL BE CREATED FOR EACH CHARGE CODE ON THE  * 05140000
+051500*  INVOICE. WHEN A PO HAS ALREADY BEEN JOURNALIZED, THE INVOICE * 05150000
+051600*  LOAD RECORDS WILL NOT BE REWRITTEN. INSTEAD, ADJUSTMENT LOAD * 05160000
+051700*  RECORDS WILL BE CREATED TO CHARGE THE MERCHANDISE DEPARTMENT * 05170000
+051800*  OR CLASS WITH THE IMPORT COSTS.                              * 05180000
+051900*---------------------------------------------------------------* 05190000
+052000                                                                  05200000
+052100 C200-PROCESS-OUTPUT-RECORDS.                                     05210000
+052200                                                                  05220000
+052300     EVALUATE TRUE                                                05230000
+052400         WHEN PS-OUTPUT-INVOICE                                   05240000
+052500              PERFORM W100-WRITE-INVOICE-LOAD-RECD                05250000
+052600              PERFORM D100-ACCUM-CHARGES                          05260000
+052700              PERFORM D300-FORMAT-PREPAID-ADJ                     05270000
+052800              PERFORM D400-FORMAT-OFFSET-ADJ                      05280000
+053000         WHEN PS-OUTPUT-ADJUST                                    05300000
+053100              MOVE '5F'       TO PV-HOLD-TRANCODE                 05310000
+053200              MOVE AP016-INVC-NET-COST-AMT TO                     05320000
+053300                                             PV-NET-COST          05330000
+053400              PERFORM D200-FORMAT-ADJJRNL-RECORD                  05340000
+053600              MOVE 'QP'       TO PV-HOLD-TRANCODE                 05360000
+053700              MOVE AP016-INVC-NET-COST-AMT TO                     05370000
+053800                                             PV-NET-COST          05380000
+053900              PERFORM D400-FORMAT-OFFSET-ADJ                      05390000
+054100     END-EVALUATE.                                                05410000
+054200*----------------------------------------------------------------*05420000
+054300* D100-ACCUM-CHARGES                                             *05430000
+054400*  READS THE CHARGE CODES AND AMOUNTS IN THE TABLE.  LOGIC       *05440000
+054500*  ACCUMULATES CHARGES SEPARATELY BASED ON THE VALUE OF THE      *05450000
+054600*  CHARGE CODE.                                                  *05460000
+054700*----------------------------------------------------------------*05470000
+054800 D100-ACCUM-CHARGES.                                              05480000
+054900                                                                  05490000
+055000     PERFORM VARYING TALCHRG-INDEX FROM 1 BY 1                    05500000
+055100       UNTIL TALCHRG-INDEX > 20                                   05510000
+055200          OR AP016-ALW-CHRG-CDE(TALCHRG-INDEX) = SPACES           05520000
+055300             EVALUATE TRUE                                        05530000
+055400               WHEN AP016-ALW-CHRG-CDE(TALCHRG-INDEX) = 'OAF'     05540000
+055500               WHEN AP016-ALW-CHRG-CDE(TALCHRG-INDEX) = 'DRA'     05550000
+055600               WHEN AP016-ALW-CHRG-CDE(TALCHRG-INDEX) = 'OCF'     05560000
+055700               WHEN AP016-ALW-CHRG-CDE(TALCHRG-INDEX) = 'MIS'     05570000
+055800                    PERFORM VARYING PV-CHRG-IDX FROM 1 BY 1       05580000
+055900                       UNTIL PV-CHRG-IDX > 10                     05590000
+056000                          OR AP016-ALW-CHRG-CDE(TALCHRG-INDEX) =  05600000
+056100                                     PV-ALW-CHRG-CDE(PV-CHRG-IDX) 05610000
+056200                    END-PERFORM                                   05620000
+056300                    IF PV-CHRG-IDX > 10                           05630000
+056400                       CONTINUE                                   05640000
+056500                    ELSE                                          05650000
+056600                       ADD AP016-ALW-CHRG-AMT(TALCHRG-INDEX)      05660000
+056700                                TO PV-CHRG-TOTAL-AMT(PV-CHRG-IDX) 05670000
+056800                    END-IF                                        05680000
+056900             END-EVALUATE                                         05690000
+057000     END-PERFORM.                                                 05700000
+057100                                                                  05710000
+057200*----------------------------------------------------------------*05720000
+057300*  D200-FORMAT-ADJJRNL-RECORD                                    *05730000
+057400*  POPULATES THE KEY, COMMON AND DETAIL FIELDS IN THE APRD045    *05740000
+057500*  COPYBOOK.                                                     *05750000
+057600*----------------------------------------------------------------*05760000
+057700                                                                  05770000
+057800 D200-FORMAT-ADJJRNL-RECORD.                                      05780000
+057900                                                                  05790000
+058000     INITIALIZE AP045-KEY-FIELDS                                  05800000
+058100                AP045-COMMON-FIELDS                               05810000
+058200                AP045-DETAIL-FIELDS.                              05820000
+058300                                                                  05830000
+058400     PERFORM VARYING PV-TRAN-IDX FROM 1 BY 1                      05840000
+058500       UNTIL PV-AP-TRN-CDE(PV-TRAN-IDX) = PV-HOLD-TRANCODE        05850000
+058600          OR PV-TRAN-IDX > 10                                     05860000
+058700     END-PERFORM.                                                 05870000
+058800                                                                  05880000
+058900     IF PV-TRAN-IDX > 10                                          05890000
+059000        SET AP-TABLE-NOTFND TO TRUE                               05900000
+059100        DISPLAY 'TRANCODE BEING PROCESSED = ' PV-HOLD-TRANCODE    05910000
+059200        MOVE 'D200-FORMAT-ADJJRNL-RECORD' TO WS-ABEND-PARAGRAPH   05920000
+059300        MOVE 'ENTRY NOT FOUND ON TRANCODE TABLE' TO WS-MESSAGE-1  05930000
+059400        PERFORM Z998-ABEND                                        05940000
+059500     END-IF.                                                      05950000
+059600                                                                  05960000
+059700     IF PV-TRN-TYP-CDE(PV-TRAN-IDX) = 'MDS'                       05970000
+059800        MOVE PURCHS-DEPT-NBR       TO AP045-DEPT-NBR              05980000
+059900        MOVE PURITM-CL-NBR         TO PV-CL-NBR                   05990000
+060000        IF PV-SEC-CL-NBR NOT = 0                                  06000000
+060100           MOVE 0 TO PV-SEC-CL-NBR                                06010000
+060200        END-IF                                                    06020000
+060300        MOVE PV-CL-NBR             TO AP045-CL-NBR                06030000
+060400        MOVE 85                    TO AP045-STR-NBR               06040000
+060500     ELSE                                                         06050000
+060600        MOVE '10306'               TO AP045-GL-ACCT-NBR           06060000
+060700        MOVE 90                    TO AP045-STR-NBR               06070000
+060800     END-IF.                                                      06080000
+060900                                                                  06090000
+061000     MOVE AP016-REMIT-TO-DUN-NBR   TO AP045-VND-NBR.              06100000
+061100                                                                  06110000
+061110     INITIALIZE PV-INVC-ID.                                       06111006
+061200     STRING AP016-INVC-ID DELIMITED BY ' '                        06120000
+061300            '-' DELIMITED BY SIZE                                 06130000
+061400            PV-HOLD-TRANCODE DELIMITED BY SIZE                    06140000
+061500            INTO PV-INVC-ID.                                      06150002
+061600                                                                  06160000
+061700     MOVE LENGTH OF PV-INVC-ID   TO PV-START.                     06170000
+061800     PERFORM                                                      06180000
+061900         UNTIL PV-INVC-ID (PV-START:1) > SPACES OR                06190000
+062000               PV-START = +0                                      06200000
+062100         COMPUTE PV-START = PV-START - 1                          06210000
+062200     END-PERFORM.                                                 06220000
+062300     IF PV-START < 16                                             06230000
+062400         MOVE +1 TO PV-START                                      06240000
+062500     ELSE                                                         06250000
+062600         SUBTRACT +15 FROM PV-START                               06260000
+062700     END-IF.                                                      06270000
+062800                                                                  06280000
+062900     MOVE PV-INVC-ID(PV-START:16)  TO AP045-DOC-NBR.              06290000
+063000     MOVE AP016-INVC-DTE           TO AP045-DOC-DTE.              06300000
+063100                                                                  06310000
+063200     SET  AP045-DETAIL-RECORD      TO TRUE.                       06320000
+063300                                                                  06330000
+063400     MOVE AP016-PO-NBR             TO AP045-PO-NBR.               06340000
+063500     MOVE PV-TRN-TYP-CDE(PV-TRAN-IDX)                             06350000
+063600                                   TO AP045-TRN-TYP-CDE.          06360000
+063700     MOVE PV-PSTG-TYP-CDE(PV-TRAN-IDX)                            06370000
+063800                                   TO AP045-PSTG-TYP-CDE.         06380000
+063900     MOVE PV-HOLD-TRANCODE         TO AP045-AP-TRN-CDE.           06390000
+064000     MOVE PV-CURR-TMST             TO AP045-ENTR-TMST.            06400000
+064100     MOVE PV-ENTR-DTE              TO AP045-ENTR-DTE.             06410000
+064200     MOVE 'APKUT371'               TO AP045-ENTR-ID.              06420000
+064300     SET  AP045-ORGN-ADJUST        TO TRUE.                       06430000
+064400     MOVE APCNTL-BTCH-PRC-DTE      TO AP045-INV-CUTOFF-DTE        06440000
+064500                                      AP045-PS-BTCH-DTE.          06450000
+064600     MOVE 'IMP'                    TO AP045-PS-BTCH-SRC-CDE.      06460000
+064700     MOVE '00'                     TO AP045-PS-BTCH-SEQ-NBR.      06470000
+064800                                                                  06480000
+064900     MOVE EXTENT-ENT-ID            TO AP045-ENT-ID.               06490000
+065000     MOVE ENTNME-ENT-NAME-DESC     TO AP045-ENT-NME-DESC.         06500000
+065100                                                                  06510000
+065200                                                                  06520000
+065300     MOVE SPACES TO AP045-RSN-TXT.                                06530000
+065400     MOVE +1 TO PV-COMM-POS.                                      06540000
+065500                                                                  06550000
+065600     IF AP016-CONTAINER-NBR NOT = SPACES                          06560000
+065700         MOVE 'CONTAINER: ' TO AP045-RSN-TXT(PV-COMM-POS:11)      06570000
+065800         ADD +11 TO PV-COMM-POS                                   06580000
+065900         MOVE AP016-CONTAINER-NBR TO                              06590000
+066000                        AP045-RSN-TXT(PV-COMM-POS:12)             06600000
+066100         ADD +13 TO PV-COMM-POS                                   06610000
+066200     END-IF.                                                      06620000
+066300                                                                  06630000
+066400     IF AP016-IMPRT-BOL-ID NOT = SPACES                           06640000
+066500         MOVE 'BOL: ' TO AP045-RSN-TXT(PV-COMM-POS:5)             06650000
+066600         ADD +5 TO PV-COMM-POS                                    06660000
+066700         MOVE AP016-IMPRT-BOL-ID TO                               06670000
+066800                        AP045-RSN-TXT(PV-COMM-POS:30)             06680000
+066900         ADD +31 TO PV-COMM-POS                                   06690000
+067000     END-IF.                                                      06700000
+067100*                                                                 06710000
+067200* COMMENTED OUT AS FREIGHT INVOICES WILL NOT HAVE REFERENCE NUMBER06720000
+067210* OR ENTRY NUMBER.                                                06721000
+067220*    IF AP016-IMPRT-ENTR-NBR NOT = SPACES                         06722000
+067230*        MOVE 'ENT NBR: ' TO AP045-RSN-TXT(PV-COMM-POS:9)         06723000
+067240*        ADD +9 TO PV-COMM-POS                                    06724000
+067250*        MOVE AP016-IMPRT-ENTR-NBR TO                             06725000
+067260*                       AP045-RSN-TXT(PV-COMM-POS:16)             06726000
+067270*        ADD +17 TO PV-COMM-POS                                   06727000
+067280*    END-IF.                                                      06728000
+067290*                                                                 06729000
+067300*    IF AP016-BKR-REF-NBR NOT = SPACES                            06730000
+067400*        MOVE 'REF NBR: ' TO AP045-RSN-TXT(PV-COMM-POS:9)         06740000
+067500*        ADD +9 TO PV-COMM-POS                                    06750000
+067600*        MOVE AP016-BKR-REF-NBR TO                                06760000
+067700*                       AP045-RSN-TXT(PV-COMM-POS:15)             06770000
+067800*        ADD +16 TO PV-COMM-POS                                   06780000
+067900*    END-IF.                                                      06790000
+068000                                                                  06800000
+068100     MOVE APCNTL-CURR-PSTG-FYR-NBR TO AP045-PSTG-FYR-NBR.         06810000
+068200     MOVE APCNTL-CURR-PSTG-FMN-NBR TO AP045-PSTG-FMN-NBR.         06820000
+068300     MOVE APCNTL-CURR-PSTG-FWK-NBR TO AP045-PSTG-FWK-NBR.         06830000
+068400     MOVE PV-NET-COST              TO AP045-GRO-COST-AMT.         06840000
+068500     MOVE PV-NET-COST              TO AP045-NET-COST-AMT.         06850000
+068510                                                                  06851007
+068520     PERFORM W200-WRITE-OUTPUT-JRNL-REC.                          06852007
+068600                                                                  06860000
+068700     INITIALIZE PV-HOLD-TRANCODE                                  06870000
+068800                PV-INVC-ID                                        06880000
+068900                PV-START                                          06890000
+069000                PV-NET-COST.                                      06900000
+069100                                                                  06910000
+069200*----------------------------------------------------------------*06920000
+069300*  D300-FORMAT-PREPAID-ADJ                                       *06930000
+069400*  POPULATES THE KEY, COMMON AND DETAIL FIELDS IN THE APRD045    *06940000
+069500*  COPYBOOK.                                                     *06950000
+069600*----------------------------------------------------------------*06960000
+069700                                                                  06970000
+069800 D300-FORMAT-PREPAID-ADJ.                                         06980000
+069900                                                                  06990000
+070000     INITIALIZE AP045-KEY-FIELDS                                  07000000
+070100                AP045-COMMON-FIELDS                               07010000
+070200                AP045-DETAIL-FIELDS.                              07020000
+070300                                                                  07030000
+070400     MOVE 'QQ'       TO PV-HOLD-TRANCODE                          07040000
+070500     PERFORM VARYING PV-TRAN-IDX FROM 1 BY 1                      07050000
+070600       UNTIL PV-AP-TRN-CDE(PV-TRAN-IDX) = PV-HOLD-TRANCODE        07060000
+070700          OR PV-TRAN-IDX > 10                                     07070000
+070800     END-PERFORM.                                                 07080000
+070900                                                                  07090000
+071000     IF PV-TRAN-IDX > 10                                          07100000
+071100        SET AP-TABLE-NOTFND TO TRUE                               07110000
+071200        DISPLAY 'TRANCODE BEING PROCESSED = ' PV-HOLD-TRANCODE    07120000
+071300        MOVE 'D300-FORMAT-PREPAID-ADJ' TO WS-ABEND-PARAGRAPH      07130000
+071400        MOVE 'ENTRY NOT FOUND ON TRANCODE TABLE' TO WS-MESSAGE-1  07140000
+071500        PERFORM Z998-ABEND                                        07150000
+071600     END-IF.                                                      07160000
+071700                                                                  07170000
+071800     MOVE AP016-REMIT-TO-DUN-NBR   TO AP045-VND-NBR               07180000
+071900     MOVE AP016-INVC-DTE           TO AP045-DOC-DTE               07190000
+072000     MOVE 'QQ'                     TO AP045-AP-TRN-CDE            07200000
+072100     SET  AP045-DETAIL-RECORD      TO TRUE                        07210000
+072200     MOVE AP016-PO-NBR             TO AP045-PO-NBR                07220000
+072300     MOVE SPACES                   TO AP045-DEPT-NBR              07230000
+072400     MOVE PV-TRN-TYP-CDE(PV-TRAN-IDX)                             07240000
+072500                                   TO AP045-TRN-TYP-CDE           07250000
+072600     MOVE PV-PSTG-TYP-CDE(PV-TRAN-IDX)                            07260000
+072700                                   TO AP045-PSTG-TYP-CDE          07270000
+072800     MOVE PV-CURR-TMST             TO AP045-ENTR-TMST             07280000
+072900     MOVE PV-ENTR-DTE              TO AP045-ENTR-DTE              07290000
+073000     MOVE 'APKUT371'               TO AP045-ENTR-ID               07300000
+073100     SET  AP045-ORGN-ADJUST        TO TRUE                        07310000
+073200     MOVE APCNTL-BTCH-PRC-DTE      TO AP045-INV-CUTOFF-DTE        07320000
+073300                                      AP045-PS-BTCH-DTE           07330000
+073400     MOVE 'IMP'                    TO AP045-PS-BTCH-SRC-CDE       07340000
+073500     MOVE '00'                     TO AP045-PS-BTCH-SEQ-NBR       07350000
+073600                                                                  07360000
+073700     MOVE EXTENT-ENT-ID            TO AP045-ENT-ID                07370000
+073800     MOVE ENTNME-ENT-NAME-DESC     TO AP045-ENT-NME-DESC          07380000
+073810     MOVE 90                       TO AP045-STR-NBR.              07381007
+073900                                                                  07390000
+074000     MOVE SPACES TO AP045-RSN-TXT                                 07400000
+074100     MOVE +1 TO PV-COMM-POS                                       07410000
+074200                                                                  07420000
+074300     IF AP016-IMPRT-BOL-ID NOT = SPACES                           07430000
+074400         MOVE 'BOL: ' TO AP045-RSN-TXT(PV-COMM-POS:5)             07440000
+074500         ADD +5 TO PV-COMM-POS                                    07450000
+074600         MOVE AP016-IMPRT-BOL-ID TO                               07460000
+074700                        AP045-RSN-TXT(PV-COMM-POS:30)             07470000
+074800         ADD +31 TO PV-COMM-POS                                   07480000
+074900     END-IF                                                       07490000
+075000                                                                  07500000
+075100     MOVE APCNTL-CURR-PSTG-FYR-NBR TO AP045-PSTG-FYR-NBR          07510000
+075200     MOVE APCNTL-CURR-PSTG-FMN-NBR TO AP045-PSTG-FMN-NBR          07520000
+075300     MOVE APCNTL-CURR-PSTG-FWK-NBR TO AP045-PSTG-FWK-NBR          07530000
+075400                                                                  07540000
+075500     PERFORM VARYING PV-CHRG-IDX FROM 1 BY 1                      07550000
+075600       UNTIL PV-CHRG-IDX > 10                                     07560000
+075700                                                                  07570000
+075800          IF PV-CHRG-TOTAL-AMT(PV-CHRG-IDX) > 0.0                 07580000
+075900              INITIALIZE AP045-GL-ACCT-NBR                        07590000
+076000                         AP045-DOC-NBR                            07600000
+076100                         AP045-GRO-COST-AMT                       07610000
+076200                         AP045-NET-COST-AMT                       07620000
+076300              MOVE PV-GL-ACCT-NBR(PV-CHRG-IDX)                    07630000
+076400                                   TO AP045-GL-ACCT-NBR           07640000
+076500*             STRING AP016-INVC-ID(1:13)                          07650002
+076600*                   PV-ALW-CHRG-CDE(PV-CHRG-IDX)                  07660002
+076700*                      DELIMITED BY SIZE                          07670002
+076800*                                INTO AP045-DOC-NBR               07680002
+076801              INITIALIZE PV-INVC-ID                               07680105
+076810              STRING AP016-INVC-ID DELIMITED BY ' '               07681002
+076830                    PV-ALW-CHRG-CDE(PV-CHRG-IDX) DELIMITED BY SIZE07683002
+076840                    INTO PV-INVC-ID                               07684002
+076850                                                                  07685002
+076860              MOVE LENGTH OF PV-INVC-ID TO PV-START               07686002
+076870              PERFORM                                             07687002
+076880                  UNTIL PV-INVC-ID (PV-START:1) > SPACES OR       07688002
+076890                        PV-START = +0                             07689002
+076891                  COMPUTE PV-START = PV-START - 1                 07689102
+076892              END-PERFORM                                         07689202
+076893              IF PV-START < 16                                    07689302
+076894                  MOVE +1 TO PV-START                             07689402
+076895              ELSE                                                07689502
+076896                  SUBTRACT +15 FROM PV-START                      07689602
+076897              END-IF                                              07689702
+076899              MOVE PV-INVC-ID(PV-START:16)  TO AP045-DOC-NBR      07689902
+076900                                                                  07690002
+076910              MOVE PV-CHRG-TOTAL-AMT(PV-CHRG-IDX)                 07691000
+077000                                   TO AP045-GRO-COST-AMT          07700000
+077100                                      AP045-NET-COST-AMT          07710000
+077200              PERFORM W200-WRITE-OUTPUT-JRNL-REC                  07720000
+077210              MOVE ZERO TO PV-CHRG-TOTAL-AMT(PV-CHRG-IDX)         07721004
+077300         END-IF                                                   07730000
+077400     END-PERFORM.                                                 07740000
+077500                                                                  07750000
+077600     INITIALIZE PV-HOLD-TRANCODE                                  07760000
+077700                PV-NET-COST.                                      07770000
+077800*----------------------------------------------------------------*07780000
+077900*  D400-FORMAT-OFFSET-ADJ                                        *07790000
+078000*  POPULATES THE KEY, COMMON AND DETAIL FIELDS IN THE APRD045    *07800000
+078100*  COPYBOOK.                                                     *07810000
+078200*----------------------------------------------------------------*07820000
+078300                                                                  07830000
+078400 D400-FORMAT-OFFSET-ADJ.                                          07840000
+078500                                                                  07850000
+078600     INITIALIZE AP045-KEY-FIELDS                                  07860000
+078700                AP045-COMMON-FIELDS                               07870000
+078800                AP045-DETAIL-FIELDS.                              07880000
+078900                                                                  07890000
+079000     MOVE 'QP'       TO PV-HOLD-TRANCODE                          07900000
+079100     PERFORM VARYING PV-TRAN-IDX FROM 1 BY 1                      07910000
+079200       UNTIL PV-AP-TRN-CDE(PV-TRAN-IDX) = PV-HOLD-TRANCODE        07920000
+079300          OR PV-TRAN-IDX > 10                                     07930000
+079400     END-PERFORM.                                                 07940000
+079500                                                                  07950000
+079600     IF PV-TRAN-IDX > 10                                          07960000
+079700        SET AP-TABLE-NOTFND TO TRUE                               07970000
+079800        DISPLAY 'TRANCODE BEING PROCESSED = ' PV-HOLD-TRANCODE    07980000
+079900        MOVE 'D400-FORMAT-OFFSET-ADJ' TO WS-ABEND-PARAGRAPH       07990000
+080000        MOVE 'ENTRY NOT FOUND ON TRANCODE TABLE' TO WS-MESSAGE-1  08000000
+080100        PERFORM Z998-ABEND                                        08010000
+080200     END-IF.                                                      08020000
+080300                                                                  08030000
+080400     MOVE AP016-REMIT-TO-DUN-NBR   TO AP045-VND-NBR.              08040000
+080500*    STRING AP016-INVC-ID(1:13)                                   08050002
+080600*           PV-OFF DELIMITED BY SIZE                              08060002
+080700*                         INTO AP045-DOC-NBR.                     08070002
+080701     INITIALIZE PV-INVC-ID.                                       08070105
+080710     STRING AP016-INVC-ID DELIMITED BY ' '                        08071002
+080730           PV-OFF DELIMITED BY SIZE                               08073002
+080740           INTO PV-INVC-ID.                                       08074002
+080750                                                                  08075002
+080760     MOVE LENGTH OF PV-INVC-ID TO PV-START.                       08076002
+080770     PERFORM                                                      08077002
+080780         UNTIL PV-INVC-ID (PV-START:1) > SPACES OR                08078002
+080790               PV-START = +0                                      08079002
+080791         COMPUTE PV-START = PV-START - 1                          08079102
+080792     END-PERFORM.                                                 08079202
+080793     IF PV-START < 16                                             08079302
+080794         MOVE +1 TO PV-START                                      08079402
+080795     ELSE                                                         08079502
+080796         SUBTRACT +15 FROM PV-START                               08079602
+080797     END-IF.                                                      08079702
+080798     MOVE PV-INVC-ID(PV-START:16)  TO AP045-DOC-NBR.              08079802
+080800     MOVE AP016-INVC-DTE           TO AP045-DOC-DTE.              08080000
+080900     MOVE 'QP'                     TO AP045-AP-TRN-CDE.           08090000
+081000     SET  AP045-DETAIL-RECORD      TO TRUE.                       08100000
+081100**   MOVE ZEROS                    TO AP045-PO-NBR.               08110001
+081110     MOVE AP016-PO-NBR             TO AP045-PO-NBR                08111001
+081200     MOVE SPACES                   TO AP045-DEPT-NBR.             08120000
+081300     MOVE PV-TR-GL-ACCT-NBR(PV-TRAN-IDX)                          08130001
+081400                                   TO AP045-GL-ACCT-NBR.          08140001
+081500     MOVE PV-TRN-TYP-CDE(PV-TRAN-IDX)                             08150000
+081600                                   TO AP045-TRN-TYP-CDE.          08160000
+081700     MOVE PV-PSTG-TYP-CDE(PV-TRAN-IDX)                            08170000
+081800                                   TO AP045-PSTG-TYP-CDE.         08180000
+081900     MOVE PV-CURR-TMST             TO AP045-ENTR-TMST.            08190000
+082000     MOVE PV-ENTR-DTE              TO AP045-ENTR-DTE.             08200000
+082100     MOVE 'APKUT371'               TO AP045-ENTR-ID.              08210000
+082200     SET  AP045-ORGN-IMPORT        TO TRUE.                       08220000
+082210     MOVE 90                       TO AP045-STR-NBR.              08221007
+082300     MOVE APCNTL-BTCH-PRC-DTE      TO AP045-INV-CUTOFF-DTE        08230000
+082400                                      AP045-PS-BTCH-DTE.          08240000
+082500     MOVE 'IMP'                    TO AP045-PS-BTCH-SRC-CDE.      08250000
+082600     MOVE '00'                     TO AP045-PS-BTCH-SEQ-NBR.      08260000
+082700                                                                  08270000
+082800     MOVE EXTENT-ENT-ID            TO AP045-ENT-ID.               08280000
+082900     MOVE ENTNME-ENT-NAME-DESC     TO AP045-ENT-NME-DESC.         08290000
+083000     MOVE SPACES                   TO AP045-RSN-TXT.              08300000
+083100                                                                  08310000
+083200     MOVE APCNTL-CURR-PSTG-FYR-NBR TO AP045-PSTG-FYR-NBR.         08320000
+083300     MOVE APCNTL-CURR-PSTG-FMN-NBR TO AP045-PSTG-FMN-NBR.         08330000
+083400     MOVE APCNTL-CURR-PSTG-FWK-NBR TO AP045-PSTG-FWK-NBR.         08340000
+083500     COMPUTE PV-NET-COST = AP016-INVC-NET-COST-AMT * -1           08350000
+083600     MOVE PV-NET-COST        TO AP045-GRO-COST-AMT                08360000
+083700                                AP045-NET-COST-AMT.               08370000
+083701                                                                  08370107
+083710     PERFORM W200-WRITE-OUTPUT-JRNL-REC.                          08371007
+083720                                                                  08372007
+083800     INITIALIZE PV-HOLD-TRANCODE                                  08380000
+083900                PV-NET-COST.                                      08390000
+084000                                                                  08400000
+084100*----------------------------------------------------------------*08410000
+084200*  R100-READ-VALID-IMP-INV-FILE                                  *08420000
+084300*  READS THE INPUT INVOICE FILE INTO THE APRD016 COPY BOOK.      *08430000
+084400*----------------------------------------------------------------*08440000
+084500                                                                  08450000
+084600 R100-READ-VALID-IMP-INV-FILE.                                    08460000
+084700                                                                  08470000
+084800     READ VALID-IMP-INV-FILE INTO AP016-INVOICE-LOAD-RECORD       08480000
+084900         AT END                                                   08490000
+085000            SET INVOICE-EOF TO TRUE.                              08500000
+085100                                                                  08510000
+085200     IF NOT INVOICE-EOF                                           08520000
+085300        ADD 1 TO INPUT-COUNT                                      08530000
+085400     END-IF.                                                      08540000
+085500                                                                  08550000
+085600*----------------------------------------------------------------*08560000
+085700*  R200-FETCH-INVOIC-CSR                                         *08570000
+085800*  FETCHES ROWS FROM THE INVOICE CURSOR.                         *08580000
+085900*----------------------------------------------------------------*08590000
+086000                                                                  08600000
+086100 R200-FETCH-INVOIC-CSR.                                           08610000
+086200                                                                  08620000
+086300     EXEC SQL                                                     08630000
+086400        FETCH INVOIC_CSR                                          08640000
+086500         INTO :INVOIC-AP-PRC-CDE                                  08650000
+086600            , :COUNT-INVOIC-ROWS                                  08660000
+086700     END-EXEC.                                                    08670000
+086800                                                                  08680000
+086900     EVALUATE TRUE                                                08690000
+087000         WHEN SQLCODE = +0                                        08700000
+087100              CONTINUE                                            08710000
+087200         WHEN SQLCODE = +100                                      08720000
+087300              SET END-OF-INVOICE-CSR TO TRUE                      08730000
+087400         WHEN OTHER                                               08740000
+087500              MOVE 'R200-FETCH-INVOIC-CSR' TO WS-ABEND-PARAGRAPH  08750000
+087600              MOVE 'UNSUCCESSFUL FETCH ON INVOIC_CSR'             08760000
+087700                                           TO WS-ABEND-OPERATION  08770000
+087800              MOVE 'TINVOIC'               TO WS-ABEND-STRUCTURE-108780000
+087900              PERFORM Z999-SQL-ERROR                              08790000
+088000     END-EVALUATE.                                                08800000
+088100                                                                  08810000
+088200*----------------------------------------------------------------*08820000
+088300*  R300-FETCH-TRANCODE-CSR                                       *08830000
+088400*  FETCHES ROWS FROM THE TRANCODE CURSOR.                        *08840000
+088500*----------------------------------------------------------------*08850000
+088600                                                                  08860000
+088700 R300-FETCH-TRANCODE-CSR.                                         08870000
+088800                                                                  08880000
+088900                                                                  08890000
+089000     EXEC SQL                                                     08900000
+089100         FETCH TRANCODE_CSR                                       08910000
+089200         INTO  :TRNCDE-PSTG-TYP-CDE                               08920000
+089300             , :TRNCDE-TRN-TYP-CDE                                08930000
+089400             , :TRNCDE-AP-TRN-CDE                                 08940000
+089500             , :TRNCDE-AUTO-OFFST-TRN-CDE                         08950000
+089510             , :TRNCDE-GL-ACCT-NBR                                08951001
+089600     END-EXEC                                                     08960000
+089700                                                                  08970000
+089800     EVALUATE TRUE                                                08980000
+089900         WHEN SQLCODE = +0                                        08990000
+090000              CONTINUE                                            09000000
+090100         WHEN SQLCODE = +100                                      09010000
+090200              SET END-OF-TRANCODE-CSR TO TRUE                     09020000
+090300         WHEN OTHER                                               09030000
+090400              MOVE 'R300-FETCH-TRANCODE-CSR' TO WS-ABEND-PARAGRAPH09040000
+090500              MOVE 'UNSUCCESSFUL FETCH WITH TRANCODE_CSR'         09050000
+090600                                          TO WS-ABEND-OPERATION   09060000
+090700              MOVE 'TTRNCDE'              TO WS-ABEND-STRUCTURE-1 09070000
+090800              MOVE SPACES                 TO WS-ABEND-STRUCTURE-2 09080000
+090900              PERFORM Z999-SQL-ERROR                              09090000
+091000     END-EVALUATE.                                                09100000
+091100                                                                  09110000
+091200                                                                  09120000
+091300*----------------------------------------------------------------*09130000
+091400*  R400-FETCH-CHRGCODE-CSR                                       *09140000
+091500*  FETCHES ROWS FROM THE CHRGCODE CURSOR.                        *09150000
+091600*----------------------------------------------------------------*09160000
+091700                                                                  09170000
+091800 R400-FETCH-CHRGCODE-CSR.                                         09180000
+091900                                                                  09190000
+092000                                                                  09200000
+092100     EXEC SQL                                                     09210000
+092200         FETCH CHRGCODE_CSR                                       09220000
+092300         INTO  :ACCTYP-ALW-CHRG-CDE                               09230000
+092400             , :ACCTYP-GL-ACCT-NBR                                09240000
+092500     END-EXEC                                                     09250000
+092600                                                                  09260000
+092700     EVALUATE TRUE                                                09270000
+092800         WHEN SQLCODE = +0                                        09280000
+092900              CONTINUE                                            09290000
+093000         WHEN SQLCODE = +100                                      09300000
+093100              SET END-OF-CHRGCODE-CSR TO TRUE                     09310000
+093200         WHEN OTHER                                               09320000
+093300              MOVE 'R300-FETCH-CHRGCODE-CSR' TO WS-ABEND-PARAGRAPH09330000
+093400              MOVE 'UNSUCCESSFUL FETCH WITH CHRGCODE_CSR'         09340000
+093500                                          TO WS-ABEND-OPERATION   09350000
+093600              MOVE 'TACCTYP'              TO WS-ABEND-STRUCTURE-1 09360000
+093700              MOVE SPACES                 TO WS-ABEND-STRUCTURE-2 09370000
+093800              PERFORM Z999-SQL-ERROR                              09380000
+093900     END-EVALUATE.                                                09390000
+094000                                                                  09400000
+094100                                                                  09410000
+094200*----------------------------------------------------------------*09420000
+094300*  S100-SELECT-DEPT                                              *09430000
+094400*  SELECT THE DEPARTMENT NUMBER FROM THE TPURCHS TABLE FOR THE   *09440000
+094500*  PO BEING PROCESSED.                                           *09450000
+094600*----------------------------------------------------------------*09460000
+094700                                                                  09470000
+094800 S100-SELECT-DEPT.                                                09480000
+094900                                                                  09490000
+095000     PERFORM                                                      09500000
+095100         WITH TEST AFTER                                          09510000
+095200         VARYING WS-RETRY-COUNTER                                 09520000
+095300         FROM 1 BY 1                                              09530000
+095400         UNTIL ((WS-RETRY-COUNTER > WS-RETRY-MAX)                 09540000
+095500               OR (SQLCODE = +0))                                 09550000
+095600                                                                  09560000
+095700          EXEC SQL                                                09570000
+095800               SELECT DEPT_NBR                                    09580000
+095900               INTO   :PURCHS-DEPT-NBR                            09590000
+096000               FROM   TPURCHS                                     09600000
+096100               WHERE  PO_NBR = :AP016-PO-NBR                      09610000
+096200                      AND VER_STATUS_CDE = 'A'                    09620000
+096300          END-EXEC                                                09630000
+096400                                                                  09640000
+096500          EVALUATE TRUE                                           09650000
+096600              WHEN SQLCODE = +0                                   09660000
+096700              WHEN SQLCODE = -904                                 09670000
+096800              WHEN SQLCODE = -913                                 09680000
+096900                   CONTINUE                                       09690000
+097000                                                                  09700000
+097100              WHEN SQLWARN0 NOT = SPACES                          09710000
+097200              WHEN SQLCODE < +0                                   09720000
+097300              WHEN SQLCODE > +0                                   09730000
+097400                   MOVE 'S100-SELECT-DEPT'                        09740000
+097500                                     TO WS-ABEND-PARAGRAPH        09750000
+097600                   MOVE 'UNSUCCESSFUL SELECT DEPARTMENT'          09760000
+097700                                     TO WS-ABEND-OPERATION        09770000
+097800                   MOVE 'TPURCHS '   TO WS-ABEND-STRUCTURE-1      09780000
+097900                   MOVE SPACES       TO WS-ABEND-STRUCTURE-2      09790000
+098000                   PERFORM Z999-SQL-ERROR                         09800000
+098100          END-EVALUATE                                            09810000
+098200      END-PERFORM.                                                09820000
+098300                                                                  09830000
+098400      IF WS-RETRY-COUNTER > WS-RETRY-MAX                          09840000
+098500         MOVE 'S100-SELECT-DEPT'                                  09850000
+098600                               TO WS-ABEND-PARAGRAPH              09860000
+098700         MOVE 'MAX RETRIES EXCEEDED ON SELECT DEPT'               09870000
+098800                               TO WS-ABEND-OPERATION              09880000
+098900         MOVE 'TPURCHS'        TO WS-ABEND-STRUCTURE-1            09890000
+099000         MOVE SPACE            TO WS-ABEND-STRUCTURE-2            09900000
+099100         PERFORM Z999-SQL-ERROR                                   09910000
+099200      END-IF.                                                     09920000
+099300                                                                  09930000
+099400*----------------------------------------------------------------*09940000
+099500*  S200-SELECT-CLASS-NBR                                         *09950000
+099600*  SELECTS THE CLASS NUMBER FROM THE TPURITM TABLE.              *09960000
+099700*----------------------------------------------------------------*09970000
+099800                                                                  09980000
+099900 S200-SELECT-CLASS-NBR.                                           09990000
+100000                                                                  10000000
+100100     PERFORM                                                      10010000
+100200         WITH TEST AFTER                                          10020000
+100300         VARYING WS-RETRY-COUNTER                                 10030000
+100400         FROM 1 BY 1                                              10040000
+100500         UNTIL ((WS-RETRY-COUNTER > WS-RETRY-MAX)                 10050000
+100600               OR (SQLCODE = +0)                                  10060000
+100700               OR (SQLCODE = -811))                               10070000
+100800                                                                  10080000
+100900         EXEC SQL                                                 10090000
+101000              SELECT DISTINCT(CL_NBR)                             10100000
+101100              INTO   :PURITM-CL-NBR                               10110000
+101200              FROM   TPURITM                                      10120000
+101300              WHERE  PO_NBR = :AP016-PO-NBR                       10130000
+101400                     AND VER_STATUS_CDE = 'A'                     10140000
+101500         END-EXEC                                                 10150000
+101600                                                                  10160000
+101700         EVALUATE TRUE                                            10170000
+101800             WHEN SQLCODE = +0                                    10180000
+101900             WHEN SQLCODE = -811                                  10190000
+102000                  CONTINUE                                        10200000
+102100             WHEN SQLCODE = -904                                  10210000
+102200             WHEN SQLCODE = -913                                  10220000
+102300                  CONTINUE                                        10230000
+102400                                                                  10240000
+102500             WHEN SQLWARN0 NOT = SPACES                           10250000
+102600             WHEN SQLCODE < +0                                    10260000
+102700             WHEN SQLCODE > +0                                    10270000
+102800                  MOVE 'S200-SELECT-CLASS-NBR'                    10280000
+102900                                    TO WS-ABEND-PARAGRAPH         10290000
+103000                  MOVE 'UNSUCCESSFUL SELECT CLASS INFO'           10300000
+103100                                    TO WS-ABEND-OPERATION         10310000
+103200                  MOVE 'TPURITM '   TO WS-ABEND-STRUCTURE-1       10320000
+103300                  MOVE SPACES       TO WS-ABEND-STRUCTURE-2       10330000
+103400                  PERFORM Z999-SQL-ERROR                          10340000
+103500         END-EVALUATE                                             10350000
+103600     END-PERFORM.                                                 10360000
+103700                                                                  10370000
+103800     IF WS-RETRY-COUNTER > WS-RETRY-MAX                           10380000
+103900        MOVE 'S200-SELECT-DEPT'                                   10390000
+104000                              TO WS-ABEND-PARAGRAPH               10400000
+104100        MOVE 'MAX RETRIES EXCEEDED ON SELECT DEPT'                10410000
+104200                              TO WS-ABEND-OPERATION               10420000
+104300        MOVE 'TPURCHS'        TO WS-ABEND-STRUCTURE-1             10430000
+104400        MOVE SPACE            TO WS-ABEND-STRUCTURE-2             10440000
+104500        PERFORM Z999-SQL-ERROR                                    10450000
+104600     END-IF.                                                      10460000
+104700                                                                  10470000
+104800*----------------------------------------------------------------*10480000
+104900*  S300-SELECT-ENT-ID                                            *10490000
+105000*  SELECT ENTITY ID AND THE ENTITY NAME DESCRIPTION FROM A JOIN  *10500000
+105100*  OF TEXTENT AND TENTNME TABLES.                                *10510000
+105200*----------------------------------------------------------------*10520000
+105300                                                                  10530000
+105400 S300-SELECT-ENT-ID.                                              10540000
+105500                                                                  10550000
+105600     PERFORM                                                      10560000
+105700         WITH TEST AFTER                                          10570000
+105800         VARYING WS-RETRY-COUNTER                                 10580000
+105900         FROM 1 BY 1                                              10590000
+106000         UNTIL ((WS-RETRY-COUNTER > WS-RETRY-MAX)                 10600000
+106100               OR (SQLCODE = +0))                                 10610000
+106200                                                                  10620000
+106300         EXEC SQL                                                 10630000
+106400              SELECT A.ENT_ID                                     10640000
+106500                   , A.ENT_NAME_DESC                              10650000
+106600              INTO   :EXTENT-ENT-ID                               10660000
+106700                   , :ENTNME-ENT-NAME-DESC                        10670000
+106800              FROM   TENTNME A                                    10680000
+106900                   , TEXTENT B                                    10690000
+107000              WHERE  A.ENT_ID = B.ENT_ID                          10700000
+107100                     AND B.DUN_NBR = :AP016-REMIT-TO-DUN-NBR      10710000
+107200                     AND A.TYPE_CDE = '01'                        10720000
+107300         END-EXEC                                                 10730000
+107400                                                                  10740000
+107500         EVALUATE TRUE                                            10750000
+107600             WHEN SQLCODE = +0                                    10760000
+107700                  IF ENTNME-ENT-NAME-DESC = SPACE                 10770000
+107800                     MOVE 'NO VENDOR PRIMARY NAME FOUND  '        10780000
+107900                                   TO ENTNME-ENT-NAME-DESC        10790000
+108000                  END-IF                                          10800000
+108100             WHEN SQLCODE = -904                                  10810000
+108200             WHEN SQLCODE = -913                                  10820000
+108300                  CONTINUE                                        10830000
+108400                                                                  10840000
+108500             WHEN SQLWARN0 NOT = SPACES                           10850000
+108600             WHEN SQLCODE < +0                                    10860000
+108700             WHEN SQLCODE > +0                                    10870000
+108800                  MOVE 'S300-SELECT-ENT-ID'                       10880000
+108900                                    TO WS-ABEND-PARAGRAPH         10890000
+109000                  MOVE 'UNSUCCESSFUL SELECT ENT ID'               10900000
+109100                                    TO WS-ABEND-OPERATION         10910000
+109200                  MOVE 'TEXTENT '   TO WS-ABEND-STRUCTURE-1       10920000
+109300                  MOVE 'TENTNME '   TO WS-ABEND-STRUCTURE-2       10930000
+109400                  PERFORM Z999-SQL-ERROR                          10940000
+109500         END-EVALUATE                                             10950000
+109600     END-PERFORM.                                                 10960000
+109700                                                                  10970000
+109800     IF WS-RETRY-COUNTER > WS-RETRY-MAX                           10980000
+109900        MOVE 'S300-SELECT-ENT-ID'                                 10990000
+110000                              TO WS-ABEND-PARAGRAPH               11000000
+110100        MOVE 'MAX RETRIES EXCEEDED ON SELECT ENT ID'              11010000
+110200                              TO WS-ABEND-OPERATION               11020000
+110300        MOVE 'TEXTENT'        TO WS-ABEND-STRUCTURE-1             11030000
+110400        MOVE 'TENTNME'        TO WS-ABEND-STRUCTURE-2             11040000
+110500        PERFORM Z999-SQL-ERROR                                    11050000
+110600     END-IF.                                                      11060000
+110700                                                                  11070000
+110800*----------------------------------------------------------------*11080000
+110900*  S400-SELECT-DATES                                             *11090000
+111000*  SELECT BATCH PROCESS DATE, CURRENT POSTING FISCAL YEAR,       *11100000
+111100*  CURRENT POSTING FISCAL MONTH, AND CURRENT POSTING FISCAL WEEK *11110000
+111200*  FROM THE TAPCNTL TABLE.                                       *11120000
+111300*----------------------------------------------------------------*11130000
+111400                                                                  11140000
+111500 S400-SELECT-DATES.                                               11150000
+111600                                                                  11160000
+111700     PERFORM                                                      11170000
+111800         WITH TEST AFTER                                          11180000
+111900         VARYING WS-RETRY-COUNTER                                 11190000
+112000         FROM 1 BY 1                                              11200000
+112100         UNTIL ((WS-RETRY-COUNTER > WS-RETRY-MAX)                 11210000
+112200               OR (SQLCODE = +0))                                 11220000
+112300                                                                  11230000
+112400         EXEC SQL                                                 11240000
+112500              SELECT BTCH_PRC_DTE                                 11250000
+112600                   , (NEXT_BTCH_PRC_DTE)                          11260000
+112700                   , CURR_PSTG_FYR_NBR                            11270000
+112800                   , CURR_PSTG_FMN_NBR                            11280000
+112900                   , CURR_PSTG_FWK_NBR                            11290000
+113000              INTO   :APCNTL-BTCH-PRC-DTE                         11300000
+113100                   , :PV-ENTR-DTE                                 11310000
+113200                   , :APCNTL-CURR-PSTG-FYR-NBR                    11320000
+113300                   , :APCNTL-CURR-PSTG-FMN-NBR                    11330000
+113400                   , :APCNTL-CURR-PSTG-FWK-NBR                    11340000
+113500              FROM   TAPCNTL                                      11350000
+113600         END-EXEC                                                 11360000
+113700                                                                  11370000
+113800         EVALUATE TRUE                                            11380000
+113900             WHEN SQLCODE = +0                                    11390000
+114000             WHEN SQLCODE = -904                                  11400000
+114100             WHEN SQLCODE = -913                                  11410000
+114200                  CONTINUE                                        11420000
+114300                                                                  11430000
+114400             WHEN SQLWARN0 NOT = SPACES                           11440000
+114500             WHEN SQLCODE < +0                                    11450000
+114600             WHEN SQLCODE > +0                                    11460000
+114700                  MOVE 'S400-SELECT-DATES'                        11470000
+114800                                    TO WS-ABEND-PARAGRAPH         11480000
+114900                  MOVE 'UNSUCCESSFUL SELECT DATES'                11490000
+115000                                    TO WS-ABEND-OPERATION         11500000
+115100                  MOVE 'TAPCNTL '   TO WS-ABEND-STRUCTURE-1       11510000
+115200                  MOVE SPACE        TO WS-ABEND-STRUCTURE-2       11520000
+115300                  PERFORM Z999-SQL-ERROR                          11530000
+115400         END-EVALUATE                                             11540000
+115500     END-PERFORM.                                                 11550000
+115600                                                                  11560000
+115700     IF WS-RETRY-COUNTER > WS-RETRY-MAX                           11570000
+115800        MOVE 'S400-SELECT-DATES'                                  11580000
+115900                              TO WS-ABEND-PARAGRAPH               11590000
+116000        MOVE 'MAX RETRIES EXCEEDED ON SELECT DATES'               11600000
+116100                              TO WS-ABEND-OPERATION               11610000
+116200        MOVE 'TAPCNTL'        TO WS-ABEND-STRUCTURE-1             11620000
+116300        MOVE SPACE            TO WS-ABEND-STRUCTURE-2             11630000
+116400        PERFORM Z999-SQL-ERROR                                    11640000
+116500     END-IF.                                                      11650000
+116600                                                                  11660000
+116700*----------------------------------------------------------------*11670000
+116800*  S500-SET-CURENT-TMST  GETS THE CURRENT TIMESTAMP FROM DB2.    *11680000
+116900*----------------------------------------------------------------*11690000
+117000                                                                  11700000
+117100 S500-SET-CURRENT-TMST.                                           11710000
+117200                                                                  11720000
+117300     PERFORM                                                      11730000
+117400         WITH TEST AFTER                                          11740000
+117500         VARYING WS-RETRY-COUNTER                                 11750000
+117600         FROM 1 BY 1                                              11760000
+117700         UNTIL ((WS-RETRY-COUNTER > WS-RETRY-MAX)                 11770000
+117800               OR (SQLCODE = +0))                                 11780000
+117900                                                                  11790000
+118000         EXEC SQL                                                 11800000
+118100              SET :PV-CURR-TMST = CURRENT TIMESTAMP               11810000
+118200         END-EXEC                                                 11820000
+118300                                                                  11830000
+118400         EVALUATE TRUE                                            11840000
+118500             WHEN SQLCODE = +0                                    11850000
+118600             WHEN SQLCODE = -904                                  11860000
+118700             WHEN SQLCODE = -913                                  11870000
+118800                  CONTINUE                                        11880000
+118900                                                                  11890000
+119000             WHEN SQLWARN0 NOT = SPACES                           11900000
+119100             WHEN SQLCODE < +0                                    11910000
+119200             WHEN SQLCODE > +0                                    11920000
+119300                  MOVE 'S500-SET-CURRENT-TMST'                    11930000
+119400                                         TO WS-ABEND-PARAGRAPH    11940000
+119500                  MOVE 'UNSUCCESSFUL SET TMST'                    11950000
+119600                                         TO WS-ABEND-OPERATION    11960000
+119700                  MOVE SPACES            TO WS-ABEND-STRUCTURE-1  11970000
+119800                                            WS-ABEND-STRUCTURE-2  11980000
+119900                  PERFORM Z999-SQL-ERROR                          11990000
+120000         END-EVALUATE                                             12000000
+120100     END-PERFORM.                                                 12010000
+120200                                                                  12020000
+120300     IF WS-RETRY-COUNTER > WS-RETRY-MAX                           12030000
+120400        MOVE 'S500-SELECT-CODES'                                  12040000
+120500                              TO WS-ABEND-PARAGRAPH               12050000
+120600        MOVE 'MAX RETRIES EXCEEDED ON SELECT CODES'               12060000
+120700                              TO WS-ABEND-OPERATION               12070000
+120800        MOVE SPACE            TO WS-ABEND-STRUCTURE-1             12080000
+120900        MOVE SPACE            TO WS-ABEND-STRUCTURE-2             12090000
+121000        PERFORM Z999-SQL-ERROR                                    12100000
+121100     END-IF.                                                      12110000
+121200                                                                  12120000
+121300                                                                  12130000
+121400                                                                  12140000
+121500*----------------------------------------------------------------*12150000
+121600*  W100-WRITE-INVOICE-LOAD-RECD                                  *12160000
+121700*  WRITES TO THE INVOICE LOAD OUTPUT FILE.                       *12170000
+121800*----------------------------------------------------------------*12180000
+121900                                                                  12190000
+122000 W100-WRITE-INVOICE-LOAD-RECD.                                    12200000
+122100                                                                  12210000
+122200     WRITE INVOICE-LOAD-RECORD FROM AP016-INVOICE-LOAD-RECORD.    12220000
+122300                                                                  12230000
+122400     ADD 1 TO OUT-INVOICE-COUNT.                                  12240000
+122500                                                                  12250000
+122600*----------------------------------------------------------------*12260000
+122700*  W200-WRITE-OUTPUT-JRNL-REC                                    *12270000
+122800*  WRITES TO THE JOURNALIZED OUTPUT FILE.                        *12280000
+122900*----------------------------------------------------------------*12290000
+123000                                                                  12300000
+123100 W200-WRITE-OUTPUT-JRNL-REC.                                      12310000
+123200                                                                  12320000
+123300     WRITE ADJUST-JRNL-RECORD FROM AP045-TRANSACTION-FILE.        12330000
+123400                                                                  12340000
+123500     ADD 1 TO OUT-ADJUSTMENT-COUNT.                               12350000
+123600                                                                  12360000
+123700*----------------------------------------------------------------*12370000
+123800*  Y100-OPEN-INVOIC-CURSOR                                       *12380000
+123900*----------------------------------------------------------------*12390000
+124000                                                                  12400000
+124100 Y100-OPEN-INVOIC-CSR.                                            12410000
+124200                                                                  12420000
+124300     PERFORM                                                      12430000
+124400         WITH TEST AFTER                                          12440000
+124500         VARYING WS-RETRY-COUNTER                                 12450000
+124600         FROM 1 BY 1                                              12460000
+124700         UNTIL ((WS-RETRY-COUNTER > WS-RETRY-MAX)                 12470000
+124800               OR (SQLCODE = +0))                                 12480000
+124900                                                                  12490000
+125000         EXEC SQL                                                 12500000
+125100            OPEN INVOIC_CSR                                       12510000
+125200         END-EXEC                                                 12520000
+125300                                                                  12530000
+125400         EVALUATE TRUE                                            12540000
+125500             WHEN SQLCODE = +0                                    12550000
+125600             WHEN SQLCODE = -904                                  12560000
+125700             WHEN SQLCODE = -913                                  12570000
+125800                  CONTINUE                                        12580000
+125900                                                                  12590000
+126000             WHEN SQLWARN0 NOT = SPACES                           12600000
+126100             WHEN SQLCODE NOT = +0                                12610000
+126200                  MOVE 'Y100-OPEN-INVOIC-CSR        '             12620000
+126300                                  TO WS-ABEND-PARAGRAPH           12630000
+126400                  MOVE 'UNSUCCESSFUL OPEN INVOIC'                 12640000
+126500                                  TO WS-ABEND-OPERATION           12650000
+126600                  MOVE 'TINVOIC ' TO WS-ABEND-STRUCTURE-1         12660000
+126700                  PERFORM Z999-SQL-ERROR                          12670000
+126800         END-EVALUATE                                             12680000
+126900     END-PERFORM.                                                 12690000
+127000                                                                  12700000
+127100     IF WS-RETRY-COUNTER > WS-RETRY-MAX                           12710000
+127200        MOVE 'Y100-OPEN-INVOIC-CURSOR        '                    12720000
+127300                              TO WS-ABEND-PARAGRAPH               12730000
+127400        MOVE 'MAX RETRIES EXCEEDED ON OPEN CSR  '                 12740000
+127500                              TO WS-ABEND-OPERATION               12750000
+127600        PERFORM Z999-SQL-ERROR                                    12760000
+127700     END-IF.                                                      12770000
+127800                                                                  12780000
+127900*----------------------------------------------------------------*12790000
+128000*  Y200-CLOSE-INVOIC-CSR                                         *12800000
+128100*----------------------------------------------------------------*12810000
+128200                                                                  12820000
+128300 Y200-CLOSE-INVOIC-CSR.                                           12830000
+128400                                                                  12840000
+128500     PERFORM                                                      12850000
+128600         WITH TEST AFTER                                          12860000
+128700         VARYING WS-RETRY-COUNTER                                 12870000
+128800         FROM 1 BY 1                                              12880000
+128900         UNTIL ((WS-RETRY-COUNTER > WS-RETRY-MAX)                 12890000
+129000               OR (SQLCODE = +0))                                 12900000
+129100                                                                  12910000
+129200         EXEC SQL                                                 12920000
+129300            CLOSE INVOIC_CSR                                      12930000
+129400         END-EXEC                                                 12940000
+129500                                                                  12950000
+129600         EVALUATE TRUE                                            12960000
+129700             WHEN SQLCODE = +0                                    12970000
+129800             WHEN SQLCODE = -904                                  12980000
+129900             WHEN SQLCODE = -913                                  12990000
+130000                  CONTINUE                                        13000000
+130100                                                                  13010000
+130200             WHEN SQLWARN0 NOT = SPACES                           13020000
+130300             WHEN SQLCODE  NOT = +0                               13030000
+130400                  MOVE 'Y200-CLOSE-INVOIC-CSR '                   13040000
+130500                                   TO WS-ABEND-PARAGRAPH          13050000
+130600                  MOVE 'UNSUCCESSFUL CLOSE TINVOIC'               13060000
+130700                                   TO WS-ABEND-OPERATION          13070000
+130800                  MOVE 'TINVOIC '  TO WS-ABEND-STRUCTURE-1        13080000
+130900                  PERFORM Z999-SQL-ERROR                          13090000
+131000         END-EVALUATE                                             13100000
+131100     END-PERFORM.                                                 13110000
+131200                                                                  13120000
+131300     IF WS-RETRY-COUNTER > WS-RETRY-MAX                           13130000
+131400        MOVE 'Y200-CLOSE-INVOIC-CURSOR        '                   13140000
+131500                              TO WS-ABEND-PARAGRAPH               13150000
+131600        MOVE 'MAX RETRIES EXCEEDED ON CLOSE CSR  '                13160000
+131700                              TO WS-ABEND-OPERATION               13170000
+131800        PERFORM Z999-SQL-ERROR                                    13180000
+131900     END-IF.                                                      13190000
+132000                                                                  13200000
+132100*----------------------------------------------------------------*13210000
+132200*  Y300-OPEN-TRANCODE-CURSOR                                     *13220000
+132300*----------------------------------------------------------------*13230000
+132400                                                                  13240000
+132500 Y300-OPEN-TRANCODE-CSR.                                          13250000
+132600                                                                  13260000
+132700     PERFORM                                                      13270000
+132800         WITH TEST AFTER                                          13280000
+132900         VARYING WS-RETRY-COUNTER                                 13290000
+133000         FROM 1 BY 1                                              13300000
+133100         UNTIL ((WS-RETRY-COUNTER > WS-RETRY-MAX)                 13310000
+133200               OR (SQLCODE = +0))                                 13320000
+133300                                                                  13330000
+133400         EXEC SQL                                                 13340000
+133500            OPEN TRANCODE_CSR                                     13350000
+133600         END-EXEC                                                 13360000
+133700                                                                  13370000
+133800         EVALUATE TRUE                                            13380000
+133900             WHEN SQLCODE = +0                                    13390000
+134000             WHEN SQLCODE = -904                                  13400000
+134100             WHEN SQLCODE = -913                                  13410000
+134200                  CONTINUE                                        13420000
+134300                                                                  13430000
+134400             WHEN SQLWARN0 NOT = SPACES                           13440000
+134500             WHEN SQLCODE NOT = +0                                13450000
+134600                  MOVE 'Y300-OPEN-TRANCODE-CSR        '           13460000
+134700                                  TO WS-ABEND-PARAGRAPH           13470000
+134800                  MOVE 'UNSUCCESSFUL OPEN TRANS'                  13480000
+134900                                  TO WS-ABEND-OPERATION           13490000
+135000                  MOVE 'TTRNCDE ' TO WS-ABEND-STRUCTURE-1         13500000
+135100                  MOVE SPACES     TO WS-ABEND-STRUCTURE-2         13510000
+135200                  PERFORM Z999-SQL-ERROR                          13520000
+135300         END-EVALUATE                                             13530000
+135400     END-PERFORM.                                                 13540000
+135500                                                                  13550000
+135600     IF WS-RETRY-COUNTER > WS-RETRY-MAX                           13560000
+135700        MOVE 'Y300-OPEN-TRANCODE-CURSOR        '                  13570000
+135800                              TO WS-ABEND-PARAGRAPH               13580000
+135900        MOVE 'MAX RETRIES EXCEEDED ON OPEN CSR  '                 13590000
+136000                              TO WS-ABEND-OPERATION               13600000
+136100        PERFORM Z999-SQL-ERROR                                    13610000
+136200     END-IF.                                                      13620000
+136300                                                                  13630000
+136400*----------------------------------------------------------------*13640000
+136500*  Y400-CLOSE-TRANCODE-CSR                                       *13650000
+136600*----------------------------------------------------------------*13660000
+136700                                                                  13670000
+136800 Y400-CLOSE-TRANCODE-CSR.                                         13680000
+136900                                                                  13690000
+137000     PERFORM                                                      13700000
+137100         WITH TEST AFTER                                          13710000
+137200         VARYING WS-RETRY-COUNTER                                 13720000
+137300         FROM 1 BY 1                                              13730000
+137400         UNTIL ((WS-RETRY-COUNTER > WS-RETRY-MAX)                 13740000
+137500               OR (SQLCODE = +0))                                 13750000
+137600                                                                  13760000
+137700         EXEC SQL                                                 13770000
+137800            CLOSE TRANCODE_CSR                                    13780000
+137900         END-EXEC                                                 13790000
+138000                                                                  13800000
+138100         EVALUATE TRUE                                            13810000
+138200             WHEN SQLCODE = +0                                    13820000
+138300             WHEN SQLCODE = -904                                  13830000
+138400             WHEN SQLCODE = -913                                  13840000
+138500                  CONTINUE                                        13850000
+138600                                                                  13860000
+138700             WHEN SQLWARN0 NOT = SPACES                           13870000
+138800             WHEN SQLCODE  NOT = +0                               13880000
+138900                  MOVE 'Y400-CLOSE-TRANCODE-CSR '                 13890000
+139000                                   TO WS-ABEND-PARAGRAPH          13900000
+139100                  MOVE 'UNSUCCESSFUL CLOSE TRANS  '               13910000
+139200                                   TO WS-ABEND-OPERATION          13920000
+139300                  MOVE 'TTRNCDE '  TO WS-ABEND-STRUCTURE-1        13930000
+139400                  MOVE SPACES      TO WS-ABEND-STRUCTURE-2        13940000
+139500                  PERFORM Z999-SQL-ERROR                          13950000
+139600         END-EVALUATE                                             13960000
+139700     END-PERFORM.                                                 13970000
+139800                                                                  13980000
+139900     IF WS-RETRY-COUNTER > WS-RETRY-MAX                           13990000
+140000        MOVE 'Y400-CLOSE-TRANCODE-CURSOR        '                 14000000
+140100                              TO WS-ABEND-PARAGRAPH               14010000
+140200        MOVE 'MAX RETRIES EXCEEDED ON CLOSE CSR  '                14020000
+140300                              TO WS-ABEND-OPERATION               14030000
+140400        PERFORM Z999-SQL-ERROR                                    14040000
+140500     END-IF.                                                      14050000
+140600                                                                  14060000
+140700*----------------------------------------------------------------*14070000
+140800*  Y500-OPEN-CHRGCODE-CURSOR                                     *14080000
+140900*----------------------------------------------------------------*14090000
+141000                                                                  14100000
+141100 Y500-OPEN-CHRGCODE-CSR.                                          14110000
+141200                                                                  14120000
+141300     PERFORM                                                      14130000
+141400         WITH TEST AFTER                                          14140000
+141500         VARYING WS-RETRY-COUNTER                                 14150000
+141600         FROM 1 BY 1                                              14160000
+141700         UNTIL ((WS-RETRY-COUNTER > WS-RETRY-MAX)                 14170000
+141800               OR (SQLCODE = +0))                                 14180000
+141900                                                                  14190000
+142000         EXEC SQL                                                 14200000
+142100            OPEN CHRGCODE_CSR                                     14210000
+142200         END-EXEC                                                 14220000
+142300                                                                  14230000
+142400         EVALUATE TRUE                                            14240000
+142500             WHEN SQLCODE = +0                                    14250000
+142600             WHEN SQLCODE = -904                                  14260000
+142700             WHEN SQLCODE = -913                                  14270000
+142800                  CONTINUE                                        14280000
+142900                                                                  14290000
+143000             WHEN SQLWARN0 NOT = SPACES                           14300000
+143100             WHEN SQLCODE NOT = +0                                14310000
+143200                  MOVE 'Y500-OPEN-CHRGCODE-CSR        '           14320000
+143300                                  TO WS-ABEND-PARAGRAPH           14330000
+143400                  MOVE 'UNSUCCESSFUL OPEN CHRGS'                  14340000
+143500                                  TO WS-ABEND-OPERATION           14350000
+143600                  MOVE 'TACCTYP ' TO WS-ABEND-STRUCTURE-1         14360000
+143700                  MOVE SPACES     TO WS-ABEND-STRUCTURE-2         14370000
+143800                  PERFORM Z999-SQL-ERROR                          14380000
+143900         END-EVALUATE                                             14390000
+144000     END-PERFORM.                                                 14400000
+144100                                                                  14410000
+144200     IF WS-RETRY-COUNTER > WS-RETRY-MAX                           14420000
+144300        MOVE 'Y500-OPEN-CHRGCODE-CURSOR        '                  14430000
+144400                              TO WS-ABEND-PARAGRAPH               14440000
+144500        MOVE 'MAX RETRIES EXCEEDED ON OPEN CSR  '                 14450000
+144600                              TO WS-ABEND-OPERATION               14460000
+144700        PERFORM Z999-SQL-ERROR                                    14470000
+144800     END-IF.                                                      14480000
+144900                                                                  14490000
+145000*----------------------------------------------------------------*14500000
+145100*  Y600-CLOSE-CHRGCODE-CSR                                       *14510000
+145200*----------------------------------------------------------------*14520000
+145300                                                                  14530000
+145400 Y600-CLOSE-CHRGCODE-CSR.                                         14540000
+145500                                                                  14550000
+145600     PERFORM                                                      14560000
+145700         WITH TEST AFTER                                          14570000
+145800         VARYING WS-RETRY-COUNTER                                 14580000
+145900         FROM 1 BY 1                                              14590000
+146000         UNTIL ((WS-RETRY-COUNTER > WS-RETRY-MAX)                 14600000
+146100               OR (SQLCODE = +0))                                 14610000
+146200                                                                  14620000
+146300         EXEC SQL                                                 14630000
+146400            CLOSE CHRGCODE_CSR                                    14640000
+146500         END-EXEC                                                 14650000
+146600                                                                  14660000
+146700         EVALUATE TRUE                                            14670000
+146800             WHEN SQLCODE = +0                                    14680000
+146900             WHEN SQLCODE = -904                                  14690000
+147000             WHEN SQLCODE = -913                                  14700000
+147100                  CONTINUE                                        14710000
+147200                                                                  14720000
+147300             WHEN SQLWARN0 NOT = SPACES                           14730000
+147400             WHEN SQLCODE  NOT = +0                               14740000
+147500                  MOVE 'Y400-CLOSE-CHRGCODE-CSR '                 14750000
+147600                                   TO WS-ABEND-PARAGRAPH          14760000
+147700                  MOVE 'UNSUCCESSFUL CLOSE CHRGS  '               14770000
+147800                                   TO WS-ABEND-OPERATION          14780000
+147900                  MOVE 'TACCTYP '  TO WS-ABEND-STRUCTURE-1        14790000
+148000                  MOVE SPACES      TO WS-ABEND-STRUCTURE-2        14800000
+148100                  PERFORM Z999-SQL-ERROR                          14810000
+148200         END-EVALUATE                                             14820000
+148300     END-PERFORM.                                                 14830000
+148400                                                                  14840000
+148500     IF WS-RETRY-COUNTER > WS-RETRY-MAX                           14850000
+148600        MOVE 'Y600-CLOSE-CHRGCODE-CURSOR        '                 14860000
+148700                              TO WS-ABEND-PARAGRAPH               14870000
+148800        MOVE 'MAX RETRIES EXCEEDED ON CLOSE CSR  '                14880000
+148900                              TO WS-ABEND-OPERATION               14890000
+149000        PERFORM Z999-SQL-ERROR                                    14900000
+149100     END-IF.                                                      14910000
+149200                                                                  14920000
+149300*----------------------------------------------------------------*14930000
+149400* Z998-ABEND                                                     *14940000
+149500*  ABEND ROUTINE.                                                *14950000
+149600*----------------------------------------------------------------*14960000
+149700 Z998-ABEND.                                                      14970000
+149800                                                                  14980000
+149900     DISPLAY WS-ABEND-LITERAL.                                    14990000
+150000     DISPLAY WS-ABEND-PROGRAM-MSG.                                15000000
+150100     DISPLAY WS-ABEND-PARAGRAPH-MSG.                              15010000
+150200     DISPLAY WS-MESSAGE-LINE-1.                                   15020000
+150300     DISPLAY WS-MESSAGE-LINE-2.                                   15030000
+150400                                                                  15040000
+150500     CALL 'ILBOABN0' USING ABEND-CODE.                            15050000
+150600                                                                  15060000
+150700*----------------------------------------------------------------*15070000
+150800*  PROCESS DB2 ABENDS.                                           *15080000
+150900*----------------------------------------------------------------*15090000
+151000                                                                  15100000
+151100 Z999-SQL-ERROR.                                                  15110000
+151200                                                                  15120000
+151300     MOVE AP016-PO-NBR TO DISPLAY-PO-NBR.                         15130000
+151400     DISPLAY 'PO NUMBER  : ' DISPLAY-PO-NBR.                      15140000
+151500     DISPLAY '*** DB2 ERROR '.                                    15150000
+151600     DISPLAY WS-ABEND-PROGRAM-MSG.                                15160000
+151700     DISPLAY WS-ABEND-PARAGRAPH-MSG.                              15170000
+151800     DISPLAY WS-ABEND-OPERATION-MSG.                              15180000
+151900     DISPLAY WS-ABEND-TABLE1-MSG.                                 15190000
+152000     IF WS-ABEND-STRUCTURE-2 > SPACES                             15200000
+152100         DISPLAY WS-ABEND-TABLE2-MSG.                             15210000
+152200                                                                  15220000
+152300     SET AP-DB2-ERROR              TO TRUE.                       15230000
+152400                                                                  15240000
+152500     COPY DPPD004.                                                15250000
+152600     CALL 'ILBOABN0' USING ABEND-CODE.                            15260000

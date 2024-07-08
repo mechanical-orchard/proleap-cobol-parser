@@ -1,0 +1,556 @@
+       IDENTIFICATION DIVISION.                                                 
+                                                                                
+       PROGRAM-ID.         IMKUT003.                                            
+       AUTHOR.             D.THEEL.                                     00040024
+       INSTALLATION.       KOHLS DEPARTMENT STORES.                             
+       DATE-WRITTEN.       03-01-02.                                            
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *      IMKUT003 - INACTIVE TMDARVS PURGE CANDIDATES SELECTION    *        
+      *                                                                *        
+      *  THIS PROGRAM DETERMINES WHICH INACTIVE TMDARVS ROWS CAN BE    *        
+      *  PURGED BY FINDING ALL TMDARVS INACTIVE ROWS THAT DO NOT HAVE  *        
+      *  ANY (ACTIVE OR INACTIVE) TUPC ROWS FOR THE SAME VS ID / SUB   *        
+      *  CLS MDSEAR ID COMBINATION. THESE WILL BE FROM MOVING A STYLE. *        
+      *  ALL COLUMNS WILL BE WRITTEN TO AN OUTPUT FILE, SORTED IN      *        
+      *  CLUSTERING INDEX SEQUENCE  AND THEN PURGED BY ANOTHER PROGRAM.*        
+      *  SELECT FROM TVNDSTL FOR THE SAME VS ID ANY ROWS THAT ARE      *        
+      *  INACTIVE.  WRITE THESE TO AN OUTPUT FILE TO BE SORTED IN      *        
+      *  CLUSTERING INDEX SEQUENCE, AND THEN PURGED BY ANOTHER PROGRAM.*        
+      ******************************************************************        
+      *  03/25/02 D. THEEL            WR# 23443                        *        
+      *  ADDED LOGIC AS FOLLOWS:                                       *        
+      *  AFTER FETCHING TMDARVS ROW WHICH IS INACTIVE AND DOES NOT     *        
+      *  EXIST ON TUPC FOR THE SPECIFIC VS ID / SUB CLS MDSEAR ID      *        
+      *  COMBINATION - PERFORM EXISTENCE CHECK OF TUPC FOR THE VS      *        
+      *  ID - IF NOT FOUND - THEN SELECT FROM TVNDSTL.                 *        
+      ******************************************************************        
+      *  05/08/02 D. THEEL            WR# 23220                        *        
+      *  ADDED NEW TMDARVS COLUMN RTL_CLSN_SEQ_NBR.                    *        
+      ******************************************************************        
+      *  05/28/02 D. THEEL            WR# 23749                        *        
+      *  ADDED NEW TMDARVS COLS DEPT_NBR, MAJ_CL_NBR, AND SUB_CL_NBR.  *        
+      ******************************************************************        
+      *  08/07/02 D. THEEL            WR# 23861                        *        
+      *  ADDED NEW TMDARVS COLUMN ESL SEQ NBR.                         *        
+      ******************************************************************        
+      *  01/21/04 D. THEEL            WR# 25951                        *        
+      *  ADDED NEW TMDARVS COLUMNS AND INCREASED TMDARVS OUTPUT FILE   *        
+      *  LRECL.                                                        *        
+      ******************************************************************        
+      *  04/23/04 P. KEBER            WR# 26741                        *        
+      *  ADDED NEW TMDARVS COLUMN AND INCREASED TMDARVS OUTPUT FILE    *        
+      *  LRECL FOR NEW MAP_UNT_RTL_AMT COLUMN.                         *        
+      ******************************************************************        
+       ENVIRONMENT DIVISION.                                                    
+                                                                                
+       CONFIGURATION SECTION.                                                   
+                                                                                
+       SOURCE-COMPUTER.    IBM-3090.                                            
+       OBJECT-COMPUTER.    IBM-3090.                                            
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT OUT-TMDARVS-FILE        ASSIGN TO OUT01.                      
+           SELECT OUT-TVNDSTL-FILE        ASSIGN TO OUT02.                      
+                                                                                
+       DATA DIVISION.                                                           
+                                                                                
+       FILE SECTION.                                                            
+                                                                                
+       FD  OUT-TMDARVS-FILE                                                     
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  OUT-TMDARVS-REC                  PIC  X(93).                         
+                                                                                
+       FD  OUT-TVNDSTL-FILE                                                     
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  OUT-TVNDSTL-REC                  PIC  X(95).                         
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  ABEND-CODE                       PIC S9(04) COMP SYNC                
+                                                       VALUE +0.                
+                                                                                
+       01  PROGRAM-ACCUMULATORS.                                                
+           05  PA-TMDARVS-COUNT             PIC S9(09) COMP-3 VALUE +0.         
+           05  PA-TVNDSTL-COUNT             PIC S9(09) COMP-3 VALUE +0.         
+                                                                                
+       01  PROGRAM-CONSTANTS.                                                   
+           05  PC-MAX-RETRIES               PIC S9(04) COMP SYNC                
+                                                       VALUE +3.                
+           05  PC-PROGRAM-NAME              PIC  X(08) VALUE 'IMKUT003'.        
+                                                                                
+       01  PROGRAM-SWITCHES.                                                    
+           05  PS-END-OF-TMDARVS-CSR-SW     PIC X      VALUE 'N'.               
+               88  PS-END-OF-TMDARVS-CSR               VALUE 'Y'.               
+               88  PS-PROCESS-TMDARVS-CSR              VALUE 'N'.               
+           05  PS-TVNDSTL-FOUND-SW          PIC X      VALUE 'N'.               
+               88  PS-TVNDSTL-FOUND                    VALUE 'Y'.               
+               88  PS-TVNDSTL-NOT-FOUND                VALUE 'N'.               
+           05  PS-TUPC-FOUND-SW             PIC X      VALUE 'N'.               
+               88  PS-TUPC-FOUND                       VALUE 'Y'.               
+               88  PS-TUPC-NOT-FOUND                   VALUE 'N'.               
+                                                                                
+       01  PROGRAM-VARIABLES.                                                   
+           05  PV-DB2-OPER-ATTEMPTED        PIC  X(30) VALUE SPACE.             
+           05  PV-PARAGRAPH-NAME            PIC  X(30) VALUE SPACE.             
+           05  PV-SQL-SUB                   PIC  9(03) VALUE ZERO.              
+           05  PV-ONE                       PIC  S9(7) VALUE ZERO               
+                                                        COMP-3.                 
+      *****************************************************************         
+      * DB2 FORMATTED ERROR MESSAGE                                             
+      *****************************************************************         
+                                                                                
+           COPY DPWS004.                                                        
+                                                                                
+      *****************************************************************         
+      * DCLGEN FOR THE UPC TABLE                                                
+      *****************************************************************         
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TUPC                                                     
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      * DCLGEN FOR THE MERCHANDISE AREA VENDOR STYLE TABLE                      
+      *****************************************************************         
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TMDARVS                                                  
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      * DCLGEN FOR THE VENDOR STYLE TABLE                                       
+      *****************************************************************         
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TVNDSTL                                                  
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      * DCLGEN FOR THE SYSDUMMY1 TABLE                                          
+      *****************************************************************         
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE SYSDUMMY                                                 
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      * TMDARVS TABLE CURSOR                                                    
+      *****************************************************************         
+                                                                                
+           EXEC SQL                                                             
+               DECLARE TMDARVS_CSR CURSOR FOR                                   
+               SELECT A.SUB_CL_MDSEAR_ID                                        
+                     ,A.VS_ID                                                   
+                     ,A.ACTV_IND                                                
+                     ,A.VS_DESC                                                 
+                     ,A.STKR_NBR                                                
+                     ,A.TKT_TYP_SEQ_NBR                                         
+                     ,A.LBL_SEQ_NBR                                             
+                     ,A.HNG_FOLD_SEQ_NBR                                        
+                     ,A.KY_CLSN_SEQ_NBR                                         
+                     ,A.FBRCN_SEQ_NBR                                           
+                     ,A.FNSH_SEQ_NBR                                            
+                     ,A.RMS_STYL_ID                                             
+                     ,A.STYL_RECLS_IND                                          
+                     ,A.RTL_CLSN_SEQ_NBR                                        
+                     ,A.DEPT_NBR                                                
+                     ,A.MAJ_CL_NBR                                              
+                     ,A.SUB_CL_NBR                                              
+                     ,A.ESL_SEQ_NBR                                             
+                     ,A.RPT_HIER_SEQ_NBR                                        
+                     ,A.BDY_STYL_SEQ_NBR                                        
+                     ,A.CONST_SEQ_NBR                                           
+                     ,A.FUNC_SEQ_NBR                                            
+                     ,A.GNDR_SEQ_NBR                                            
+                     ,A.PATRN_SEQ_NBR                                           
+                     ,A.SLHTT_SEQ_NBR                                           
+                     ,A.CLLCTN_SEQ_NBR                                          
+                     ,A.MAP_UNT_RTL_AMT                                         
+               FROM TMDARVS A                                                   
+               WHERE A.ACTV_IND = 'N'                                           
+                 AND NOT EXISTS                                                 
+                 (SELECT 1                                                      
+                  FROM TUPC B                                                   
+                  WHERE A.VS_ID = B.VS_ID                                       
+                    AND A.SUB_CL_MDSEAR_ID = B.SUB_CL_MDSEAR_ID)                
+               FOR FETCH ONLY                                                   
+           END-EXEC.                                                            
+                                                                                
+                                                                                
+                                                                                
+      ******************************************************************        
+      * SQL COMMUNICATIONS WORK AREA                                            
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+                                                                                
+       PROCEDURE DIVISION.                                                      
+                                                                                
+       0000-MAINLINE-PROCESSING.                                                
+                                                                                
+           PERFORM 1000-INITIALIZATION.                                         
+                                                                                
+           PERFORM 2000-PROCESS-TMDARVS-CURSOR                                  
+               UNTIL PS-END-OF-TMDARVS-CSR.                                     
+                                                                                
+           PERFORM 9000-EOJ-ROUTINE.                                            
+                                                                                
+           STOP RUN.                                                            
+                                                                                
+                                                                                
+      ******************************************************************        
+      *    - OPEN THE TMDARVS CURSOR                                   *        
+      ******************************************************************        
+       1000-INITIALIZATION.                                                     
+                                                                                
+           INITIALIZE DCLTMDARVS                                                
+                      DCLTVNDSTL.                                               
+                                                                                
+           OPEN OUTPUT OUT-TMDARVS-FILE                                         
+                       OUT-TVNDSTL-FILE.                                        
+                                                                                
+           PERFORM 7000-OPEN-TMDARVS-CURSOR.                                    
+           PERFORM 7010-FETCH-TMDARVS-CURSOR.                                   
+                                                                                
+      ******************************************************************        
+      *  FOR EACH TMDARVS CURSOR ROW, CREATE A TMDARVS OUTPUT PURGE    *        
+      *  FILE RECORD.  DECIDE WHETHER TO SELECT VS ID FROM TVNDSTL     *        
+      *  BASED ON THE FOLLOWING:                                       *        
+      *  SELECT FROM TUPC FOR THE VS ID AND IF ANY ROW EXISTS ON TUPC  *        
+      *  FETCH NEXT TMDARVS ROW.  IF NO ROWS EXISTS ON TUPC FOR THE    *        
+      *  TMDARVS VS ID, SELECT THE VS ID FROM TVNDSTL, IF FOUND, WRITE *        
+      *  OUT TVNDSTL PURGE REC.                                        *        
+      ******************************************************************        
+       2000-PROCESS-TMDARVS-CURSOR.                                             
+           PERFORM 8000-WRITE-TMDARVS-RECORD.                                   
+           MOVE MDARVS-VS-ID TO UPC-VS-ID.                                      
+           PERFORM 4000-TUPC-EXISTENCE-CK.                                      
+           IF PS-TUPC-NOT-FOUND                                                 
+               PERFORM 3000-SELECT-FROM-TVNDSTL                                 
+               IF PS-TVNDSTL-FOUND                                              
+                   PERFORM 8100-WRITE-TVNDSTL-RECORD                            
+               END-IF                                                           
+           END-IF.                                                              
+           PERFORM 7010-FETCH-TMDARVS-CURSOR.                                   
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  FOR EACH TMDARVS CURSOR ROW, SELECT FROM TVNDSTL FOR SAME     *        
+      *  INACTIVE VS ID.                                               *        
+      ******************************************************************        
+       3000-SELECT-FROM-TVNDSTL.                                                
+           SET PS-TVNDSTL-NOT-FOUND TO TRUE.                                    
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-SQL-SUB FROM 1 BY 1                                   
+               UNTIL  (PV-SQL-SUB > PC-MAX-RETRIES                              
+                  OR   SQLCODE = 0                                              
+                  OR   SQLCODE = +100)                                          
+                                                                                
+               EXEC SQL                                                         
+                   SELECT VS_ID                                                 
+                         ,ENT_ID                                                
+                         ,VS_NBR                                                
+                         ,EFF_BEG_DTE                                           
+                         ,EFF_END_DTE                                           
+                         ,COST_UM_CDE                                           
+                         ,RTL_UM_CDE                                            
+                         ,BYP_CAT_IND                                           
+                         ,CRE_BY_USR_ID                                         
+                         ,LAST_UPD_BY_USR_ID                                    
+                         ,LAST_UPD_TMST                                         
+                   INTO  :VNDSTL-VS-ID                                          
+                         ,:VNDSTL-ENT-ID                                        
+                         ,:VNDSTL-VS-NBR                                        
+                         ,:VNDSTL-EFF-BEG-DTE                                   
+                         ,:VNDSTL-EFF-END-DTE                                   
+                         ,:VNDSTL-COST-UM-CDE                                   
+                         ,:VNDSTL-RTL-UM-CDE                                    
+                         ,:VNDSTL-BYP-CAT-IND                                   
+                         ,:VNDSTL-CRE-BY-USR-ID                                 
+                         ,:VNDSTL-LAST-UPD-BY-USR-ID                            
+                         ,:VNDSTL-LAST-UPD-TMST                                 
+                  FROM TVNDSTL                                                  
+                  WHERE VS_ID = :MDARVS-VS-ID                                   
+                    AND EFF_END_DTE IS NOT NULL                                 
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = +100                                          
+                       MOVE 'N' TO PS-TVNDSTL-FOUND-SW                          
+                   WHEN SQLCODE = 0                                             
+                       MOVE 'Y' TO PS-TVNDSTL-FOUND-SW                          
+                   WHEN SQLCODE = -904                                          
+                       CONTINUE                                                 
+                   WHEN SQLWARN NOT = SPACES                                    
+                   WHEN SQLCODE NOT = ZERO                                      
+                       MOVE '3000-SELECT-FROM-TVNDSTL'                          
+                           TO PV-PARAGRAPH-NAME                                 
+                       MOVE 'SELECT TVNDSTL'                                    
+                           TO PV-DB2-OPER-ATTEMPTED                             
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-SQL-SUB > PC-MAX-RETRIES                                      
+               MOVE '3000-SELECT-FROM-TVNDSTL' TO PV-PARAGRAPH-NAME             
+               MOVE 'MAX RETRIES EXCEEDED' TO PV-DB2-OPER-ATTEMPTED             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  FOR EACH VS ID FROM TMDARVS VS ID / SUB CL MDSEAR ID CURSOR   *        
+      *  CHECK FOR EXISTENCE ON TUPC.                                  *        
+      ******************************************************************        
+       4000-TUPC-EXISTENCE-CK.                                                  
+                                                                                
+           SET PS-TUPC-NOT-FOUND TO TRUE.                                       
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-SQL-SUB FROM 1 BY 1                                   
+               UNTIL  (PV-SQL-SUB > PC-MAX-RETRIES                              
+                  OR   SQLCODE = 0                                              
+                  OR   SQLCODE = +100)                                          
+                                                                                
+               EXEC SQL                                                         
+                   SELECT 1                                                     
+                   INTO  :PV-ONE                                                
+                   FROM SYSIBM.SYSDUMMY1 X                                      
+                   WHERE EXISTS (SELECT 1                                       
+                                 FROM TUPC                                      
+                                 WHERE VS_ID = :UPC-VS-ID                       
+                                   AND X.IBMREQD > '')                          
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = +100                                          
+                       MOVE 'N' TO PS-TUPC-FOUND-SW                             
+                   WHEN SQLCODE = 0                                             
+                       MOVE 'Y' TO PS-TUPC-FOUND-SW                             
+                   WHEN SQLCODE = -904                                          
+                       CONTINUE                                                 
+                   WHEN SQLWARN NOT = SPACES                                    
+                   WHEN SQLCODE NOT = ZERO                                      
+                       MOVE '4000-TUPC-EXISTENCE-CK'                            
+                           TO PV-PARAGRAPH-NAME                                 
+                       MOVE 'SELECT TUPC'                                       
+                           TO PV-DB2-OPER-ATTEMPTED                             
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-SQL-SUB > PC-MAX-RETRIES                                      
+               MOVE '4000-TUPC-EXISTENCE-CK'   TO PV-PARAGRAPH-NAME             
+               MOVE 'MAX RETRIES EXCEEDED' TO PV-DB2-OPER-ATTEMPTED             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      ******************************************************************        
+      *  OPEN THE TMDARVS CURSOR                                       *        
+      ******************************************************************        
+       7000-OPEN-TMDARVS-CURSOR.                                                
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-SQL-SUB FROM 1 BY 1                                   
+               UNTIL  (PV-SQL-SUB > PC-MAX-RETRIES                              
+                  OR   SQLCODE = 0)                                             
+                                                                                
+               EXEC SQL                                                         
+                   OPEN TMDARVS_CSR                                             
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+                   WHEN SQLWARN0 NOT = SPACES                                   
+                   WHEN SQLCODE < 0                                             
+                   WHEN SQLCODE > 0                                             
+                       MOVE '7000-OPEN-TMDARVS-CURSOR'                          
+                           TO PV-PARAGRAPH-NAME                                 
+                       MOVE 'OPEN TMDARVS CURSOR'                               
+                           TO PV-DB2-OPER-ATTEMPTED                             
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-SQL-SUB > PC-MAX-RETRIES                                      
+               MOVE '7000-OPEN-TMDARVS-CURSOR' TO PV-PARAGRAPH-NAME             
+               MOVE 'OPEN TMDARVS CURSOR' TO PV-DB2-OPER-ATTEMPTED              
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  FETCH A TMDARVS CURSOR ROW                                    *        
+      ******************************************************************        
+       7010-FETCH-TMDARVS-CURSOR.                                               
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-SQL-SUB FROM 1 BY 1                                   
+               UNTIL  (PV-SQL-SUB > PC-MAX-RETRIES                              
+                  OR   SQLCODE = 0                                              
+                  OR   SQLCODE = +100)                                          
+                                                                                
+               EXEC SQL                                                         
+                   FETCH  TMDARVS_CSR                                           
+                   INTO :MDARVS-SUB-CL-MDSEAR-ID                                
+                       ,:MDARVS-VS-ID                                           
+                       ,:MDARVS-ACTV-IND                                        
+                       ,:MDARVS-VS-DESC                                         
+                       ,:MDARVS-STKR-NBR                                        
+                       ,:MDARVS-TKT-TYP-SEQ-NBR                                 
+                       ,:MDARVS-LBL-SEQ-NBR                                     
+                       ,:MDARVS-HNG-FOLD-SEQ-NBR                                
+                       ,:MDARVS-KY-CLSN-SEQ-NBR                                 
+                       ,:MDARVS-FBRCN-SEQ-NBR                                   
+                       ,:MDARVS-FNSH-SEQ-NBR                                    
+                       ,:MDARVS-RMS-STYL-ID                                     
+                       ,:MDARVS-STYL-RECLS-IND                                  
+                       ,:MDARVS-RTL-CLSN-SEQ-NBR                                
+                       ,:MDARVS-DEPT-NBR                                        
+                       ,:MDARVS-MAJ-CL-NBR                                      
+                       ,:MDARVS-SUB-CL-NBR                                      
+                       ,:MDARVS-ESL-SEQ-NBR                                     
+                       ,:MDARVS-RPT-HIER-SEQ-NBR                                
+                       ,:MDARVS-BDY-STYL-SEQ-NBR                                
+                       ,:MDARVS-CONST-SEQ-NBR                                   
+                       ,:MDARVS-FUNC-SEQ-NBR                                    
+                       ,:MDARVS-GNDR-SEQ-NBR                                    
+                       ,:MDARVS-PATRN-SEQ-NBR                                   
+                       ,:MDARVS-SLHTT-SEQ-NBR                                   
+                       ,:MDARVS-CLLCTN-SEQ-NBR                                  
+                       ,:MDARVS-MAP-UNT-RTL-AMT                                 
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = +100                                          
+                       SET PS-END-OF-TMDARVS-CSR TO TRUE                        
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN SQLWARN NOT = SPACES                                    
+                   WHEN SQLCODE NOT = ZERO                                      
+                       MOVE '7010-FETCH-TMDARVS-CURSOR'                         
+                           TO PV-PARAGRAPH-NAME                                 
+                       MOVE 'FETCH CURSOR'                                      
+                           TO PV-DB2-OPER-ATTEMPTED                             
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-SQL-SUB > PC-MAX-RETRIES                                      
+               MOVE '7010-FETCH-TMDARVS-CURSOR' TO PV-PARAGRAPH-NAME            
+               MOVE 'MAX RETRIES EXCEEDED' TO PV-DB2-OPER-ATTEMPTED             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  CLOSE THE TMDARVS CURSOR                                      *        
+      ******************************************************************        
+       7020-CLOSE-TMDARVS-CURSOR.                                               
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-SQL-SUB FROM 1 BY 1                                   
+               UNTIL  (PV-SQL-SUB > PC-MAX-RETRIES                              
+                  OR   SQLCODE = 0                                              
+                  OR   SQLCODE = +100)                                          
+                                                                                
+               EXEC SQL                                                         
+                   CLOSE TMDARVS_CSR                                            
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = +100                                          
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+                   WHEN SQLWARN0 NOT = SPACES                                   
+                   WHEN SQLCODE < 0                                             
+                   WHEN SQLCODE > 0                                             
+                       MOVE '7020-CLOSE-TMDARVS-CURSOR'                         
+                           TO PV-PARAGRAPH-NAME                                 
+                       MOVE 'CLOSE CURSOR'                                      
+                           TO PV-DB2-OPER-ATTEMPTED                             
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-SQL-SUB > PC-MAX-RETRIES                                      
+               MOVE '7020-CLOSE-TMDARVS-CURSOR' TO PV-PARAGRAPH-NAME            
+               MOVE 'CLOSE CURSOR' TO PV-DB2-OPER-ATTEMPTED                     
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  CREATE A TMDARVS PURGE RECORD                                 *        
+      ******************************************************************        
+       8000-WRITE-TMDARVS-RECORD.                                               
+                                                                                
+           WRITE OUT-TMDARVS-REC FROM DCLTMDARVS.                               
+           ADD +1 TO PA-TMDARVS-COUNT.                                          
+                                                                                
+      ******************************************************************        
+      *  CREATE A TVNDSTL PURGE RECORD                                 *        
+      ******************************************************************        
+       8100-WRITE-TVNDSTL-RECORD.                                               
+                                                                                
+           WRITE OUT-TVNDSTL-REC FROM DCLTVNDSTL.                               
+           ADD +1 TO PA-TVNDSTL-COUNT.                                          
+                                                                                
+      ******************************************************************        
+      *    - CLOSE THE FILES PROCESSED BY PROGRAM                      *        
+      *    - DISPLAY OUTPUT RECORD COUNTS                              *        
+      ******************************************************************        
+       9000-EOJ-ROUTINE.                                                        
+                                                                                
+                                                                                
+           PERFORM 7020-CLOSE-TMDARVS-CURSOR.                                   
+           CLOSE OUT-TMDARVS-FILE                                               
+                 OUT-TVNDSTL-FILE.                                              
+           DISPLAY SPACE.                                                       
+           DISPLAY '*** NUMBER OF TMDARVS RECS WRITTEN = '                      
+               PA-TMDARVS-COUNT.                                                
+           DISPLAY SPACE.                                                       
+           DISPLAY '*** NUMBER OF TVNDSTL RECS WRITTEN = '                      
+               PA-TVNDSTL-COUNT.                                                
+           DISPLAY SPACE.                                                       
+                                                                                
+                                                                                
+      ******************************************************************        
+      * ABEND THE PROGRAM IN THE EVENT THAT AN SQL ERROR OR WARNING             
+      * CODE OCCURS.                                                            
+      ******************************************************************        
+       9999-SQL-ABEND.                                                          
+                                                                                
+           DISPLAY '** ABEND     **'.                                           
+           DISPLAY '** PROGRAM   ** = ' PC-PROGRAM-NAME.                        
+           DISPLAY '** PARAGRAPH ** = ' PV-PARAGRAPH-NAME.                      
+           DISPLAY '** OPERATION ** = ' PV-DB2-OPER-ATTEMPTED.                  
+                                                                                
+      *-----------------------------------------------------------------        
+      * THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-            
+      * MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE                 
+      * 'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE             
+      * FORMAT.                                                                 
+      *-----------------------------------------------------------------        
+                                                                                
+           COPY DPPD004.                                                        
+                                                                                
+           MOVE +4013 TO ABEND-CODE.                                            
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    
+                                                                               

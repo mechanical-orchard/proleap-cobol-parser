@@ -1,0 +1,345 @@
+       IDENTIFICATION DIVISION.                                                 
+                                                                                
+       PROGRAM-ID.         INKUT010.                                            
+       AUTHOR.             P. KEBER                                     00040024
+       INSTALLATION.       KOHLS DEPARTMENT STORES.                             
+       DATE-WRITTEN.       08-10-2004.                                          
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *      INKUT010 - CUTOFF DATABASE CONSOLIDATE EXTRACT FORMATTER  *        
+      *                                                                *        
+      *  THIS PROGRAM INPUTS A TSKST UNLOAD FILE, CONVERTS THE ITEM    *        
+      *  NUMBER TO A SKU NUMBER FOR EACH UNLOAD FILE RECORD, AND       *        
+      *  FORMATS A CUTOFF DATABASE CONSOLIDATE EXTRACT OUTPUT FILE     *        
+      *  RECORD FOR EACH INPUT FILE RECORD.  A CONSOLIDATE EXTRACT     *        
+      *  ERROR FILE IS CREATED FOR ANY INPUT RECORDS WHERE THE ITEM    *        
+      *  NUMBER CANNOT BE FOUND ON TSKXREF.                            *        
+      ******************** HISTORY OF CHANGES **************************        
+      * CHG ID/                                                        *        
+      * WR/PROJ  DATE        DESCRIPTION OF CHANGES                    *        
+      * -------  ----------  ----------------------------------------  *        
+      * 26600    08/10/2004  MOVE INKUT010 TO PRODUCTION.              *        
+      *                      - PAUL KEBER                              *        
+      * WR28543  2005-06-14  CUTOFF DB DATA INTEGRITY - V. LEE YANG    *        
+      * WR27808  2005-06-16  RECOMPILE FOR MANIFEST - V. LEE YANG      *        
+      ******************************************************************        
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+                                                                                
+       CONFIGURATION SECTION.                                                   
+                                                                                
+       SOURCE-COMPUTER.    IBM-3090.                                            
+       OBJECT-COMPUTER.    IBM-3090.                                            
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT TSKST-UNLOAD-FILE       ASSIGN TO INP01.                      
+           SELECT CC-DATE-CNTL-FILE       ASSIGN TO INP02.                      
+           SELECT CONSOLID-EXTRACT-FILE   ASSIGN TO OUT01.                      
+           SELECT TSKST-UNLOAD-ERR-FILE   ASSIGN TO OUT02.                      
+                                                                                
+       DATA DIVISION.                                                           
+                                                                                
+       FILE SECTION.                                                            
+                                                                                
+       FD  TSKST-UNLOAD-FILE                                                    
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  TSKST-UNLOAD-REC                 PIC  X(14).                         
+                                                                                
+       FD  CC-DATE-CNTL-FILE                                                    
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  CC-DATE-CNTL-REC                 PIC X(80).                          
+                                                                                
+       FD  CONSOLID-EXTRACT-FILE                                                
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  CONSOLID-EXTRACT-REC             PIC  X(56).                         
+                                                                                
+       FD  TSKST-UNLOAD-ERR-FILE                                                
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  TSKST-UNLOAD-ERR-REC             PIC  X(14).                         
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  ABEND-CODE                       PIC S9(04) COMP SYNC                
+                                                       VALUE +0.                
+                                                                                
+       01  PROGRAM-ACCUMULATORS.                                                
+           05  PA-TSKST-IN-COUNT            PIC S9(09) COMP-3 VALUE +0.         
+           05  PA-EXTRACT-OUT-COUNT         PIC S9(09) COMP-3 VALUE +0.         
+           05  PA-TSKST-UNLOAD-ERR-COUNT    PIC S9(09) COMP-3 VALUE +0.         
+                                                                                
+       01  PROGRAM-CONSTANTS.                                                   
+           05  PC-MAX-RETRIES               PIC S9(04) COMP SYNC                
+                                                       VALUE +2.                
+           05  PC-PROGRAM-NAME              PIC  X(08) VALUE 'INKUT010'.        
+                                                                                
+       01  PROGRAM-SWITCHES.                                                    
+           05  PS-END-OF-TSKST-INPUT-SW     PIC X      VALUE 'N'.               
+               88  PS-END-OF-TSKST-INPUT               VALUE 'Y'.               
+               88  PS-NOT-END-OF-TSKST-INPUT           VALUE 'N'.               
+           05  PS-TSKXREF-FOUND-SW          PIC X      VALUE 'N'.               
+               88  PS-TSKXREF-FOUND                    VALUE 'Y'.               
+               88  PS-TSKXREF-NOT-FOUND                VALUE 'N'.               
+                                                                                
+       01  PROGRAM-VARIABLES.                                                   
+           05  PV-DB2-OPER-ATTEMPTED        PIC  X(30) VALUE SPACE.             
+           05  PV-PARAGRAPH-NAME            PIC  X(30) VALUE SPACE.             
+           05  PV-SQL-SUB                   PIC  9(03) VALUE ZERO.              
+                                                                                
+       01  PV-PROCESS-DATE-AREA.                                                
+           05  PV-PROCESS-DATE             PIC X(10)       VALUE SPACES.        
+           05  FILLER REDEFINES PV-PROCESS-DATE.                                
+               10  PV-PROCESS-CCYY         PIC X(04).                           
+               10  PV-PROCESS-HYPHEN1      PIC X(01).                           
+               10  PV-PROCESS-MM           PIC X(02).                           
+               10  PV-PROCESS-HYPHEN2      PIC X(01).                           
+               10  PV-PROCESS-DD           PIC X(02).                           
+           05  FILLER                      PIC X(70)       VALUE SPACES.        
+                                                                                
+       01  IN-TSKST-UNLOAD-REC.                                                 
+           05  IN-TSKST-LOC-NBR             PIC S9(04) VALUE +0 COMP.           
+           05  IN-TSKST-ITEM-NBR            PIC S9(15) VALUE +0 COMP-3.         
+           05  IN-TSKST-ONHAND-QTY          PIC S9(07) VALUE +0 COMP-3.         
+                                                                                
+      *****************************************************************         
+      * CUTOFF DATABASE - CONSOLIDATED EXTRACT COPYBOOK                         
+      *****************************************************************         
+      *01  IN050-CTOFF-CON-EXTR-RECORD.                                         
+           COPY INRD050.                                                        
+                                                                                
+      *****************************************************************         
+      * DB2 FORMATTED ERROR MESSAGE                                             
+      *****************************************************************         
+                                                                                
+           COPY DPWS004.                                                        
+                                                                                
+      *****************************************************************         
+      * DCLGEN FOR THE SKU CROSS REFERENCE TABLE                                
+      *****************************************************************         
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TSKXREF                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      * SQL COMMUNICATIONS WORK AREA                                            
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+                                                                                
+       PROCEDURE DIVISION.                                                      
+                                                                                
+       0000-MAINLINE-PROCESSING.                                                
+                                                                                
+           PERFORM 1000-INITIALIZATION.                                         
+                                                                                
+           PERFORM 2000-PROCESS-TSKST-INPUT                                     
+               UNTIL PS-END-OF-TSKST-INPUT.                                     
+                                                                                
+           PERFORM 9000-EOJ-ROUTINE.                                            
+                                                                                
+           STOP RUN.                                                            
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  OPEN ALL FILES AND READ A TSKST INPUT FILE RECORD.            *        
+      ******************************************************************        
+       1000-INITIALIZATION.                                                     
+                                                                                
+           OPEN INPUT  TSKST-UNLOAD-FILE                                        
+                       CC-DATE-CNTL-FILE                                        
+                OUTPUT CONSOLID-EXTRACT-FILE                                    
+                       TSKST-UNLOAD-ERR-FILE.                                   
+                                                                                
+           PERFORM 4100-READ-PROCESS-DATE.                                      
+                                                                                
+           DISPLAY ' '.                                                         
+           DISPLAY ' PROCESSING DATE: ' PV-PROCESS-DATE.                        
+                                                                                
+           IF PV-PROCESS-CCYY NOT NUMERIC                                       
+             OR PV-PROCESS-MM NOT NUMERIC                                       
+             OR PV-PROCESS-DD NOT NUMERIC                                       
+             OR PV-PROCESS-HYPHEN1 NOT = '-'                                    
+             OR PV-PROCESS-HYPHEN2 NOT = '-'                                    
+               MOVE +4002                 TO ABEND-CODE                         
+               DISPLAY '**  ABEND     **'                                       
+               DISPLAY '**  PROGRAM   **  =  INKUT010'                          
+               DISPLAY '**  INVALID PROCESSING DATE '                           
+               CALL 'ILBOABN0'  USING ABEND-CODE                                
+           END-IF.                                                              
+                                                                                
+           MOVE PV-PROCESS-DATE TO IN050-PROCESS-DATE.                          
+           SET IN050-ITEM-CTOFF-NOT-TAKEN TO TRUE.                              
+           MOVE ZERO TO SKXREF-ITM-NBR.                                         
+                                                                                
+           PERFORM 4000-READ-TSKST-UNLOAD-FILE.                                 
+                                                                                
+      ******************************************************************        
+      *  FOR EACH TSKST UNLOAD FILE RECORD, CONVERT THE ITEM NUMBER TO *        
+      *  SKU NUMBER AND FORMAT A CUTOFF DATABASE CONSOLIDATE EXTRACT   *        
+      *  OUTPUT FILE RECORD.                                           *        
+      ******************************************************************        
+       2000-PROCESS-TSKST-INPUT.                                                
+                                                                                
+           MOVE IN-TSKST-LOC-NBR    TO IN050-LOC-NBR.                           
+           MOVE IN-TSKST-ONHAND-QTY TO IN050-CTOFF-OH-QTY.                      
+                                                                                
+           IF IN-TSKST-ITEM-NBR NOT EQUAL SKXREF-ITM-NBR                        
+               MOVE IN-TSKST-ITEM-NBR TO SKXREF-ITM-NBR                         
+               PERFORM 3000-SELECT-FROM-TSKXREF                                 
+           END-IF.                                                              
+                                                                                
+           IF PS-TSKXREF-FOUND                                                  
+               MOVE SKXREF-SKU TO IN050-SKU-NBR                                 
+               PERFORM 8000-WRITE-CONSOLID-EXTR-REC                             
+           ELSE                                                                 
+               PERFORM 8100-WRITE-TSKST-UNLD-ERR-REC                            
+           END-IF.                                                              
+                                                                                
+           PERFORM 4000-READ-TSKST-UNLOAD-FILE.                                 
+                                                                                
+      ******************************************************************        
+      *  FIND THE SKU NUMBER FOR EACH TSKST UNLOAD RECORD.                      
+      ******************************************************************        
+       3000-SELECT-FROM-TSKXREF.                                                
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-SQL-SUB FROM 1 BY 1                                   
+               UNTIL  (PV-SQL-SUB > PC-MAX-RETRIES                              
+                  OR   SQLCODE = 0                                              
+                  OR   SQLCODE = +100)                                          
+                                                                                
+               EXEC SQL                                                         
+                   SELECT SKU                                                   
+                   INTO  :SKXREF-SKU                                            
+                  FROM TSKXREF                                                  
+                  WHERE ITM_NBR = :SKXREF-ITM-NBR                               
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = +100                                          
+                       SET PS-TSKXREF-NOT-FOUND TO TRUE                         
+                       DISPLAY ' TSKXREF ITEM NUMBER NOT FOUND: '               
+                               SKXREF-ITM-NBR                                   
+W28543                         ' WITH OH OF: ' IN-TSKST-ONHAND-QTY              
+W28543                         ' AND LOC OF: ' IN-TSKST-LOC-NBR                 
+                   WHEN SQLCODE = 0                                             
+                       SET PS-TSKXREF-FOUND TO TRUE                             
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLWARN NOT = SPACES                                    
+                   WHEN SQLCODE NOT = ZERO                                      
+                       MOVE '3000-SELECT-FROM-TSKXREF'                          
+                           TO PV-PARAGRAPH-NAME                                 
+                       MOVE 'SELECT TSKXREF'                                    
+                           TO PV-DB2-OPER-ATTEMPTED                             
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-SQL-SUB > PC-MAX-RETRIES                                      
+               MOVE '3000-SELECT-FROM-TSKXREF' TO PV-PARAGRAPH-NAME             
+               MOVE 'MAX RETRIES EXCEEDED' TO PV-DB2-OPER-ATTEMPTED             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************03500024
+      * READS THE TSKST UNLOAD FILE                                     03510024
+      ******************************************************************03520024
+       4000-READ-TSKST-UNLOAD-FILE.                                     03530024
+           READ TSKST-UNLOAD-FILE INTO IN-TSKST-UNLOAD-REC              03540024
+               AT END                                                   03550024
+                   SET PS-END-OF-TSKST-INPUT TO TRUE                    03550024
+               NOT AT END                                                       
+                   ADD 1 TO PA-TSKST-IN-COUNT.                                  
+                                                                                
+      ******************************************************************        
+      *    READ THE PROCESS DATE CONTROL CARD FILE                              
+      ******************************************************************        
+       4100-READ-PROCESS-DATE.                                                  
+                                                                                
+           READ CC-DATE-CNTL-FILE INTO PV-PROCESS-DATE-AREA                     
+               AT END                                                           
+                   MOVE +4001                 TO ABEND-CODE                     
+                   DISPLAY '**  ABEND     **'                                   
+                   DISPLAY '**  PROGRAM   **  =  INKUT010'                      
+                   DISPLAY '**  EMPTY DATE CONTROL FILE'                        
+                   CALL 'ILBOABN0'  USING ABEND-CODE                            
+           END-READ.                                                            
+                                                                                
+      ******************************************************************        
+      *  WRITE A CUTOFF DATABASE CONSOLIDATE EXTRACT OUTPUT FILE RECORD*        
+      ******************************************************************        
+       8000-WRITE-CONSOLID-EXTR-REC.                                            
+                                                                                
+           WRITE CONSOLID-EXTRACT-REC FROM IN050-CTOFF-CON-EXTR-RECORD.         
+           ADD +1 TO PA-EXTRACT-OUT-COUNT.                                      
+                                                                                
+      ******************************************************************        
+      *  WRITE A TSKST UNLOAD ERROR FILE RECORD                        *        
+      ******************************************************************        
+       8100-WRITE-TSKST-UNLD-ERR-REC.                                           
+                                                                                
+           WRITE TSKST-UNLOAD-ERR-REC                                           
+                 FROM IN-TSKST-UNLOAD-REC.                                      
+           ADD +1 TO PA-TSKST-UNLOAD-ERR-COUNT.                                 
+                                                                                
+      ******************************************************************        
+      *    - CLOSE THE FILES PROCESSED BY PROGRAM                      *        
+      *    - DISPLAY OUTPUT RECORD COUNTS                              *        
+      ******************************************************************        
+       9000-EOJ-ROUTINE.                                                        
+                                                                                
+           CLOSE TSKST-UNLOAD-FILE                                              
+                 CC-DATE-CNTL-FILE                                              
+                 CONSOLID-EXTRACT-FILE                                          
+                 TSKST-UNLOAD-ERR-FILE.                                         
+                                                                                
+           DISPLAY SPACE.                                                       
+           DISPLAY '*** NUMBER OF TSKST UNLOAD RECS READ  = '                   
+               PA-TSKST-IN-COUNT.                                               
+           DISPLAY '*** NUMBER OF EXTRACT RECORDS WRITTEN = '                   
+               PA-EXTRACT-OUT-COUNT.                                            
+           DISPLAY '*** NUMBER OF TSKST UNLOAD ERROR RECS = '                   
+               PA-TSKST-UNLOAD-ERR-COUNT.                                       
+           DISPLAY SPACE.                                                       
+                                                                                
+                                                                                
+      ******************************************************************        
+      * ABEND THE PROGRAM IN THE EVENT THAT AN SQL ERROR OR WARNING             
+      * CODE OCCURS.                                                            
+      ******************************************************************        
+       9999-SQL-ABEND.                                                          
+                                                                                
+           DISPLAY '** ABEND     **'.                                           
+           DISPLAY '** PROGRAM   ** = ' PC-PROGRAM-NAME.                        
+           DISPLAY '** PARAGRAPH ** = ' PV-PARAGRAPH-NAME.                      
+           DISPLAY '** OPERATION ** = ' PV-DB2-OPER-ATTEMPTED.                  
+                                                                                
+      *-----------------------------------------------------------------        
+      * THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-            
+      * MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE                 
+      * 'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE             
+      * FORMAT.                                                                 
+      *-----------------------------------------------------------------        
+                                                                                
+           COPY DPPD004.                                                        
+                                                                                
+           MOVE +4013 TO ABEND-CODE.                                            
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    
+                                                                                

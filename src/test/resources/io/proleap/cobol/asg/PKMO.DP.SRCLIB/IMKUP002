@@ -1,0 +1,668 @@
+       IDENTIFICATION DIVISION.                                         09/16/94
+                                                                           LV020
+       PROGRAM-ID.             IMKUP002.                                   CL**1
+       AUTHOR.                 D. THEEL.                                   CL**1
+       INSTALLATION.           KOHLS DEPARTMENT STORES.                    CL**1
+       DATE-WRITTEN.           03/25/2009.                                 CL**1
+       DATE-COMPILED.                                                      CL**1
+                                                                           CL**1
+      ******************************************************************   CL**1
+      *IMKUP002 - PROCESS NON-VSM ITEM CHANGE MESSAGES - SKU/UPC LEVEL *   CL**1
+      ******************************************************************   CL**1
+      * THIS BATCH PROGRAM WILL BE USED TO PROCESS NON-VSM                 CL**1
+      * ITEM MAINTENANCE CHANGE MESSAGES AT THE SKU OR VENDOR UPC          CL**1
+      * LEVELS. THESE MESSAGES ORIGINALLY WERE RETRIEVED FROM THE               
+      * IM.NONVSM.ITEM.CHANGES.Q MQSERIES QUEUE IN IMKUP030.               CL**1
+      *                                                                    CL**1
+      * THE INPUT FILE CONTAINS THE BUSINESS EVENT.                             
+      * FOR SIZE DESCRIPTION CHANGES, THE INPUT FILE CONTAINS EVERY             
+      * UPC ID FOR THE SIZE DESCRIPTION CHANGE INCLUDING INTERNAL               
+      * AND VENDOR UPCS FROM TUPC.  A COLOR/SIZE CHANGE MESSAGE                 
+      * (TYPE 050) WILL BE CREATED FOR EACH SKU FOUND ON TUPC              CL**1
+      * MEETING THE CRITERIA. A UPC COLOR/SIZE CHANGE MESSAGE              CL**1
+      * (TYPE 115) WILL BE CREATED FOR EACH UPC FOUND ON TUPC              CL**1
+      * MEETING THE CRITERIA.                                              CL**1
+      *                                                                    CL**1
+      * ALL MESSAGES THAT ARE CREATED WILL BE INSERTED ON THE VSM TO       CL**1
+      * RMS MESSAGE BRIDGE TO MQSERIES DB2 TABLE (IMT_EVNT_MSG_BRG).       CL**1
+      * WE WILL COMMIT AFTER 500 INSERTS TO IMT_EVNT_MSG_BRG TABLE.        CL**1
+      *****************************************************************    CL**1
+      * WR/PITS#    DATE       DESCRIPTION                              00180061
+      * --------  --------  ------------------------------------------- 00190061
+      * WR#36002  03/25/09  D. THEEL - NEW PROGRAM.                     00200061
+      ***************************************************************** 00250061
+                                                                                
+       ENVIRONMENT DIVISION.                                            00270025
+                                                                        00290025
+       CONFIGURATION SECTION.                                           00300025
+                                                                        00310025
+       SOURCE-COMPUTER.       IBM-3090.                                 00320025
+       OBJECT-COMPUTER.       IBM-3090.                                 00330025
+                                                                        00340025
+       INPUT-OUTPUT SECTION.                                            00350025
+                                                                        00360025
+       FILE-CONTROL.                                                    00370025
+           SELECT NON-VSM-ITM-CHGS-IN ASSIGN TO INP01.                  00380025
+                                                                        00500025
+      * ------------------------------------------------------------- * 00510025
+       DATA DIVISION.                                                   00520025
+      * ------------------------------------------------------------- * 00530025
+       FILE SECTION.                                                    00540025
+                                                                        00550025
+       FD  NON-VSM-ITM-CHGS-IN                                          00560025
+           RECORDING MODE F                                             00570025
+           BLOCK CONTAINS 0 RECORDS                                     00580025
+           LABEL RECORDS ARE OMITTED.                                   00590025
+       01  NON-VSM-ITM-CHGS-REC          PIC  X(60).                    00600025
+                                                                        00610025
+      * ------------------------------------------------------------- * 00850025
+       WORKING-STORAGE SECTION.                                         00860025
+      * ------------------------------------------------------------- * 00870025
+                                                                        00880025
+                                                                        01280025
+      *----------------------------------------------------------------*01290025
+      *    PROGRAM ACCUMULATORS                                         01300025
+      *----------------------------------------------------------------*01310025
+       01  PA-PROGRAM-ACCUMULATORS.                                     01320025
+           05  PA-IMT-EVNT-MSG-BRG-INSERTS                              01390025
+                                         PIC 9(07) VALUE 0.             01400025
+           05  PA-RECS-IN                PIC 9(07) VALUE 0.             01370025
+           05  PA-COMMIT-CNTR            PIC 9(07) VALUE 0.             01370025
+           05  PA-SKU-CLRSIZE-CHG-CT     PIC 9(07) VALUE 0.                     
+           05  PA-UPC-CLRSIZE-CHG-CT     PIC 9(07) VALUE 0.                     
+           05  PA-INSRTS-SINCE-COMMIT    PIC 9(07) VALUE 0.                     
+                                                                        01840025
+      *----------------------------------------------------------------*01850025
+      *    PROGRAM CONSTANTS                                            01860025
+      *----------------------------------------------------------------*01870025
+       01  PC-PROGRAM-CONSTANTS.                                        01880025
+           05  PC-MAX-RETRIES            PIC S9(04) VALUE +3   COMP.    02320025
+           05  PC-DEADLOCK               PIC S9(04) VALUE -913 COMP.    02350025
+           05  PC-ROW-NOT-FOUND          PIC S9(04) VALUE +100 COMP.    02340025
+           05  PC-UNAVAILABLE-RESOURCES  PIC S9(04) VALUE -904 COMP.    02360025
+           05  PC-PGM-NAME               PIC X(08)  VALUE 'IMKUP002'.   01890025
+           05  PC-JOB-NAME               PIC X(08)  VALUE 'IMK929'.     01890025
+           05  PC-ORIGIN-CNTRY           PIC X(03)  VALUE 'US '.        02320025
+                                                                        02370025
+      *----------------------------------------------------------------*02380025
+      *    PROGRAM SWITCHES                                             02390025
+      *----------------------------------------------------------------*02400025
+       01  PS-PROGRAM-SWITCHES.                                         02410025
+           05  PS-ROW-FOUND-SW           PIC X(01) VALUE 'Y'.           02620025
+               88  PS-ROW-FOUND                    VALUE 'Y'.           02630025
+               88  PS-ROW-NOT-FOUND                VALUE 'N'.           02640025
+           05  PS-INPUT-FILE-EOF-SW         PIC  X        VALUE 'N'.    00910024
+               88  PS-MORE-INPUT-RECORDS                  VALUE 'N'.    00920024
+               88  PS-NO-MORE-INPUT-RECORDS               VALUE 'Y'.    00930024
+                                                                        02650025
+      *----------------------------------------------------------------*02660025
+      *    PROGRAM VARIABLES                                            02670025
+      *----------------------------------------------------------------*02680025
+       01  PV-PROGRAM-VARIABLES.                                        02690025
+           05  PV-UPC-ID-DOUBLE          PIC S9(10) VALUE +0 COMP.              
+           05  PV-REASON                 PIC S9(9)  VALUE +0 COMP.      03410025
+           05  PV-SQL-SUB                PIC S9(4)  VALUE +0 COMP.      03060025
+           05  PV-ACTION                 PIC X(08)  VALUE SPACES.       03140025
+           05  PV-CURRENT-DATE.                                         03310054
+               10  PV-CURRENT-YEAR       PIC X(04)  VALUE SPACES.       03320054
+               10  FILLER                PIC X(01)  VALUE '-'.          03330054
+               10  PV-CURRENT-MONTH      PIC X(02)  VALUE SPACES.       03340054
+               10  FILLER                PIC X(01)  VALUE '-'.          03350054
+               10  PV-CURRENT-DAY        PIC X(02)  VALUE SPACES.       03360054
+           05  PV-ERROR-MESSAGE          PIC X(48)  VALUE SPACES.       03570025
+           05  PV-MESSAGE                PIC X(100) VALUE SPACES.       03530025
+           05  PV-PARAGRAPH              PIC X(50)  VALUE SPACES.       03130025
+           05  PV-TCOLOR-KEY-INFO.                                         CL**1
+               10  FILLER                      PIC X(14)   VALUE           CL**1
+                   'NRF_CLOR_CDE: '.                                            
+               10  PV-TCOLOR-KEY-COLOR-CDE     PIC X(03)   VALUE SPACES.   CL**1
+           05  PV-TCOLOR-NOT-FOUND-MSG.                                         
+               10  FILLER                      PIC X(41)   VALUE                
+                   'TCOLOR ROW NOT FOUND FOR NRF COLOR CODE: '.                 
+               10  PV-TCOLOR-NFM-NRF-CLOR-CDE  PIC X(3)    VALUE SPACES.        
+           05  PV-DISPLAY-10                   PIC 9(10)   VALUE ZERO.          
+           05  PV-UPC-COMP-10                  PIC S9(10)  VALUE +0             
+                                                           COMP.                
+                                                                        03580025
+      *****************************************************************         
+      *  NON-VSM ITEM MAINTENANCE INFO COPYBOOK                                 
+      ******************************************************************        
+           COPY IMRD098.                                                        
+                                                                           CL**1
+      *****************************************************************         
+      *  LEGACY ITEM MAINTENANCE INFO COPYBOOK                                  
+      ******************************************************************        
+           COPY IMRD008.                                                        
+                                                                                
+      *----------------------------------------------------------------*03730025
+      *    ABEND CODES THE ARE APPLICATION DEFINED                      03740025
+      *----------------------------------------------------------------*03750025
+       01  ABEND-CODE                  PIC S9(4)    VALUE ZEROS         03760025
+                                                    COMP SYNC.          03770025
+           88  AC-DB2-ERROR                         VALUE +4013.        03820025
+                                                                        03840025
+      ******************************************************************        
+      *  ITEM EVENT MESSAGE BRIDGE TABLE                                        
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE IMT00001                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  EXTERNAL ENTITY TABLE                                                  
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TEXTENT                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  MERCHANDISE AREA VENDOR STYLE TABLE                                    
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TMDARVS                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  SKU CROSS-REFERENCE TABLE                                              
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TSKXREF                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  UPC TABLE                                                              
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TUPC                                                     
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  VENDOR STYLE TABLE                                                     
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TVNDSTL                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  ITEM COLOR TABLE                                                       
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TCOLOR                                                   
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  ITEM LABEL TABLE  (IMT_LBL)                                            
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE IMT00000                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  COMMUNICATION AREAS FOR DB2                                    03860025
+      ******************************************************************        
+           EXEC SQL                                                     03880025
+               INCLUDE SQLCA                                            03890025
+           END-EXEC.                                                    03900025
+                                                                        03910025
+      ******************************************************************        
+      *  ERROR MESSAGE AREA FOR DB2                                   * 03930025
+      ******************************************************************        
+           COPY DPWS004.                                                03950025
+                                                                        03960025
+      * ------------------------------------------------------------- * 04780025
+       PROCEDURE DIVISION.                                              04790025
+      * ------------------------------------------------------------- * 04800025
+       0000-IMKUP002.                                                   04810025
+                                                                        04820025
+           PERFORM 1000-INITIALIZE.                                     04830025
+                                                                        04840025
+           PERFORM 2000-PROCESS-RECS                                    0025    
+              UNTIL PS-NO-MORE-INPUT-RECORDS.                           0025    
+                                                                        04910025
+           PERFORM 2500-EOJ-PROCESSING.                                 04920025
+                                                                        08290025
+           STOP RUN.                                                    04930025
+                                                                        04940025
+      *----------------------------------------------------------------*04950025
+      *  INITIALIZATION ROUTINE.                                        04960025
+      *----------------------------------------------------------------*04970025
+       1000-INITIALIZE.                                                 04980025
+                                                                        04990025
+           MOVE FUNCTION CURRENT-DATE (1:4) TO PV-CURRENT-YEAR.         05000054
+           MOVE FUNCTION CURRENT-DATE (5:2) TO PV-CURRENT-MONTH.        05010054
+           MOVE FUNCTION CURRENT-DATE (7:2) TO PV-CURRENT-DAY.          05020054
+           DISPLAY '***IMKUP002 CURRENT DATE = ' PV-CURRENT-DATE.       05030055
+                                                                        05040054
+           OPEN INPUT NON-VSM-ITM-CHGS-IN.                              05060025
+                                                                        05110025
+           PERFORM 8000-READ-INPUT.                                     05120025
+                                                                        07100025
+      * ------------------------------------------------------------- * 07110025
+      *  PROCESS RECS                                                   07120025
+      * ------------------------------------------------------------- * 07130025
+       2000-PROCESS-RECS.                                               07150025
+                                                                        07170025
+           EVALUATE TRUE                                                07200025
+              WHEN IM098-BUS-EVENT = '005'                              07210075
+                 PERFORM 3100-PROCESS-SIZE-DESC-CHG                     07220025
+              WHEN OTHER                                                07490025
+                   DISPLAY '@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@'            07500025
+                   DISPLAY ' ERROR IN 2000-PROCESS-RECS '               07510025
+                   DISPLAY ' CANNOT PROCESS BUSINESS EVENT '            07520025
+                   DISPLAY ' INPUT REC = ' IM098-BUS-EVENT                      
+                   DISPLAY '@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@'            07530025
+           END-EVALUATE.                                                07560025
+           IF PA-INSRTS-SINCE-COMMIT > 500                                      
+               PERFORM 8400-COMMIT-DB2                                  47110025
+               INITIALIZE PA-INSRTS-SINCE-COMMIT                                
+           END-IF.                                                              
+           PERFORM 8000-READ-INPUT.                                     05120025
+                                                                        07660025
+      * ------------------------------------------------------------- * 07110025
+      *  PERFORM END OF JOB PROCESSING                                  07120025
+      * ------------------------------------------------------------- * 07130025
+       2500-EOJ-PROCESSING.                                             07670025
+           PERFORM 8400-COMMIT-DB2.                                             
+           CLOSE NON-VSM-ITM-CHGS-IN.                                   05060025
+           DISPLAY '*-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-*'.   07690025
+           DISPLAY 'END OF JOB RECORD COUNTERS'.                        07700025
+           DISPLAY '*-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%-*'.             07720025
+           DISPLAY 'INPUT RECS READ       ' PA-RECS-IN.                 07740025
+           DISPLAY 'SKU CLR SIZE CHGS     ' PA-SKU-CLRSIZE-CHG-CT.      07740025
+           DISPLAY 'UPC CLR SIZE CHGS     ' PA-UPC-CLRSIZE-CHG-CT.      07740025
+           DISPLAY 'IMT-EVNT-MSG-BRG-INS  ' PA-IMT-EVNT-MSG-BRG-INSERTS.08170050
+           DISPLAY 'DB2 COMMITS           ' PA-COMMIT-CNTR.             08170050
+           DISPLAY '*-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-*'.   08200025
+                                                                        08310025
+                                                                        07680025
+      * ------------------------------------------------------------- * 08320025
+      * PROCESS A SIZE DESCRIPTION CHANGE MESSAGE                       08330025
+      * ------------------------------------------------------------- * 08340025
+       3100-PROCESS-SIZE-DESC-CHG.                                      08350025
+                                                                        08360025
+           MOVE '3100-PROCESS-SIZE-DESC-CHG' TO  PV-PARAGRAPH.          08370025
+                                                                        08380025
+           MOVE IM098-UPC-ID TO UPC-UPC-ID.                             08410056
+           PERFORM 6000-SELECT-SZ-DESC-CHGS.                                    
+           IF SQLCODE = ZERO                                                    
+               IF IM098-UPC-TYP-CDE = 'I'                               44110025
+                   PERFORM 3110-CREATE-SKU-CLR-SZ-CHG                   44110025
+               ELSE                                                     44110025
+                   PERFORM 3120-CREATE-UPC-CLR-SZ-CHG                   44110025
+               END-IF                                                   44110025
+           END-IF.                                                              
+                                                                                
+      * ------------------------------------------------------------- * 08320025
+      *  FORMAT AND WRITE A SKU COLOR/SIZE ATTRIBUTES CHANGE BUSINESS           
+      *  EVENT                                                                  
+      * ------------------------------------------------------------- * 08320025
+       3110-CREATE-SKU-CLR-SZ-CHG.                                              
+                                                                                
+           SET IM008-BUS-EVENT-SKU-CLR-SZ-CHG TO TRUE.                          
+           MOVE SPACES TO IM008-CRE-TMST.                                       
+                                                                                
+      *    FILL IN THE ITEM KEY DATA FIELDS                                     
+           INITIALIZE IM008-ITEM-KEY-DATA.                                      
+           MOVE UPC-VS-ID           TO IM008-ITEM-KEY-VS-ID.                    
+           MOVE VNDSTL-ENT-ID       TO IM008-ITEM-KEY-ENT-ID.                   
+           MOVE EXTENT-DUN-NBR      TO IM008-ITEM-KEY-DUN-NBR.                  
+           MOVE VNDSTL-VS-NBR       TO IM008-ITEM-KEY-VS-NBR.                   
+           MOVE UPC-SUB-CL-MDSEAR-ID                                            
+                                    TO IM008-ITEM-KEY-SUBCL-MDSE-ID.            
+           MOVE MDARVS-DEPT-NBR     TO IM008-ITEM-KEY-DEPT.                     
+           MOVE MDARVS-MAJ-CL-NBR   TO IM008-ITEM-KEY-CLASS.                    
+           MOVE MDARVS-SUB-CL-NBR   TO IM008-ITEM-KEY-SUBCL.                    
+           MOVE MDARVS-RMS-STYL-ID  TO IM008-ITEM-KEY-RMS-STYL-ID.              
+           MOVE SKXREF-SKU          TO IM008-ITEM-KEY-SKU.                      
+           MOVE UPC-INTR-UPC-ID     TO PV-UPC-ID-DOUBLE.                        
+           MOVE PV-UPC-ID-DOUBLE    TO IM008-ITEM-KEY-INTR-UPC-ID               
+           MOVE UPC-UPC-ID          TO PV-UPC-ID-DOUBLE.                        
+           MOVE PV-UPC-ID-DOUBLE    TO IM008-ITEM-KEY-UPC-ID.                   
+           MOVE UPC-UPC-NBR         TO IM008-ITEM-KEY-UPC-NBR.                  
+           MOVE PC-ORIGIN-CNTRY     TO IM008-ITEM-KEY-ORIGIN-CNTRY.             
+                                                                                
+      *    GET TCOLOR INFO FOR SKU NRF AND SHORT COLOR DESCRIPTION DATA         
+           PERFORM 6300-GET-COLOR-INFO.                                         
+                                                                                
+      *    FILL IN THE SKU COLOR/SIZE ATTRIBUTES CHANGE DATA                    
+           INITIALIZE IM008-SKU-CLR-SZ-CHG-DATA.                                
+           MOVE IM098-SIZE-CODE     TO IM008-SKU-CLR-KOHLS-SIZE-CDE-N.          
+           SET IM008-SKU-CLR-KOHLS-SIZE-NOC TO TRUE.                            
+           MOVE UPC-NRF-CLOR-CDE    TO IM008-SKU-CLR-NRF-CLOR-CDE-N.            
+           SET IM008-SKU-CLR-NRF-CLOR-CDE-NOC TO TRUE.                          
+           MOVE UPC-CSTM-CLOR-DESC  TO IM008-SKU-CLR-CSTM-CLOR-DESC-N.          
+           SET IM008-SKU-CLR-CSTM-CLOR-NOC TO TRUE.                             
+           MOVE UPC-CUSTFACG-CLOR-DESC                                          
+                                    TO IM008-SKU-CLR-CUSTFACG-CLOR-N.           
+           SET IM008-SKU-CLR-CUSTFACG-CLR-NOC TO TRUE.                          
+           MOVE UPC-INTR-UPC-DESC   TO IM008-SKU-CLR-SKU-DESC-SUP.              
+           MOVE IM098-SIZE-DESC     TO IM008-SKU-CLR-SIZE-DESC-NEW.             
+           SET IM008-SKU-CLR-SIZE-DESC-CHG TO TRUE.                             
+           MOVE COLOR-SHRT-CLOR-DESC                                            
+                                    TO IM008-SKU-CLR-SHRT-CLOR-DESC-N.          
+           SET IM008-SKU-CLR-SHRT-CLR-DSC-NOC TO TRUE.                          
+           MOVE COLOR-NRF-CLOR-DESC TO IM008-SKU-CLR-NRF-CLOR-DESC-N.           
+           SET IM008-SKU-CLR-NRF-CLOR-DSC-NOC TO TRUE.                          
+           MOVE LOW-VALUES          TO IM008-SKU-CLR-FILLER.                    
+                                                                                
+      *    INSERT SKU COLOR/SIZE ATTRIBUTES CHANGE RECORD TO THE ITEM           
+      *    EVENT MESSAGE BRIDGE DB2 TABLE.                                      
+           COMPUTE IMT00001-MSG-TXT-LEN =                                       
+              LENGTH OF IMRD008-RECORD -                                        
+              LENGTH OF IM008-SKU-CLR-FILLER.                                   
+           PERFORM 7000-INSERT-IMT-EVNT-MSG.                                    
+           ADD 1 TO PA-SKU-CLRSIZE-CHG-CT.                                      
+                                                                        09040025
+      * ------------------------------------------------------------- * 08320025
+      *  FORMAT AND WRITE A UPC COLOR/SIZE ATTRIBUTES CHANGE BUSINESS           
+      *  EVENT                                                                  
+      * ------------------------------------------------------------- * 08320025
+       3120-CREATE-UPC-CLR-SZ-CHG.                                              
+                                                                                
+           SET IM008-BUS-EVENT-UPC-CLR-SZ-CHG TO TRUE.                          
+           MOVE SPACES TO IM008-CRE-TMST.                                       
+                                                                                
+      *    FILL IN THE ITEM KEY DATA FIELDS                                     
+           INITIALIZE IM008-ITEM-KEY-DATA.                                      
+           MOVE UPC-VS-ID           TO IM008-ITEM-KEY-VS-ID.                    
+           MOVE VNDSTL-ENT-ID       TO IM008-ITEM-KEY-ENT-ID.                   
+           MOVE EXTENT-DUN-NBR      TO IM008-ITEM-KEY-DUN-NBR.                  
+           MOVE VNDSTL-VS-NBR       TO IM008-ITEM-KEY-VS-NBR.                   
+           MOVE UPC-SUB-CL-MDSEAR-ID                                            
+                                    TO IM008-ITEM-KEY-SUBCL-MDSE-ID.            
+           MOVE MDARVS-DEPT-NBR     TO IM008-ITEM-KEY-DEPT.                     
+           MOVE MDARVS-MAJ-CL-NBR   TO IM008-ITEM-KEY-CLASS.                    
+           MOVE MDARVS-SUB-CL-NBR   TO IM008-ITEM-KEY-SUBCL.                    
+           MOVE MDARVS-RMS-STYL-ID  TO IM008-ITEM-KEY-RMS-STYL-ID.              
+           MOVE SKXREF-SKU          TO IM008-ITEM-KEY-SKU.                      
+           MOVE UPC-INTR-UPC-ID     TO PV-UPC-ID-DOUBLE.                        
+           MOVE PV-UPC-ID-DOUBLE    TO IM008-ITEM-KEY-INTR-UPC-ID               
+           MOVE UPC-UPC-ID          TO PV-UPC-ID-DOUBLE.                        
+           MOVE PV-UPC-ID-DOUBLE    TO IM008-ITEM-KEY-UPC-ID.                   
+           MOVE UPC-UPC-NBR         TO IM008-ITEM-KEY-UPC-NBR.                  
+           MOVE PC-ORIGIN-CNTRY     TO IM008-ITEM-KEY-ORIGIN-CNTRY.             
+                                                                                
+      *    GET TCOLOR INFO FOR UPC NRF AND SHORT COLOR DESCRIPTION DATA         
+           PERFORM 6300-GET-COLOR-INFO.                                         
+                                                                                
+      *    FILL IN THE UPC COLOR/SIZE ATTRIBUTES CHANGE DATA                    
+           INITIALIZE IM008-UPC-CLR-SZ-CHG-DATA.                                
+           MOVE IM098-SIZE-CODE     TO IM008-UPC-CLR-KOHLS-SIZE-CDE-N.          
+           SET IM008-UPC-CLR-KOHLS-SIZE-NOC TO TRUE.                            
+           MOVE UPC-NRF-CLOR-CDE    TO IM008-UPC-CLR-NRF-CLOR-CDE-N.            
+           SET IM008-UPC-CLR-NRF-CLOR-CDE-NOC TO TRUE.                          
+           MOVE UPC-CSTM-CLOR-DESC  TO IM008-UPC-CLR-CSTM-CLOR-DESC-N.          
+           SET IM008-UPC-CLR-CSTM-CLOR-NOC TO TRUE.                             
+           MOVE IM098-SIZE-DESC     TO IM008-UPC-CLR-SIZE-DESC-NEW.             
+           SET IM008-UPC-CLR-SIZE-DESC-CHG TO TRUE.                             
+           MOVE COLOR-SHRT-CLOR-DESC                                            
+                                    TO IM008-UPC-CLR-SHRT-CLOR-DESC-N.          
+           SET IM008-UPC-CLR-SHRT-CLR-DSC-NOC TO TRUE.                          
+           MOVE COLOR-NRF-CLOR-DESC TO IM008-UPC-CLR-NRF-CLOR-DESC-N.           
+           SET IM008-UPC-CLR-NRF-CLOR-DSC-NOC TO TRUE.                          
+           MOVE LOW-VALUES          TO IM008-UPC-CLR-FILLER.                    
+                                                                                
+      *    INSERT UPC COLOR/SIZE ATTRIBUTES CHANGE RECORD TO THE ITEM           
+      *    EVENT MESSAGE BRIDGE DB2 TABLE.                                      
+           COMPUTE IMT00001-MSG-TXT-LEN =                                       
+              LENGTH OF IMRD008-RECORD -                                        
+              LENGTH OF IM008-UPC-CLR-FILLER.                                   
+           PERFORM 7000-INSERT-IMT-EVNT-MSG.                                    
+           ADD 1 TO PA-UPC-CLRSIZE-CHG-CT.                                      
+                                                                        08410056
+                                                                                
+      * ------------------------------------------------------------- * 43390025
+      * SELECT SIZE DESCRIPTION CHANGE INFORMATION FOR ITEM BRIDGE REC  43400025
+      * ------------------------------------------------------------- * 43410025
+       6000-SELECT-SZ-DESC-CHGS.                                                
+      *                                                                 43430025
+           MOVE '6000-SELECT-SZ-DESC-CHGS' TO PV-PARAGRAPH.             43440025
+      *                                                                 43450025
+           PERFORM                                                      43460025
+               WITH TEST AFTER                                          43470025
+               VARYING PV-SQL-SUB                                       43480025
+               FROM 1 BY 1                                              43490025
+               UNTIL PV-SQL-SUB > PC-MAX-RETRIES                        43500025
+                  OR SQLCODE = ZERO                                     43510025
+                  OR SQLCODE = +100                                             
+      *                                                                 43530025
+                 EXEC SQL                                               43540025
+                   SELECT  UPC.UPC_NBR                                          
+                          ,UPC.SUB_CL_MDSEAR_ID                                 
+                          ,UPC.VS_ID                                            
+                          ,UPC.INTR_UPC_ID                                      
+                          ,UPC.NRF_CLOR_CDE                                     
+                          ,UPC.CSTM_CLOR_DESC                                   
+                          ,UPC.CUSTFACG_CLOR_DESC                               
+                          ,UPC.INTR_UPC_DESC                                    
+                          ,MDARVS.DEPT_NBR                                      
+                          ,MDARVS.MAJ_CL_NBR                                    
+                          ,MDARVS.SUB_CL_NBR                                    
+                          ,MDARVS.RMS_STYL_ID                                   
+                          ,VNDSTL.VS_NBR                                        
+                          ,VNDSTL.ENT_ID                                        
+                          ,EXTENT.DUN_NBR                                       
+                          ,SKXREF.SKU                                           
+                   INTO   :UPC-UPC-NBR                                          
+                         ,:UPC-SUB-CL-MDSEAR-ID                                 
+                         ,:UPC-VS-ID                                            
+                         ,:UPC-INTR-UPC-ID                                      
+                         ,:UPC-NRF-CLOR-CDE                                     
+                         ,:UPC-CSTM-CLOR-DESC                                   
+                         ,:UPC-CUSTFACG-CLOR-DESC                               
+                         ,:UPC-INTR-UPC-DESC                                    
+                         ,:MDARVS-DEPT-NBR                                      
+                         ,:MDARVS-MAJ-CL-NBR                                    
+                         ,:MDARVS-SUB-CL-NBR                                    
+                         ,:MDARVS-RMS-STYL-ID                                   
+                         ,:VNDSTL-VS-NBR                                        
+                         ,:VNDSTL-ENT-ID                                        
+                         ,:EXTENT-DUN-NBR                                       
+                         ,:SKXREF-SKU                                           
+                     FROM  TUPC UPC                                             
+                          ,TMDARVS MDARVS                                       
+                          ,TVNDSTL VNDSTL                                       
+                          ,TEXTENT EXTENT                                       
+                          ,TSKXREF SKXREF                                       
+                    WHERE  UPC.UPC_ID = :UPC-UPC-ID                             
+                      AND  UPC.EFF_END_DTE IS NULL                              
+                      AND  MDARVS.SUB_CL_MDSEAR_ID                              
+                                         = UPC.SUB_CL_MDSEAR_ID                 
+                      AND  MDARVS.VS_ID  = UPC.VS_ID                            
+                      AND  VNDSTL.VS_ID  = UPC.VS_ID                            
+                      AND  EXTENT.ENT_ID = VNDSTL.ENT_ID                        
+                      AND  SKXREF.INTR_UPC_ID = UPC.INTR_UPC_ID                 
+                      AND  SKXREF.SKU_STAT_CDE <> '98'                          
+                 END-EXEC                                               43560025
+      *                                                                 43570025
+               EVALUATE TRUE                                            44050025
+                   WHEN SQLCODE = PC-UNAVAILABLE-RESOURCES              44060025
+                   WHEN SQLCODE = PC-DEADLOCK                           44070025
+                   WHEN SQLCODE = +100                                  44080025
+                   WHEN SQLCODE = ZERO                                  44100025
+                       CONTINUE                                         44090025
+                   WHEN SQLWARN0 NOT = SPACE                            44120025
+                   WHEN SQLCODE NOT = ZERO                              44130025
+                       MOVE 'BAD SQLCODE FOR FETCH SIZE_DESC_CHGS_CSR'  43650025
+                                     TO  PV-MESSAGE                     44150025
+                       PERFORM 9900-SQL-ABEND                           44170025
+               END-EVALUATE                                             44190025
+           END-PERFORM.                                                 44200025
+      *                                                                 44210025
+           IF PV-SQL-SUB > PC-MAX-RETRIES                               44220025
+               MOVE 'MAX RETRIES EXCEEDED FOR FETCH SIZE_DESC_CHGS_CSR' 44230025
+                                     TO  PV-MESSAGE                     44240025
+               PERFORM 9900-SQL-ABEND                                   44260025
+           END-IF.                                                      44280025
+                                                                                
+      ******************************************************************        
+      *  GET TCOLOR INFO                                                        
+      ******************************************************************        
+       6300-GET-COLOR-INFO.                                                     
+                                                                                
+           MOVE '6300-GET-COLOR-INFO'   TO PV-PARAGRAPH.                20600025
+           MOVE 'SELECT ROW '           TO PV-ACTION.                   20610025
+                                                                        20590025
+           PERFORM                                                      20630025
+               WITH TEST AFTER                                          20640025
+               VARYING PV-SQL-SUB                                       20650025
+               FROM 1 BY 1                                              20660025
+               UNTIL PV-SQL-SUB > PC-MAX-RETRIES                        20670025
+                  OR SQLCODE = 0                                        20680025
+                  OR SQLCODE = +100                                     20680025
+      *                                                                 20710025
+                 EXEC SQL                                               20720025
+                     SELECT  NRF_CLOR_DESC                                      
+                            ,SHRT_CLOR_DESC                                     
+                       INTO :COLOR-NRF-CLOR-DESC                                
+                           ,:COLOR-SHRT-CLOR-DESC                               
+                       FROM TCOLOR                                              
+                      WHERE NRF_CLOR_CDE = :UPC-NRF-CLOR-CDE                    
+                 END-EXEC                                               20800025
+      *                                                                 20810025
+               EVALUATE TRUE                                            20820025
+                   WHEN SQLCODE = PC-UNAVAILABLE-RESOURCES              20830025
+                   WHEN SQLCODE = PC-DEADLOCK                           20840025
+                   WHEN SQLCODE = ZERO                                  20870025
+                       CONTINUE                                         20880025
+                   WHEN SQLCODE = +100                                          
+                       MOVE UPC-NRF-CLOR-CDE                               CL*11
+                                      TO PV-TCOLOR-NFM-NRF-CLOR-CDE        CL**1
+                       MOVE PV-TCOLOR-NOT-FOUND-MSG TO PV-MESSAGE               
+                       PERFORM 9900-SQL-ABEND                           20940025
+                   WHEN SQLWARN0 NOT = SPACE                            20890025
+                   WHEN SQLCODE NOT =  ZERO                             20900025
+                       MOVE 'BAD SQLCODE FOR TCOLOR SELECT'             20910025
+                                     TO  PV-MESSAGE                     20920025
+                       PERFORM 9900-SQL-ABEND                           20940025
+               END-EVALUATE                                             20960025
+           END-PERFORM.                                                 20970025
+      *                                                                 20980025
+           IF PV-SQL-SUB > PC-MAX-RETRIES                               20990025
+               MOVE  'MAX RETRIES EXCEEDED FOR TCOLOR SELECT'           21000025
+                      TO PV-MESSAGE                                     21010025
+               PERFORM 9900-SQL-ABEND                                   21030025
+           END-IF.                                                      21040025
+                                                                                
+                                                                        44710025
+      ******************************************************************        
+      *  INSERT A BUSINESS EVENT RECORD TO THE ITEM EVENT MESSAGE               
+      *  BRIDGE DB2 TABLE.                                                      
+      ******************************************************************        
+       7000-INSERT-IMT-EVNT-MSG.                                        20580025
+                                                                        20590025
+           MOVE '7000-INSERT-IMT-EVNT-MSG' TO PV-PARAGRAPH.             20600025
+           MOVE 'INSERT ROW '              TO PV-ACTION.                20610025
+                                                                        20590025
+           MOVE IM008-ITEM-KEY-RMS-STYL-ID                                      
+                                    TO IMT00001-RMS-STYL-ID.                    
+           MOVE IM008-BUSINESS-EVENT-ID                                         
+                                    TO IMT00001-BUS-EVNT-TYP-CDE.               
+           MOVE IMRD008-RECORD      TO IMT00001-MSG-TXT-TEXT.                   
+                                                                        20620025
+           PERFORM                                                      20630025
+               WITH TEST AFTER                                          20650025
+               VARYING PV-SQL-SUB                                       20650025
+               FROM 1 BY 1                                              20660025
+               UNTIL PV-SQL-SUB > PC-MAX-RETRIES                        20670025
+                  OR SQLCODE = 0                                        20680025
+      *                                                                 20710025
+                 EXEC SQL                                               20720025
+                     INSERT INTO IMT_EVNT_MSG_BRG                               
+                            ( CRE_TMST                                          
+                            ,RMS_STYL_ID                                        
+                            ,BUS_EVNT_TYP_CDE                                   
+                            ,MSG_TXT )                                          
+                     VALUES                                                     
+                           ( CURRENT TIMESTAMP                                  
+                           ,:IMT00001-RMS-STYL-ID                               
+                           ,:IMT00001-BUS-EVNT-TYP-CDE                          
+                           ,:IMT00001-MSG-TXT)                                  
+                 END-EXEC                                               20800025
+      *                                                                 20810025
+               EVALUATE TRUE                                            20820025
+                   WHEN SQLCODE = ZERO                                  20870025
+                       ADD 1 TO PA-IMT-EVNT-MSG-BRG-INSERTS             20880025
+                       ADD 1 TO PA-INSRTS-SINCE-COMMIT                          
+                   WHEN SQLCODE = PC-UNAVAILABLE-RESOURCES              20830025
+                   WHEN SQLCODE = PC-DEADLOCK                           20840025
+                        CONTINUE                                        20860025
+                   WHEN SQLWARN0 NOT = SPACE                            20890025
+                   WHEN SQLCODE NOT =  ZERO                             20900025
+                       MOVE 'BAD SQLCODE FOR IMT_EVNT_MSG_BRG INSERT'   20910025
+                                     TO  PV-MESSAGE                     20920025
+                       PERFORM 9900-SQL-ABEND                           20940025
+               END-EVALUATE                                             20960025
+           END-PERFORM.                                                 20970025
+      *                                                                 20980025
+           IF PV-SQL-SUB > PC-MAX-RETRIES                               20990025
+               MOVE  'MAX RETRIES EXCEEDED FOR IMT_EVNT_MSG_BRG INSERT' 21000025
+                      TO PV-MESSAGE                                     21010025
+               PERFORM 9900-SQL-ABEND                                   21030025
+           END-IF.                                                      21040025
+                                                                        21120025
+                                                                        21120025
+      * ------------------------------------------------------------- * 45970051
+      * READ INPUT FILE                                                 45980051
+      * ------------------------------------------------------------- * 45990051
+       8000-READ-INPUT.                                                 46000051
+            READ NON-VSM-ITM-CHGS-IN INTO IM098-SIZE-DESC-REC           46010051
+                AT END                                                  46020051
+                   SET PS-NO-MORE-INPUT-RECORDS TO TRUE                 00930024
+                NOT AT END                                              46040051
+                   ADD 1 TO PA-RECS-IN                                  47920025
+            END-READ.                                                   46040051
+                                                                                
+                                                                                
+      * ------------------------------------------------------------- * 46730025
+      *  COMMIT DB2 PROCESSING SINCE THE POINT OF THE LAST COMMIT      *47080025
+      * ------------------------------------------------------------- * 46730025
+       8400-COMMIT-DB2.                                                 47110025
+                                                                        47120025
+           EXEC SQL                                                     47130025
+              COMMIT                                                    47140025
+           END-EXEC.                                                    47150025
+                                                                        47160025
+           IF SQLCODE = 0                                                       
+               ADD +1              TO PA-COMMIT-CNTR                            
+           ELSE                                                         47170025
+               MOVE 'BAD SQLCODE FOR COMMIT' TO                                 
+                         PV-MESSAGE                                             
+               MOVE '8400-COMMIT-DB2'    TO PV-PARAGRAPH                47200025
+               PERFORM 9900-SQL-ABEND                                   47210025
+           END-IF.                                                      47220025
+                                                                        47240025
+                                                                        47920025
+      *----------------------------------------------------------------*47930025
+      *  FORMAT A DB2 ERROR MESSAGE                                    *47940025
+      *----------------------------------------------------------------*47950025
+       9900-SQL-ABEND.                                                  47970025
+                                                                        47980025
+           MOVE UPC-UPC-ID TO PV-UPC-COMP-10.                                   
+           MOVE PV-UPC-COMP-10 TO PV-DISPLAY-10.                                
+           DISPLAY '***************************************************'47990025
+           DISPLAY '**  ERROR     **'                                   48000030
+           DISPLAY '**  PROGRAM   **  = ' PC-PGM-NAME.                  48010025
+           DISPLAY '**  PARAGRAPH **  = ' PV-PARAGRAPH.                 48020025
+           DISPLAY '**  MESSAGE   **  = ' PV-MESSAGE.                   48030025
+           DISPLAY '**  UPC ID    **  = ' PV-DISPLAY-10.                48040044
+      *                                                                 48050025
+      *  ROUTINE TO CONVERT THE SQLCA INTO A READABLE FORMAT, USING     48060025
+      *  THE CALLED MODULE DSNTIAR.                                     48070025
+      *                                                                 48080025
+           COPY DPPD004.                                                48090025
+                                                                        48100025
+           EXEC SQL                                                     08680024
+                ROLLBACK                                                08690024
+           END-EXEC.                                                    08700024
+                                                                        08710024
+           SET AC-DB2-ERROR TO TRUE.                                    47900025
+           CALL 'ILBOABN0' USING ABEND-CODE.                               CL**1

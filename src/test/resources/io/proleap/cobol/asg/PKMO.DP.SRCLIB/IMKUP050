@@ -1,0 +1,1719 @@
+       IDENTIFICATION DIVISION.                                         00010099
+       PROGRAM-ID.    IMKUP050.                                         00020099
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                          00030099
+       DATE-WRITTEN.  11/23/2001.                                       00040099
+       DATE-COMPILED.                                                   00050099
+                                                                        00060099
+      ******************************************************************00070099
+      * PURPOSE:  THE PROGRAM WILL DELETE SPECIFIC SKUS WHICH HAVE BEEN 00080099
+      *           CHECKED AGAINST THE PERM, PO, RTV, RMS,AND THE VSM    00090099
+      *           SYSTEMS. THE INPUT FILE IS SORTED IN ITEM NUMBER      00100099
+      *           WITHIN STYLE.                                         00110099
+      *                                                                 00120099
+      *           THE PROGRAM WRITES A SKU LOG RECORD TO TSKULOG FOR    00130099
+      *           EACH DELETED SKU.                                     00140099
+      *                                                                 00150099
+      *           CHECKPOINT RESTART LOGIC IS USED IN THE PROGRAM AT THE00160099
+      *           STYLE LEVEL. IF AN ABEND OCCURS, THE CURRENT STYLE    00170099
+      *           IS ROLLED BACK. SUCCESSFUL DELETION WILL COMMIT THE   00180099
+      *           CHANGES TO THE TABLE                                  00190099
+      *                                                                 00200099
+      *           TABLES USED IN IMKUP050 INCLUDE:                      00210099
+      *             TCKRSTCNTL     TSKSTWKI                             00220099
+      *             TCKRSTINF      TSKSTWKS                             00230099
+      *             TSKULOG                                             00240099
+      *             TSK            TUPCSKU                              00250099
+      *             TSKST                                               00260099
+      *             TSKXREF        TPPCPRC                              00270099
+      *             TUPCPLS                                             00280099
+      *             TMDARVS        TUPC                                 00290099
+      *             TVSRSVN        TVNDSTL                              00300099
+      *             TWEBITM                                             00310099
+      *                                                                 00320099
+      ******************************************************************00330099
+      * PROJECT HISTORY:                                                00340099
+      * PROJ      DATE       NAME         DESCRIPTION                   00350099
+      * WR22746    11/23/2001 R.JANSSEN STYLE DELETE - ARK (CREATION)   00360099
+      * WR22746    02/05/2002 B.MCASEY  MODIFIED CODE TO END-DATE VSM   00370099
+      *                                 TABLES INSTEAD OF DELETING ROWS.00380099
+      *                                 AND PERFORM COMMITS AT THE END  00390099
+      *                                 OF A STYLE.                     00400099
+      * PM00456940 03/20/2002 B.MCASEY  COMMENTED SELECT ON TITTXEX DUE 00410099
+      *                                 TO MULTIPLE ROWS PER ITEM #.    00420099
+      * WR24363    12/09/2002 B.MCASEY  REMOVED REFERENCES TO DEPT/SCL  00430099
+      *                                 AND SKU AND REMOVED EXCESS CODE 00440099
+      *                                 TO IMPROVE PERFORMANCE.         00450099
+      * WR24363    05/31/2003 B.MCASEY  MODIFIED DELETE TO USE ITEM NBR 00460099
+      *                                 AND LOOP THRU ALL RENUMBERS TO  00470099
+      *                                 DELETE ALLL ROWS ASSOCIATED TO  00480099
+      *                                 RENUMBERED SKUS.                00490099
+      * WR27472    09/16/2004 B.MCASEY  EFFECIENCY CHANGES. NEW WAY TO  00491099
+      *                                 DELETE FROM TSKST.              00492099
+      * WR28439    03/01/2005 D.THEEL   STORE EXPANSION CHANGES.        00493099
+      * WR28611    04/14/2005 D.THEEL   REMOVE TSKSTMTH.                00494099
+      * WR27766    04/14/2005 D.THEEL   REMOVE TITTXEX.                 00495099
+      * WR27766    05/18/2005 D.THEEL   REMOVE STORE TYPE ON XMT_LOC.   00496099
+      * WR28048    06/06/2005 D.THEEL   PRICE OPTIMIZATION.             00497099
+      * WR29925    04/11/2006 D.THEEL   ADDED LOGIC TO EXPIRE FROM      00498099
+      *                                 TWEBITM.                        00499099
+      * WR29925    04/28/2006 D.THEEL   MOVED LOGIC TO EXPIRE FROM      00499199
+      *                                 TWEBITM SO 89 MESSAGES ARE      00499299
+      *                                 CREATED BEFORE STYLE DELETE     00499399
+      *                                 MESSAGES.                       00499499
+PK0708* INC453753  07/23/2008 P.KEBER   ADD CHECKPOINT RESTART CHECK FOR00499599
+PK0708*                                 NO MORE INPUT RECS ON RESTART.  00499699
+      ******************************************************************00500099
+                                                                        00510099
+       ENVIRONMENT DIVISION.                                            00520099
+       CONFIGURATION SECTION.                                           00530099
+       SOURCE-COMPUTER.    IBM-3090.                                    00540099
+       OBJECT-COMPUTER.    IBM-3090.                                    00550099
+       INPUT-OUTPUT SECTION.                                            00560099
+       FILE-CONTROL.                                                    00570099
+                                                                        00580099
+           SELECT SKU-DELETE-INPUT-FILE                                 00590099
+               ASSIGN TO INP01.                                         00600099
+                                                                        00610099
+       DATA DIVISION.                                                   00620099
+       FILE SECTION.                                                    00630099
+                                                                        00640099
+       FD  SKU-DELETE-INPUT-FILE                                        00650099
+           RECORDING MODE IS F                                          00660099
+           BLOCK CONTAINS 0 RECORDS.                                    00670099
+       01  SKU-DELETE-INPUT-RECORD         PIC X(100).                  00680099
+                                                                        00690099
+      ******************************************************************00700099
+       WORKING-STORAGE SECTION.                                         00710099
+      ******************************************************************00720099
+                                                                        00730099
+       01  ABEND-CODE                      PIC S9(04)    VALUE 0        00740099
+                                                         COMP SYNC.     00750099
+       01  SA-SAVE-AREAS.                                               00760099
+           05  SA-PREV-DTL-KEY.                                         00770099
+               10  SA-SUB-CL-MDSEAR-ID     PIC S9(06)  COMP-3           00780099
+                                                       VALUE 0.         00790099
+               10  SA-VS-ID                PIC S9(09)  COMP             00800099
+                                                       VALUE 0.         00810099
+           05  SA-PREV-ITEM                PIC S9(15)V VALUE 0          00820099
+                                                       COMP-3.          00830099
+                                                                        00840099
+           05  SA-DATE.                                                 00850099
+               10  SA-YEAR                 PIC 9(02)   VALUE 0.         00860099
+               10  SA-MONTH                PIC 9(02)   VALUE 0.         00870099
+               10  SA-DAY                  PIC 9(02)   VALUE 0.         00880099
+                                                                        00890099
+           05  SA-TUPC-UPC-NBR             PIC S9(15)V COMP-3.          00900099
+                                                                        00910099
+1202RM 01  PS-PROGRAM-SWITCHES.                                         00920099
+1202RM     05  PS-TMDARVS-EXPIRED-SW       PIC X(1)      VALUE 'N'.     00930099
+1202RM         88  PS-TMDARVS-EXPIRED                    VALUE 'Y'.     00940099
+0503RM     05  PS-RENUM-TSKXREF-DONE-SW    PIC X(1)      VALUE 'N'.     00950099
+0503RM         88  PS-RENUM-TSKXREF-DONE                 VALUE 'Y'.     00960099
+                                                                        00970099
+       01  PW-PROGRAM-WORKAREA.                                         00980099
+           05  PW-PARA-NAME                PIC X(35).                   00990099
+           05  PW-VSM-RESERVE-CODE         PIC X(1)      VALUE 'N'.     01000099
+               88  PW-VSM-RESERVE-EXISTS                 VALUE 'Y'.     01010099
+               88  PW-NO-VSM-RESERVE-EXISTS              VALUE 'N'.     01020099
+           05  VSM-TUPCPLS-SW              PIC X(1)      VALUE 'N'.     01030099
+               88  VSM-END-OF-TUPCPLS                    VALUE 'Y'.     01040099
+           05  VSM-TMDARVS-SW              PIC X(1)      VALUE 'N'.     01050099
+               88  VSM-TMDARVS-ROWS-EXIST                VALUE 'N'.     01060099
+               88  VSM-NO-TMDARVS-ROWS                   VALUE 'Y'.     01070099
+           05  VSM-TUPC-SW                 PIC X(1)      VALUE 'N'.     01080099
+               88  VSM-NO-TUPC-ROWS                      VALUE 'Y'.     01090099
+           05  PW-PROCESSING-RENUM-SW      PIC X(1)      VALUE 'N'.     01100099
+               88  PW-PROCESSING-RENUM                   VALUE 'Y'.     01110099
+           05  PW-EOF-CODE                 PIC X(1)      VALUE 'N'.     01120099
+               88  PW-EOF                                VALUE 'Y'.     01130099
+           05  PW-EMPTY-FILE-SW            PIC X(1)      VALUE 'N'.     01140099
+               88  PW-EMPTY-FILE                         VALUE 'Y'.     01150099
+           05  PW-FIRST-COMMIT-SW          PIC X(01)     VALUE 'N'.     01160099
+               88  PW-FIRST-COMMIT                       VALUE 'Y'.     01170099
+           05  PW-VNDSTL-BEG-DATE-NULL-IND  PIC S9(04)   VALUE 0        01180099
+                                                         COMP.          01190099
+           05  PW-VNDSTL-END-DATE-NULL-IND  PIC S9(04)   VALUE 0        01200099
+                                                         COMP.          01210099
+           05  PW-UPC-END-DATE-NULL-IND     PIC S9(04)   VALUE 0        01220099
+                                                         COMP.          01230099
+                                                                        01240099
+           05  PW-UPCPLS-END-TMST-NULL-IND  PIC S9(04)   VALUE 0        01250099
+                                                         COMP.          01260099
+           05  PW-SKU                       PIC 9(08)    VALUE 0.       01270099
+                                                                        01290099
+       01  PA-PROGRAM-ACCUMULATORS.                                     01300099
+           05  PA-COUNT                     PIC S9(7)    VALUE 0        01310099
+                                                         COMP-3.        01320099
+           05  PA-MASTER-DELETES            PIC S9(7)     VALUE 0       01330099
+                                                         COMP-3.        01340099
+           05  PA-STORE-DELETES            PIC S9(7)     VALUE 0        01350099
+                                                         COMP-3.        01360099
+           05  PA-PPCPRC-DELETES           PIC S9(7)     VALUE 0        01370099
+                                                         COMP-3.        01380099
+           05  PA-WEEKLY-DELETES           PIC S9(7)     VALUE 0        01390099
+                                                         COMP-3.        01400099
+           05  PA-INVENTORY-DELETES        PIC S9(7)     VALUE 0        01430099
+                                                         COMP-3.        01440099
+           05  PA-UPCSKU-ITEM-DELETES      PIC S9(7)     VALUE 0        01450099
+                                                         COMP-3.        01460099
+           05  PA-TSKULOG-INSERTS          PIC S9(7)     VALUE 0        01490099
+                                                         COMP-3.        01500099
+           05  PA-TVSRSVN-SELECTS          PIC S9(7)     VALUE 0        01510099
+                                                         COMP-3.        01520099
+           05  PA-TUPC-EXPIRES             PIC S9(7)     VALUE 0        01530099
+                                                         COMP-3.        01540099
+           05  PA-TSKXREF-DELETES          PIC S9(7)     VALUE 0        01550099
+                                                         COMP-3.        01560099
+           05  PA-TSKXREF-REN-SELECTS      PIC S9(7)     VALUE 0        01590099
+                                                         COMP-3.        01600099
+           05  PA-TUPC-SELECT1             PIC S9(7)     VALUE 0        01650099
+                                                         COMP-3.        01660099
+           05  PA-TUPCPLS-FETCHS           PIC S9(7)     VALUE 0        01670099
+                                                         COMP-3.        01680099
+           05  PA-TUPCPLS-EXPIRES          PIC S9(7)     VALUE 0        01690099
+                                                         COMP-3.        01700099
+           05  PA-TUPCPLS-DELETES          PIC S9(7)     VALUE 0        01701099
+                                                         COMP-3.        01702099
+           05  PA-TVNDSTL-SELECTS          PIC S9(7)     VALUE 0        01710099
+                                                         COMP-3.        01720099
+           05  PA-TVNDSTL-EXPIRES          PIC S9(7)     VALUE 0        01730099
+                                                         COMP-3.        01740099
+           05  PA-TMDARVS-SELECTS          PIC S9(7)     VALUE 0        01750099
+                                                         COMP-3.        01760099
+           05  PA-TMDARVS-EXPIRES          PIC S9(7)     VALUE 0        01770099
+                                                         COMP-3.        01780099
+           05  PA-TWEBITM-EXPIRES          PIC S9(7)     VALUE 0        01781099
+                                                         COMP-3.        01782099
+           05  PA-RECS-READ-COUNT          PIC S9(7)     VALUE 0        01790099
+                                                         COMP-3.        01800099
+                                                                        01810099
+       01  PV-PROGRAM-VARIABLES.                                        01820099
+           05  PV-DELETE-KOHLS-UPC-COMP3                                01830099
+                                       PIC S9(15)   COMP-3              01840099
+                                                    VALUE 0.            01850099
+           05  PV-DELETE-KOHLS-UPC-NUM PIC 9(15)    VALUE 0.            01860099
+           05  PV-DELETE-ITM-NBR           PIC S9(15)  COMP-3           01940099
+                                                       VALUE 0.         01950099
+           05  PV-CURRENT-TIMESTAMP        PIC X(26)   VALUE SPACES.    01960099
+           05  PV-COMMIT-TIMESTAMP         PIC X(26)   VALUE SPACES.    01970099
+           05  PV-SAVE-UPC-ID              PIC S9(9)   COMP VALUE 0.    01980099
+           05  PV-SAVE-INTR-UPC-ID         PIC S9(9)   COMP VALUE 0.    01990099
+0403RM     05  PV-PREV-LOG-INTR-UPC-ID     PIC S9(9)   COMP VALUE 0.    02000099
+           05  PV-SAVE-UPC-TYP-CDE         PIC X(01)   VALUE SPACE.     02010099
+           05  PV-RETRY-COUNT              PIC S9(04)  VALUE 0          02020099
+                                                       COMP.            02030099
+           05  PV-NULL-TIMESTAMP           PIC S9(04)  COMP VALUE 0.    02040099
+           05  PV-HOLD-SUB-CL-MDSEAR-ID    PIC S9(06)  COMP-3           02050099
+                                                       VALUE 0.         02060099
+           05  PV-HOLD-VS-ID               PIC S9(09)  COMP             02070099
+                                                       VALUE 0.         02080099
+           05  PV-EXPIRD-SUB-CL-MDSEAR-ID  PIC S9(06)  COMP-3           02090099
+                                                       VALUE 0.         02100099
+           05  PV-EXPIRD-VS-ID             PIC S9(09)  COMP             02110099
+                                                       VALUE 0.         02120099
+           05  PV-SAVE-DTL-KEY.                                         02130099
+               10 PV-SAVE-SUB-CL-MDSEAR-ID PIC S9(06)  COMP-3           02140099
+                                                       VALUE 0.         02150099
+               10 PV-SAVE-VS-ID            PIC S9(09)  COMP             02160099
+                                                       VALUE 0.         02170099
+           05  PV-SAVE-ITEM                PIC S9(15)V VALUE 0.         02180099
+                                                                        02184099
+       01  CR-CHECKPOINT-RESTART-AREA.                                  02210099
+           05  CR-AREA-LEN                 PIC S9(04) VALUE +53         02220099
+                                                      COMP.             02230099
+           05  CR-CHECKPOINT-RESTART-VAR.                               02240099
+               10  CR-PREV-DTL-KEY.                                     02250099
+                   15  CR-SUB-CL-MDSEAR-ID PIC S9(06)  COMP-3           02260099
+                                                       VALUE 0.         02270099
+                   15  CR-VS-ID            PIC S9(09)  COMP             02280099
+                                                       VALUE 0.         02290099
+               10  CR-PREV-ITEM            PIC S9(15)V VALUE 0          02300099
+                                                       COMP-3.          02310099
+               10  CR-COMMIT-COUNT         PIC 9(09) VALUE 0.           02320099
+               10  CR-INPUT-READ-COUNT     PIC 9(09) VALUE 0.           02330099
+                                                                        02340099
+       01  PA-PROGRAM-CONSTANTS.                                        02350099
+           05  PC-OPERCO-NBR               PIC X(02)     VALUE '03'.    02360099
+           05  PC-PROGRAM-NAME             PIC X(08)     VALUE          02370099
+               'IMKUP050'.                                              02380099
+           05  PC-JOB-NAME                 PIC X(06)     VALUE          02390099
+               'IMK025'.                                                02400099
+           05  PC-INVEN                    PIC X(9)      VALUE          02410099
+              'TSKSTWKI '.                                              02420099
+           05  PC-MASTER-INDCT             PIC 9         VALUE 1.       02430099
+           05  PC-STORE-INDCT              PIC 9         VALUE 2.       02440099
+           05  PC-WEEK-INDCT               PIC 9         VALUE 3.       02450099
+           05  PC-INVEN-INDCT              PIC 9         VALUE 5.       02470099
+           05  PC-PPCPRC-INDCT             PIC 9         VALUE 6.       02480099
+           05  PC-TUPC-INDCT               PIC 9         VALUE 7.       02490099
+           05  PC-TUPCPLS-INDCT            PIC 9         VALUE 8.       02500099
+           05  PC-UPC-SKU-INDCT            PIC 9         VALUE 9.       02510099
+           05  PC-TMDARVS-INDCT            PIC X         VALUE 'A'.     02520099
+           05  PC-TVNDSTL-INDCT            PIC X         VALUE 'B'.     02530099
+           05  PC-TSKXREF-INDCT            PIC X         VALUE 'D'.     02540099
+           05  PC-STORE                    PIC X(17)     VALUE          02560099
+               'TSKST - STORE    '.                                     02570099
+           05  PC-MSTR                     PIC X(17)     VALUE          02580099
+               'TSK - MASTER     '.                                     02590099
+           05  PC-TSKULOG                  PIC X(17)     VALUE          02600099
+               'TSKULOG - INSERT '.                                     02610099
+           05  PC-WEEK                     PIC X(17)     VALUE          02620099
+               'TSKSTWKS - WKLY  '.                                     02630099
+           05  PC-UPCSKU-ITEM              PIC X(17)     VALUE          02660099
+               'TUPCSKU - ITEM#  '.                                     02670099
+           05  PC-PPCPRC                   PIC X(17)     VALUE          02680099
+               'TPPCPRC - PRC LG '.                                     02690099
+           05  PC-TVSRSVN-S                PIC X(17)     VALUE          02720099
+               'TVSRSVN - RSV SL '.                                     02730099
+           05  PC-TUPC-S1                  PIC X(17)     VALUE          02740099
+0503RM         'TUPC SELECTS     '.                                     02750099
+           05  PC-TUPC-E                   PIC X(17)     VALUE          02790099
+               'TUPC EXPIRES     '.                                     02800099
+           05  PC-TSKXREF-S                PIC X(17)     VALUE          02850099
+               'TSKXREF SELECTS  '.                                     02860099
+           05  PC-TSKXREF-D                PIC X(17)     VALUE          02870099
+               'TSKXREF DELETES  '.                                     02880099
+           05  PC-TUPCPLS-E                PIC X(17)     VALUE          02910099
+               'TUPCPLS EXPIRES  '.                                     02920099
+           05  PC-TWEBITM-E                PIC X(17)     VALUE          02920199
+               'TWEBITM EXPIRES  '.                                     02920299
+           05  PC-TUPCPLS-F                PIC X(17)     VALUE          02921099
+               'UPCPLS FUTR DELTS'.                                     02922099
+           05  PC-TVNDSTL-S                PIC X(17)     VALUE          02930099
+               'TVNDSTL - SELECTS'.                                     02940099
+           05  PC-TVNDSTL-E                PIC X(17)     VALUE          02950099
+               'TVNDSTL -        '.                                     02960099
+           05  PC-TMDARVS-S                PIC X(17)     VALUE          02970099
+               'TMDARVS - SELECTS'.                                     02980099
+           05  PC-TMDARVS-E                PIC X(17)     VALUE          02990099
+               'TMDARVS -        '.                                     03000099
+           05  PC-MAXIMUM-RETRY-COUNT      PIC S9(04)    VALUE +2       03010099
+                                                         COMP SYNC.     03020099
+           05  PC-SKULOG-MSG-TXT-LEN       PIC S9(04)   VALUE +104      03030099
+                                                          COMP.         03040099
+           05  PC-KOHLS-UPC-LOW            PIC S9(15)   COMP-3          03050099
+                                                    VALUE 400000000000. 03060099
+           05  PC-KOHLS-UPC-HIGH           PIC S9(15)   COMP-3          03070099
+                                                    VALUE 499999999999. 03080099
+0904RM     05  PC-COMP-ZERO                PIC S9(04)   VALUE +0        03081099
+0904RM                                                    COMP.         03082099
+                                                                        03090099
+       01  FS-FILE-STATUS-CODES                          COMP-4 SYNC.   03100099
+           05  FS-UPCSKU-ITEM-CODE         PIC S9(9)     VALUE 0.       03210099
+               88  FS-END-OF-UPCSKU-ITEM                 VALUE +100.    03220099
+                                                                        03230099
+       01  DL-DISPLAY-LINE.                                             03240099
+           05  FILLER                      PIC X(15)     VALUE          03250099
+               ' *** NUMBER OF '.                                       03260099
+           05  DL-HOLD-TYPE                PIC X(17)     VALUE SPACES.  03270099
+           05  FILLER                      PIC X(16)     VALUE          03280099
+               ' ROWS DELETED = '.                                      03290099
+           05  DL-HOLD-VALUE               PIC Z,ZZZ,ZZ9 VALUE ZERO.    03300099
+       01  DL-DISPLAY-LINE2.                                            03310099
+           05  FILLER                      PIC X(15)     VALUE          03320099
+               ' *** NUMBER OF '.                                       03330099
+           05  DL-HOLD-TYPE2               PIC X(17)     VALUE SPACES.  03340099
+           05  FILLER                      PIC X(16)     VALUE          03350099
+               ' ROWS EXPIRED = '.                                      03360099
+           05  DL-HOLD-VALUE2              PIC Z,ZZZ,ZZ9 VALUE ZERO.    03370099
+                                                                        03380099
+       01  DL-DISPLAY-LINE3.                                            03390099
+           05  FILLER                      PIC X(15)     VALUE          03400099
+               ' *** NUMBER OF '.                                       03410099
+           05  DL-HOLD-TYPE3               PIC X(17)     VALUE SPACES.  03420099
+           05  FILLER                      PIC X(16)     VALUE          03430099
+               ' ROWS SELECTED= '.                                      03440099
+           05  DL-HOLD-VALUE3              PIC Z,ZZZ,ZZ9 VALUE ZERO.    03450099
+                                                                        03460099
+       01  DL-DISPLAY-LINE4.                                            03470099
+           05  FILLER                      PIC X(15)     VALUE          03480099
+               ' *** NUMBER OF '.                                       03490099
+           05  DL-HOLD-TYPE4               PIC X(17)     VALUE SPACES.  03500099
+           05  FILLER                      PIC X(16)     VALUE          03510099
+               ' ROWS INSERTED= '.                                      03520099
+           05  DL-HOLD-VALUE4              PIC Z,ZZZ,ZZ9 VALUE ZERO.    03530099
+                                                                        03540099
+      ******************************************************************03550099
+      *  COPYBOOK - STYLE DELETE MAINT COPYBOOK                         03560099
+      ******************************************************************03570099
+           COPY IMRD020.                                                03580099
+                                                                        03590099
+                                                                        03650099
+      ******************************************************************03660099
+      *  COPYBOOK - DB2 ERROR MESSAGES FORMAT AREA.                     03670099
+      ******************************************************************03680099
+           COPY DPWS004.                                                03690099
+                                                                        03700099
+      ***************************************************************** 03710099
+      *  DB2 TABLE - DB2 CHECKPOINT RESTART CONTROL TABLE               03720099
+      ***************************************************************** 03730099
+           EXEC SQL                                                     03740099
+               INCLUDE TCKRSTCN                                         03750099
+           END-EXEC.                                                    03760099
+                                                                        03770099
+      ***************************************************************** 03780099
+      *  DB2 TABLE - DB2 CHECKPOINT RESTART INFO TABLE                  03790099
+      ***************************************************************** 03800099
+           EXEC SQL                                                     03810099
+               INCLUDE TCKRSTIN                                         03820099
+           END-EXEC.                                                    03830099
+                                                                        03840099
+      ***************************************************************** 03850099
+      *  DB2 TABLE - TSKULOG                                            03860099
+      ***************************************************************** 03870099
+           EXEC SQL                                                     03880099
+                INCLUDE TSKULOG                                         03890099
+           END-EXEC.                                                    03900099
+                                                                        03910099
+      ***************************************************************** 03920099
+      *  DB2 TABLE - TSK                                                03930099
+      ***************************************************************** 03940099
+           EXEC SQL                                                     03950099
+                INCLUDE TSK                                             03960099
+           END-EXEC.                                                    03970099
+                                                                        03980099
+      ***************************************************************** 03990099
+      *  DB2 TABLE - TSKST                                              04000099
+      ***************************************************************** 04010099
+           EXEC SQL                                                     04020099
+                INCLUDE TSKST                                           04030099
+           END-EXEC.                                                    04040099
+                                                                        04050099
+      ***************************************************************** 04060099
+      *  DB2 TABLE - TSKXREF                                            04070099
+      ***************************************************************** 04080099
+           EXEC SQL                                                     04090099
+                INCLUDE TSKXREF                                         04100099
+           END-EXEC.                                                    04110099
+                                                                        04120099
+      ***************************************************************** 04130099
+      *  DB2 TABLE - TSKSTWKI                                           04140099
+      ***************************************************************** 04150099
+           EXEC SQL                                                     04160099
+                INCLUDE TSKSTWKI                                        04170099
+           END-EXEC.                                                    04180099
+                                                                        04190099
+      ***************************************************************** 04200099
+      *  DB2 TABLE - TSKSTWKS                                           04210099
+      ***************************************************************** 04220099
+           EXEC SQL                                                     04230099
+                INCLUDE TSKSTWKS                                        04240099
+           END-EXEC.                                                    04250099
+                                                                        04330099
+      ***************************************************************** 04340099
+      *  DB2 TABLE - TUPCSKU                                            04350099
+      ***************************************************************** 04360099
+           EXEC SQL                                                     04370099
+                INCLUDE TUPCSKU                                         04380099
+           END-EXEC.                                                    04390099
+                                                                        04400099
+      ***************************************************************** 04480099
+      *  DB2 TABLE - TPPCPRC                                            04490099
+      ***************************************************************** 04500099
+           EXEC SQL                                                     04510099
+                INCLUDE TPPCPRC                                         04520099
+           END-EXEC.                                                    04530099
+                                                                        04540099
+                                                                        04610099
+      ***************************************************************** 04620099
+      *  DB2 TABLE - TUPC                                               04630099
+      ***************************************************************** 04640099
+           EXEC SQL                                                     04650099
+                INCLUDE TUPC                                            04660099
+           END-EXEC.                                                    04670099
+                                                                        04680099
+                                                                        04690099
+      ***************************************************************** 04700099
+      *  DB2 TABLE - TUPCPLS                                            04710099
+      ***************************************************************** 04720099
+           EXEC SQL                                                     04730099
+                INCLUDE TUPCPLS                                         04740099
+           END-EXEC.                                                    04750099
+                                                                        04760099
+      ***************************************************************** 04770099
+      *  DB2 TABLE - TMDARVS                                            04780099
+      ***************************************************************** 04790099
+           EXEC SQL                                                     04800099
+                INCLUDE TMDARVS                                         04810099
+           END-EXEC.                                                    04820099
+                                                                        04830099
+      ***************************************************************** 04840099
+      *  DB2 TABLE - TVSRSVN                                            04850099
+      ***************************************************************** 04860099
+           EXEC SQL                                                     04870099
+                INCLUDE TVSRSVN                                         04880099
+           END-EXEC.                                                    04890099
+                                                                        04900099
+      ***************************************************************** 04910099
+      *  DB2 TABLE - TVNDSTL                                            04920099
+      ***************************************************************** 04930099
+           EXEC SQL                                                     04940099
+                INCLUDE TVNDSTL                                         04950099
+           END-EXEC.                                                    04960099
+                                                                        04961099
+      ***************************************************************** 04962099
+      *  DB2 TABLE - TWEBITM                                            04963099
+      ***************************************************************** 04964099
+           EXEC SQL                                                     04965099
+                INCLUDE TWEBITM                                         04966099
+           END-EXEC.                                                    04967099
+                                                                        04968099
+      ***************************************************************** 04980099
+           EXEC SQL                                                     04990099
+                INCLUDE SQLCA                                           05000099
+           END-EXEC.                                                    05010099
+      ***************************************************************** 05011099
+                                                                        05600099
+      ******************************************************************05610099
+      * TABLE CURSOR  - UPC SKU ITEM CURSOR                             05620099
+      ******************************************************************05630099
+           EXEC SQL                                                     05640099
+                DECLARE UPCSKU_ITEM_CSR CURSOR FOR                      05650099
+                 SELECT UPC_NBR                                         05660099
+                   FROM TUPCSKU                                         05740099
+0503RM            WHERE ITEM_NBR = :PV-DELETE-ITM-NBR                   05750099
+           END-EXEC.                                                    05770099
+                                                                        05780099
+                                                                        05960099
+0503RM******************************************************************06220099
+0503RM* TABLE CURSOR  - TSKXREF CURSOR                                  06230099
+0503RM******************************************************************06240099
+0503RM     EXEC SQL                                                     06250099
+0503RM         DECLARE TSKXREF_CSR CURSOR FOR                           06260099
+0503RM            SELECT ITM_NBR                                        06270099
+0503RM              FROM TSKXREF                                        06280099
+0503RM             WHERE INTR_UPC_ID    = :IM020-INTR-UPC-ID            06290099
+0503RM               AND SKU_STAT_CDE   = '98'                          06300099
+0503RM     END-EXEC.                                                    06310099
+                                                                        06320099
+      ******************************************************************06331099
+      * SQL ERROR HANDLING ARGUMENTS.......                             06340099
+      ******************************************************************06350099
+           COPY SQLCA2.                                                 06360099
+                                                                        06370099
+      ******************************************************************06380099
+       PROCEDURE DIVISION.                                              06390099
+      ******************************************************************06400099
+       0000-MAINLINE-PROCESSING.                                        06410099
+                                                                        06420099
+           PERFORM 1000-HOUSEKEEPING.                                   06430099
+                                                                        06440099
+           PERFORM 2000-PROCESS-DELETIONS                               06450099
+             UNTIL PW-EOF.                                              06460099
+                                                                        06470099
+           PERFORM 3000-END-OF-JOB.                                     06480099
+                                                                        06490099
+       9999-EXIT-PROGRAM.                                               06500099
+           GOBACK.                                                      06510099
+                                                                        06520099
+      ******************************************************************06530099
+       1000-HOUSEKEEPING.                                               06540099
+      ******************************************************************06550099
+                                                                        06560099
+           DISPLAY '*******************************************'.       06570099
+           DISPLAY '* IMKUP050 - START                        *'.       06580099
+           DISPLAY '*******************************************'.       06590099
+                                                                        06600099
+           MOVE '*1000-HOUSEKEEPING.              *' TO PW-PARA-NAME.   06610099
+                                                                        06620099
+      *     IF PROGRAM IS IN A RESTART STATUS - SELECT SAVED DATA FROM *06630099
+      *     THE RESTART INFO TABLE.  RESTART = STAT CODE OF 9          *06640099
+                                                                        06650099
+           PERFORM 6050-INIT-CHECKPOINT-SELECT.                         06660099
+                                                                        06670099
+           IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                           06680099
+               PERFORM 6100-SELECT-RESTART-INFO                         06690099
+               MOVE TCKRSTINF-WORK-STRG-DESC-TEXT TO                    06700099
+                    CR-CHECKPOINT-RESTART-VAR                           06710099
+               MOVE CR-PREV-DTL-KEY     TO SA-PREV-DTL-KEY              06720099
+               MOVE CR-PREV-ITEM        TO SA-PREV-ITEM                 06730099
+           ELSE                                                         06740099
+               SET PW-FIRST-COMMIT TO TRUE                              06750099
+               MOVE 0 TO SA-PREV-ITEM                                   06760099
+           END-IF.                                                      06770099
+                                                                        06780099
+           OPEN INPUT  SKU-DELETE-INPUT-FILE.                           06790099
+                                                                        06800099
+           ACCEPT SA-DATE FROM DATE.                                    06810099
+           DISPLAY 'CURRENT DATE = ' SA-DATE.                           06820099
+           MOVE 0        TO PA-RECS-READ-COUNT.                         06830099
+                                                                        06840099
+           IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                           06850099
+             PERFORM 1500-READ-SKU-DELETE-FILE                          06860099
+               UNTIL PV-SAVE-DTL-KEY > CR-PREV-DTL-KEY                  06870099
+                  OR PW-EOF                                             06880099
+             DISPLAY '** IMKUP050 CHECKPOINT/RESTART        **'         06890099
+             DISPLAY '** -LAST DEPT/CLASS/SEQ/ITEM COMMIT = **'         06900099
+             DISPLAY 'MDSEAR-ID    ', CR-SUB-CL-MDSEAR-ID               06910099
+             DISPLAY 'VS-ID        ', CR-VS-ID                          06920099
+             DISPLAY 'ITEM:        ', CR-PREV-ITEM                      06930099
+             DISPLAY 'RECORD READ: ', PA-RECS-READ-COUNT                06940099
+             DISPLAY '****'                                             06950099
+           ELSE                                                         06960099
+             PERFORM 1500-READ-SKU-DELETE-FILE                          06970099
+           END-IF.                                                      06980099
+                                                                        06990099
+           IF PW-EOF                                                    07000099
+PK0708       AND TCKRSTCNTL-CKPT-STAT-CODE = '0'                        07001099
+               DISPLAY '**** NO INPUT FILE DATA TO PROCESS ****'        07010099
+               SET PW-EMPTY-FILE TO TRUE                                07020099
+           ELSE                                                         07030099
+               MOVE IM020-SUB-CL-MDSEAR-ID TO PV-HOLD-SUB-CL-MDSEAR-ID  07040099
+               MOVE IM020-VS-ID            TO PV-HOLD-VS-ID             07050099
+               DISPLAY 'COMMITS WILL BE TAKEN AFTER A CHANGE IN STYLE'  07060099
+           END-IF.                                                      07070099
+                                                                        07071099
+0904RM                                                                  07084799
+0904RM                                                                  07089099
+      ******************************************************************07090099
+      * 1500 READ THE SKU DELETION INPUT FILE.                         *07100099
+      ******************************************************************07110099
+       1500-READ-SKU-DELETE-FILE.                                       07120099
+                                                                        07130099
+           MOVE '*1500-READ-SKU-DELETE-FILE.      *' TO PW-PARA-NAME.   07140099
+                                                                        07150099
+           READ SKU-DELETE-INPUT-FILE NEXT RECORD                       07160099
+               INTO IM020-STYLE-DELETE-REC                              07170099
+                   AT END  SET PW-EOF TO TRUE.                          07180099
+                                                                        07190099
+           IF PW-EOF                                                    07200099
+               CONTINUE                                                 07210099
+           ELSE                                                         07220099
+               ADD +1                      TO PA-RECS-READ-COUNT        07230099
+               MOVE IM020-SUB-CL-MDSEAR-ID TO PV-SAVE-SUB-CL-MDSEAR-ID  07240099
+               MOVE IM020-VS-ID            TO PV-SAVE-VS-ID             07250099
+0503RM         MOVE IM020-ITM-NBR          TO PV-DELETE-ITM-NBR         07260099
+           END-IF.                                                      07280099
+                                                                        07290099
+      ******************************************************************07300099
+      * 2000 PROCESS DELETIONS.                                        *07310099
+      *  THIS PARAGRAPH DOES THE ACTUAL DELETIONS OF THE ROWS FROM     *07320099
+      *  ALL THE NECESSARY TABLES.                                     *07330099
+      *  FOR EACH UNIQUE DEPARTMENT - CHECK WHETHER THE DEPT HAS BEEN  *07340099
+      *  CONVERTED OVER TO THE VENDOR STYLE MANAGEMENT SYSTEM.         *07350099
+      *  (MDSEDP-VS-MGT-CNVER-IND = 'Y').  IF THE DEPARTMENT HAS NOT   *07360099
+      *  BEEN CONVERTED OVER TO THE NEW VSM SYSTEM, WE WILL PROCESS    *07370099
+      *  OUR DELETIONS AS BEFORE, DELETING FROM FASHION SALES AND      *07380099
+      *  PERM PRICE TABLES.  IF THE DEPT HAS BEEN CONVERTED TO VSM     *07390099
+      *  WE WILL ALSO:                                                 *07400099
+      *    - CHECK TO SEE IF A SKU OR STYLE RESERVATION EXISTS         *07410099
+      *        IF IT DOES WE WILL BYPASS DELETION OF THIS SKU BECAUSE  *07420099
+      *           IT MAY BE INVOLVED IN A CURRENTLY RUNNING ONLINE     *07430099
+      *           SESSION OF VENDOR STYLE MANAGEMENT.                  *07440099
+      *        IF IT DOES NOT, "HARD" DELETE ALL INFORMATION RELATED   *07450099
+      *           TO THE SKU.                                          *07460099
+      ******************************************************************07470099
+       2000-PROCESS-DELETIONS.                                          07480099
+                                                                        07490099
+           MOVE '*2000-PROCESS-DELETIONS.*'  TO PW-PARA-NAME.           07500099
+           MOVE 0                           TO PV-NULL-TIMESTAMP.       07520099
+                                                                        07530099
+      *** CHECK FOR A VSM RESERVATION/CREATE A VSM RESERVATION.         07566099
+           PERFORM 9220-CHECK-VSM.                                      07570099
+           IF PW-NO-VSM-RESERVE-EXISTS                                  07590099
+               PERFORM 9180-INSERT-VSM-RESERVATION                      07600099
+               IF SQLCODE IS EQUAL TO 0                                 07610099
+                 EXEC SQL                                               07620099
+                   OPEN UPCSKU_ITEM_CSR                                 07630099
+                 END-EXEC                                               07640099
+                 MOVE SQLCODE               TO FS-UPCSKU-ITEM-CODE      07650099
+      *** INACTIVATE TWEBITM FIRST SO 89 ITEM BRIDGE RECORD             07660099
+      ***  IS CREATED BEFORE STYLE AND SKU DELETE RECORDS               07670099
+1202RM           IF IM020-SUB-CL-MDSEAR-ID = PV-EXPIRD-SUB-CL-MDSEAR-ID 07670199
+1202RM             AND IM020-VS-ID         = PV-EXPIRD-VS-ID            07670299
+                     CONTINUE                                           07670399
+                 ELSE                                                   07670499
+                     PERFORM 9460-EXPIRE-TWEBITM                        07671099
+                 END-IF                                                 07672099
+1202RM*** TVNDSTL EXPIRATION PROCESS                                    07680099
+1002RM*-- EXPIRE THE TMDARVS ROW                                        07690099
+1002RM*-- CHECK IF THERE ARE ANY ACTIVE ROWS FOR A VS-ID ON TMDARVS     07700099
+1002RM*-- IF NO ACTIVE ROWS FOR A VS-ID ON TMDARVS, EXPIRE TVNDSTL      07710099
+1202RM           IF IM020-SUB-CL-MDSEAR-ID = PV-EXPIRD-SUB-CL-MDSEAR-ID 07720099
+1202RM           AND IM020-VS-ID           = PV-EXPIRD-VS-ID            07730099
+1202RM               CONTINUE                                           07740099
+1202RM           ELSE                                                   07750099
+1202RM               IF PS-TMDARVS-EXPIRED                              07760099
+1202RM                   CONTINUE                                       07770099
+1202RM               ELSE                                               07780099
+1202RM                   PERFORM 9500-EXPIRE-TMDARVS                    07790099
+1202RM                   SET PS-TMDARVS-EXPIRED TO TRUE                 07800099
+1202RM                   MOVE IM020-SUB-CL-MDSEAR-ID TO                 07810099
+1202RM                        PV-EXPIRD-SUB-CL-MDSEAR-ID                07820099
+1202RM                   MOVE IM020-VS-ID          TO                   07830099
+1202RM                        PV-EXPIRD-VS-ID                           07840099
+1202RM               END-IF                                             07850099
+1202RM           END-IF                                                 07860099
+1202RM           SET VSM-TMDARVS-ROWS-EXIST TO TRUE                     07870099
+1202RM           PERFORM 9510-CHECK-TMDARVS                             07880099
+1202RM           IF VSM-NO-TMDARVS-ROWS                                 07890099
+1202RM               MOVE IM020-VS-ID TO VNDSTL-VS-ID                   07900099
+1202RM               PERFORM 9560-EXPIRE-TVNDSTL                        07910099
+1202RM           END-IF                                                 07920099
+                                                                        07930099
+                 PERFORM 9900-EVALUATE-SQLCODE                          07940099
+                 PERFORM 4300-CHECK-FOR-MULTIPLE-UPCS                   07950099
+                   UNTIL FS-END-OF-UPCSKU-ITEM                          07960099
+                                                                        07970099
+                 EXEC SQL                                               07980099
+                   CLOSE UPCSKU_ITEM_CSR                                07990099
+                 END-EXEC                                               08000099
+                                                                        08010099
+      *** SKU DELETE PROCESSING                                         08020099
+                 MOVE SQLCODE               TO FS-UPCSKU-ITEM-CODE      08030099
+                 PERFORM 9900-EVALUATE-SQLCODE                          08040099
+                                                                        08050099
+                 PERFORM 4400-PROCESS-SKU-DELETE                        08060099
+                 PERFORM 9200-DELETE-VSM-RESERVATION                    08070099
+               END-IF                                                   08080099
+                                                                        08090099
+      *** CHECKPOINT RESTART COMMIT LOGIC.                              08100099
+               MOVE IM020-SUB-CL-MDSEAR-ID TO SA-SUB-CL-MDSEAR-ID       08110099
+               MOVE IM020-VS-ID            TO SA-VS-ID                  08120099
+               MOVE IM020-ITM-NBR          TO SA-PREV-ITEM              08130099
+                                                                        08140099
+           END-IF.                                                      08150099
+                                                                        08160099
+      *** READ NEXT RECORD.                                             08170099
+           PERFORM 1500-READ-SKU-DELETE-FILE.                           08180099
+                                                                        08190099
+1202RM     MOVE 'N' TO PS-TMDARVS-EXPIRED-SW.                           08200099
+                                                                        08210099
+      *** ONLY WANT TO COMMIT WHEN THE STYLE CHANGES. THIS WILL         08220099
+      *** ENSURE THAT ALL RECORDS FOR A STYLE ARE COMMITTED AT ONCE.    08230099
+           IF IM020-SUB-CL-MDSEAR-ID = PV-HOLD-SUB-CL-MDSEAR-ID         08240099
+           AND IM020-VS-ID           = PV-HOLD-VS-ID                    08250099
+               CONTINUE                                                 08260099
+           ELSE                                                         08270099
+               PERFORM 6200-COMMIT-PROCESSING                           08280099
+               MOVE IM020-SUB-CL-MDSEAR-ID TO                           08290099
+                    PV-HOLD-SUB-CL-MDSEAR-ID                            08300099
+               MOVE IM020-VS-ID            TO                           08310099
+                    PV-HOLD-VS-ID                                       08320099
+           END-IF.                                                      08330099
+      ******************************************************************08340099
+      * 3000 DISPLAY COUNTS AND CLOSE FILES.                           *08350099
+      ******************************************************************08360099
+       3000-END-OF-JOB.                                                 08370099
+                                                                        08380099
+           CLOSE SKU-DELETE-INPUT-FILE.                                 08390099
+                                                                        08400099
+**TEMP*    PERFORM 9200-DELETE-VSM-RESERVATION.                         08410099
+                                                                        08420099
+           IF PW-EMPTY-FILE                                             08430099
+               CONTINUE                                                 08440099
+           ELSE                                                         08450099
+               MOVE '0' TO TCKRSTCNTL-CKPT-STAT-CODE                    08460099
+               PERFORM 6300-UPDATE-CHECKPOINT-STATUS                    08470099
+           END-IF.                                                      08480099
+                                                                        08490099
+      *--- ARBITRARILY ADDING TO COMMIT COUNT WHEN PROGRAM ENDS         08500099
+1202RM     ADD +1 TO CR-COMMIT-COUNT                                    08510099
+           DISPLAY '*******************************************'.       08520099
+           DISPLAY '* IMKUP050 - DELETE PROGRAM SUMMARY       *'.       08530099
+           DISPLAY '*******************************************'.       08540099
+                                                                        08550099
+           MOVE PC-MSTR                    TO DL-HOLD-TYPE.             08560099
+           MOVE PA-MASTER-DELETES          TO DL-HOLD-VALUE.            08570099
+           DISPLAY DL-DISPLAY-LINE.                                     08580099
+                                                                        08590099
+           MOVE PC-STORE                   TO DL-HOLD-TYPE.             08600099
+           MOVE PA-STORE-DELETES           TO DL-HOLD-VALUE.            08610099
+           DISPLAY DL-DISPLAY-LINE.                                     08620099
+                                                                        08630099
+           MOVE PC-WEEK                    TO DL-HOLD-TYPE.             08640099
+           MOVE PA-WEEKLY-DELETES          TO DL-HOLD-VALUE.            08650099
+           DISPLAY DL-DISPLAY-LINE.                                     08660099
+                                                                        08710099
+           MOVE PC-INVEN                   TO DL-HOLD-TYPE.             08720099
+           MOVE PA-INVENTORY-DELETES       TO DL-HOLD-VALUE.            08730099
+           DISPLAY DL-DISPLAY-LINE.                                     08740099
+                                                                        08750099
+           MOVE PC-UPCSKU-ITEM             TO DL-HOLD-TYPE.             08760099
+           MOVE PA-UPCSKU-ITEM-DELETES     TO DL-HOLD-VALUE.            08770099
+           DISPLAY DL-DISPLAY-LINE.                                     08780099
+                                                                        08790099
+           MOVE PC-PPCPRC                  TO DL-HOLD-TYPE.             08800099
+           MOVE PA-PPCPRC-DELETES          TO DL-HOLD-VALUE.            08810099
+           DISPLAY DL-DISPLAY-LINE.                                     08820099
+                                                                        08830099
+           MOVE PC-TVSRSVN-S               TO DL-HOLD-TYPE3.            08880099
+           MOVE PA-TVSRSVN-SELECTS         TO DL-HOLD-VALUE3.           08890099
+           DISPLAY DL-DISPLAY-LINE3.                                    08900099
+                                                                        08910099
+           MOVE PC-TUPC-S1                 TO DL-HOLD-TYPE3.            08920099
+           MOVE PA-TUPC-SELECT1            TO DL-HOLD-VALUE3.           08930099
+           DISPLAY DL-DISPLAY-LINE3.                                    08940099
+                                                                        08950099
+           MOVE PC-TUPC-E                  TO DL-HOLD-TYPE2.            08960099
+           MOVE PA-TUPC-EXPIRES            TO DL-HOLD-VALUE2.           08970099
+           DISPLAY DL-DISPLAY-LINE2.                                    08980099
+                                                                        08990099
+           MOVE PC-TSKXREF-D               TO DL-HOLD-TYPE.             09040099
+           MOVE PA-TSKXREF-DELETES         TO DL-HOLD-VALUE.            09050099
+           DISPLAY DL-DISPLAY-LINE.                                     09060099
+                                                                        09150099
+           MOVE PC-TUPCPLS-E               TO DL-HOLD-TYPE2.            09200099
+           MOVE PA-TUPCPLS-EXPIRES         TO DL-HOLD-VALUE2.           09210099
+           DISPLAY DL-DISPLAY-LINE2.                                    09220099
+                                                                        09221099
+           MOVE PC-TUPCPLS-F               TO DL-HOLD-TYPE.             09222099
+           MOVE PA-TUPCPLS-DELETES         TO DL-HOLD-VALUE.            09223099
+           DISPLAY DL-DISPLAY-LINE2.                                    09224099
+                                                                        09230099
+0302RM*    MOVE PC-TVNDSTL-S               TO DL-HOLD-TYPE3.            09240099
+0302RM*    MOVE PA-TVNDSTL-SELECTS         TO DL-HOLD-VALUE3.           09250099
+0302RM*    DISPLAY DL-DISPLAY-LINE3.                                    09260099
+                                                                        09270099
+           MOVE PC-TVNDSTL-E               TO DL-HOLD-TYPE2.            09280099
+           MOVE PA-TVNDSTL-EXPIRES         TO DL-HOLD-VALUE2.           09290099
+           DISPLAY DL-DISPLAY-LINE2.                                    09300099
+                                                                        09310099
+1202RM*    MOVE PC-TMDARVS-S               TO DL-HOLD-TYPE3.            09320099
+1202RM*    MOVE PA-TMDARVS-SELECTS         TO DL-HOLD-VALUE3.           09330099
+1202RM*    DISPLAY DL-DISPLAY-LINE3.                                    09340099
+                                                                        09350099
+           MOVE PC-TMDARVS-E               TO DL-HOLD-TYPE2.            09360099
+           MOVE PA-TMDARVS-EXPIRES         TO DL-HOLD-VALUE2.           09370099
+           DISPLAY DL-DISPLAY-LINE2.                                    09380099
+                                                                        09390099
+           MOVE PC-TSKULOG                 TO DL-HOLD-TYPE4.            09400099
+           MOVE PA-TSKULOG-INSERTS         TO DL-HOLD-VALUE4.           09410099
+           DISPLAY DL-DISPLAY-LINE4.                                    09420099
+                                                                        09420199
+           MOVE PC-TWEBITM-E               TO DL-HOLD-TYPE2.            09421099
+           MOVE PA-TWEBITM-EXPIRES         TO DL-HOLD-VALUE2.           09422099
+           DISPLAY DL-DISPLAY-LINE2.                                    09423099
+                                                                        09430099
+           DISPLAY 'COMMITS PERFORMED ' CR-COMMIT-COUNT.                09440099
+           DISPLAY '*******************************************'.       09450099
+           DISPLAY '* IMKUP050 - END                          *'.       09460099
+           DISPLAY '*******************************************'.       09470099
+                                                                        09480099
+      ******************************************************************09490099
+      * 4000 FORMAT AND INSERT TSKULOG INFOMRATION.                     09500099
+      ******************************************************************09510099
+       4000-INSERT-SKU-LOG-INFO.                                        09520099
+                                                                        09530099
+           MOVE '*4000-INSERT-SKU-LOG-INFO.*' TO PW-PARA-NAME.          09540099
+                                                                        09560099
+0403RM*  ONLY ONE LOG RECORD IS WRITTEN FOR EACH INTERNAL UPC ID        09570099
+0403RM     IF IM020-INTR-UPC-ID = PV-PREV-LOG-INTR-UPC-ID               09580099
+0403RM         CONTINUE                                                 09590099
+0403RM     ELSE                                                         09600099
+0403RM         INITIALIZE DCLTSKULOG                                    09610099
+0403RM         MOVE 0                     TO SKULOG-TRN-TMST            09620099
+0403RM         MOVE IM020-INTR-UPC-ID     TO SKULOG-INTR-UPC-ID         09630099
+0403RM         MOVE 'D'                   TO SKULOG-FUNC-CDE            09640099
+0403RM         MOVE 1                     TO SKULOG-MSG-SEQ-NBR         09650099
+0403RM         PERFORM 9780-INSERT-TSKULOG                              09660099
+0403RM         MOVE IM020-INTR-UPC-ID     TO PV-PREV-LOG-INTR-UPC-ID    09670099
+0403RM     END-IF.                                                      09680099
+                                                                        09690099
+                                                                        09970099
+      ******************************************************************10080099
+      * 4100 PROCESS WEEKLY DELETIONS.                                 *10090099
+      ******************************************************************10100099
+       4100-PROCESS-WEEKLY-DELETIONS.                                   10110099
+                                                                        10120099
+           MOVE '*4100-PROCESS-WEEKLY-DELETIONS.  *' TO PW-PARA-NAME.   10130099
+                                                                        10150099
+           PERFORM 9620-DELETE-WEEKLY-SKU.                              10160099
+                                                                        10180099
+      ******************************************************************10300099
+      * 4200 PROCESS INVENTORY DELETIONS.                              *10310099
+      ******************************************************************10320099
+       4200-PROCESS-INV-DELETIONS.                                      10330099
+                                                                        10340099
+           MOVE '*4200-PROCESS-INV-DELETIONS.  *' TO PW-PARA-NAME.      10350099
+                                                                        10370099
+           PERFORM 9640-DELETE-INVENTORY-SKU.                           10380099
+                                                                        10400099
+      ******************************************************************10410099
+      * 4250 PROCESS UPC/SKU DELETES.                                  *10420099
+      ******************************************************************10430099
+       4250-PROC-UPCSKU-ITEM-DELETES.                                   10440099
+                                                                        10450099
+           MOVE '*4250-PROC-UPCSKU-ITEM-DELETES.  *' TO PW-PARA-NAME.   10460099
+                                                                        10670099
+      *** TUPCSKU DELETION PROCESS.....                                 10680099
+           PERFORM 9680-DELETE-UPCSKU-ITEM.                             10690099
+                                                                        10700099
+      *** TUPC DELETION PROCESS.....                                    10710099
+           MOVE PV-DELETE-KOHLS-UPC-COMP3 TO UPC-UPC-NBR.               10720099
+           PERFORM 9280-SELECT-TUPC                                     10730099
+                                                                        10740099
+           IF SQLCODE = 0                                               10750099
+               MOVE UPC-UPC-TYP-CDE          TO PV-SAVE-UPC-TYP-CDE     10760099
+               MOVE UPC-UPC-ID               TO PV-SAVE-UPC-ID          10770099
+               MOVE UPC-INTR-UPC-ID          TO PV-SAVE-INTR-UPC-ID     10780099
+               PERFORM 9300-EXPIRE-TUPC                                 10790099
+      *** TUPCPLS DELETION PROCESS.....                                 10810099
+               IF PV-SAVE-UPC-TYP-CDE = 'R'                             10820099
+                   MOVE PV-SAVE-UPC-ID       TO UPCPLS-UPC-ID           10830099
+               ELSE                                                     10840099
+                   MOVE PV-SAVE-INTR-UPC-ID  TO UPCPLS-UPC-ID           10850099
+               END-IF                                                   10860099
+               MOVE 'N' TO VSM-TUPCPLS-SW                               10870099
+               MOVE 'N' TO VSM-TUPC-SW                                  10880099
+               PERFORM 9420-EXPIRE-TUPCPLS                              10890099
+               PERFORM 9440-DELETE-FUTURE-TUPCPLS                       10900099
+           END-IF.                                                      10940099
+                                                                        10950099
+      ******************************************************************10960099
+      * 4300 CHECK FOR MULTIPLE UPC'S.                                 *10970099
+      *  BEFORE THE PROGRAM CAN DO A BLANKET DELETE FROM THE TUPCSKU   *10980099
+      *  TABLE, THE PROGRAM MUST CHECK TO SEE IF THE SKU WAS RENUMBERED*10990099
+      *  AT ALL.  TO DO THIS, THE PROGRAM MUST CHECK THE KOHL'S UPC    *11000099
+      *  NUMBER IS ON THE TUPCSKU TABLE.  THERE IS A KOHL'S UPC FOR    *11010099
+      *  EACH SKU.  CHECK THE SKU NUMBER EMBEDDED IN THE KOHL'S UPC    *11020099
+      *  NUMBER.  IF THE EMBEDDED SKU DOESN'T MATCH THE SKU THAT THE   *11030099
+      *  PROGRAM IS TRYING TO DELETE, IT IS A RENUMBERED SKU.  GET THE *11040099
+      *  ITEM NUMBER OF THE RENUMBERED SKU FROM THE TSK TABLE AND TRY  *11050099
+      *  TO DELETE THE 'ITEM'.                                         *11060099
+      ******************************************************************11070099
+       4300-CHECK-FOR-MULTIPLE-UPCS.                                    11080099
+                                                                        11090099
+           MOVE '*4300-CHECK-FOR-MULTPLE-UPCS.    *' TO PW-PARA-NAME.   11100099
+                                                                        11120099
+           PERFORM 9660-FETCH-UPCSKU-ITEM.                              11130099
+                                                                        11140099
+           IF FS-END-OF-UPCSKU-ITEM                                     11150099
+               CONTINUE                                                 11160099
+           ELSE                                                         11170099
+               IF PV-DELETE-KOHLS-UPC-COMP3 >= PC-KOHLS-UPC-LOW         11180099
+               AND                                                      11190099
+                  PV-DELETE-KOHLS-UPC-COMP3 <= PC-KOHLS-UPC-HIGH        11200099
+                   PERFORM 4350-CHECK-RENUMBERED-SKU                    11210099
+               ELSE                                                     11220099
+                   MOVE 'N' TO PW-PROCESSING-RENUM-SW                   11230099
+                   PERFORM 4250-PROC-UPCSKU-ITEM-DELETES                11240099
+               END-IF                                                   11250099
+           END-IF.                                                      11260099
+                                                                        11270099
+      ******************************************************************11280099
+      * 4350 CHECK RENUMBERED SKUS.                                    *11290099
+      ******************************************************************11300099
+       4350-CHECK-RENUMBERED-SKU.                                       11310099
+                                                                        11320099
+           MOVE '*4350-CHECK-RENUMBERED-SKU.      *' TO PW-PARA-NAME.   11330099
+                                                                        11350099
+                                                                        11500099
+0503RM     MOVE 'N' TO PS-RENUM-TSKXREF-DONE-SW                         11540099
+0503RM                 PW-PROCESSING-RENUM-SW.                          11550099
+                                                                        11560099
+0503RM     EXEC SQL                                                     11570099
+0503RM          OPEN TSKXREF_CSR                                        11580099
+0503RM     END-EXEC.                                                    11590099
+                                                                        11600099
+0503RM     PERFORM 9700-PROCESS-TSKXREF-CSR                             11610099
+0503RM         UNTIL PS-RENUM-TSKXREF-DONE.                             11620099
+                                                                        11630099
+0503RM     EXEC SQL                                                     11640099
+0503RM          CLOSE TSKXREF_CSR                                       11650099
+0503RM     END-EXEC.                                                    11660099
+                                                                        11670099
+0503RM     IF PW-PROCESSING-RENUM                                       11680099
+0503RM         PERFORM 4250-PROC-UPCSKU-ITEM-DELETES                    11690099
+0503RM         PERFORM 9060-DELETE-SKU-MASTER-RENUM                     11700099
+0503RM     ELSE                                                         11710099
+0503RM         PERFORM 4250-PROC-UPCSKU-ITEM-DELETES                    11720099
+0503RM     END-IF.                                                      11730099
+                                                                        11740099
+                                                                        11810099
+                                                                        12020099
+      ******************************************************************12030099
+      * 4400 PROCESS SKU DELETES.                                      *12040099
+      ******************************************************************12050099
+       4400-PROCESS-SKU-DELETE.                                         12060099
+                                                                        12070099
+      *** TPPCPRC DELETE BY ITEM NUMBER....                             12080099
+           PERFORM 9120-DELETE-PPCPRC-ITEM.                             12081099
+                                                                        12110099
+                                                                        12230099
+      *** TSKXREF DELETION PROCESS.....                                 12240099
+           PERFORM 9040-DELETE-SKUXREF.                                 12270099
+                                                                        12290099
+                                                                        12340099
+      *** TSKST DELETES BY ITEM NUMBER......                            12350099
+0904RM     PERFORM 9160-DELETE-STORE-SKU                                12361099
+                                                                        12380099
+                                                                        12420099
+      *** TSKSTWKS DELETES BY ITEM NUMBER.......                        12430099
+                                                                        12470099
+           PERFORM 4100-PROCESS-WEEKLY-DELETIONS.                       12490099
+                                                                        12510099
+      *** TSKSTWKI DELETES BT ITEM NUMBER......                         12690099
+                                                                        12730099
+           PERFORM 4200-PROCESS-INV-DELETIONS.                          12750099
+                                                                        12770099
+      *** TSK DELETION PROCESS.....                                     12890099
+           PERFORM 9020-DELETE-SKU-MASTER.                              12900099
+           PERFORM 4000-INSERT-SKU-LOG-INFO.                            12910099
+                                                                        12920099
+      * DELETES ALL THE PERM PRICE CHANGE LOG RECORDS FOR A GIVEN ITEM *13010099
+           PERFORM 9120-DELETE-PPCPRC-ITEM.                             13020099
+                                                                        13050099
+      ******************************************************************13060099
+      * 6050 CHECK TABLE FOR RESTART CONDITION.                        *13070099
+      ******************************************************************13080099
+       6050-INIT-CHECKPOINT-SELECT.                                     13090099
+                                                                        13100099
+           MOVE '*6050-INIT-CHECKPOINT-SELECT.    *' TO PW-PARA-NAME.   13110099
+                                                                        13130099
+           EXEC SQL                                                     13140099
+             SELECT  CKPT_STAT_CODE                                     13150099
+               INTO  :TCKRSTCNTL-CKPT-STAT-CODE                         13160099
+               FROM  TCKRSTCNTL                                         13170099
+              WHERE  JOB_NAME  = :PC-JOB-NAME                           13180099
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                       13190099
+           END-EXEC.                                                    13200099
+                                                                        13210099
+           IF SQLCODE = 0                                               13220099
+               CONTINUE                                                 13230099
+           ELSE                                                         13240099
+               DISPLAY '6050-INIT-CHECKPOINT-SELECT'                    13250099
+               PERFORM 9950-SQL-ERROR                                   13260099
+           END-IF.                                                      13270099
+                                                                        13280099
+      ******************************************************************13290099
+      * 6100 SELECT PROGRAM RESTART INFORMATION.                       *13300099
+      ******************************************************************13310099
+       6100-SELECT-RESTART-INFO.                                        13320099
+                                                                        13330099
+           MOVE '*6100-SELECT-RESTART-INFO        *' TO PW-PARA-NAME.   13340099
+                                                                        13360099
+           EXEC SQL                                                     13370099
+             SELECT  WORK_STRG_DESC                                     13380099
+               INTO  :TCKRSTINF-WORK-STRG-DESC                          13390099
+               FROM  TCKRSTINF                                          13400099
+              WHERE  JOB_NAME  = :PC-JOB-NAME                           13410099
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                       13420099
+           END-EXEC.                                                    13430099
+                                                                        13440099
+           IF SQLCODE = 0                                               13450099
+               CONTINUE                                                 13460099
+           ELSE                                                         13470099
+               DISPLAY '6100-SELECT-RESTART-INFO'                       13480099
+               PERFORM 9950-SQL-ERROR                                   13490099
+           END-IF.                                                      13500099
+                                                                        13510099
+      ******************************************************************13520099
+      * 6150 SET THE CURRENT TIMESTAMP.                                *13530099
+      ******************************************************************13540099
+       6150-SET-CURRENT-TIMESTAMP.                                      13550099
+                                                                        13560099
+           MOVE '*6150-SET-CURRENT-TIMESTAMP.    *' TO PW-PARA-NAME.    13570099
+                                                                        13590099
+           EXEC SQL                                                     13600099
+                SET :PV-CURRENT-TIMESTAMP = CURRENT TIMESTAMP           13610099
+           END-EXEC.                                                    13620099
+                                                                        13630099
+           IF SQLCODE = 0                                               13640099
+               CONTINUE                                                 13650099
+           ELSE                                                         13660099
+               PERFORM 9950-SQL-ERROR                                   13670099
+           END-IF.                                                      13680099
+                                                                        13690099
+      ******************************************************************13700099
+      * 6200 COMMIT PROCESSING.                                        *13710099
+      *                                                                *13720099
+      *  THIS PARAGRAPH CHECKS TO SEE IF A COMMIT IS NEEDED AND IF SO  *13730099
+      *  COMMITS THIS UNIT OF WORK. 5150 CURSORS HAVE ALREADY BEEN     *13740099
+      *  CLOSED BY EXPLICT SQL CLOSE STATEMENTS. PLACING THE COMMIT    *13750099
+      *  HERE ASSURES THAT ALL "CHILDREN" ARE DELETED FOR A GIVEN      *13760099
+      *  PARENT.                                                       *13770099
+      *  ==> PERFORMED FROM: 2000-PROCESS-DELETIONS.                   *13780099
+      ******************************************************************13790099
+       6200-COMMIT-PROCESSING.                                          13800099
+                                                                        13810099
+           MOVE '*6200-COMMIT-PROCESSING.        *' TO PW-PARA-NAME.    13820099
+                                                                        13840099
+           PERFORM 6150-SET-CURRENT-TIMESTAMP.                          13850099
+      * COMMITS ARE BASED ON END OF A STYLE                             13860099
+           MOVE SA-PREV-DTL-KEY     TO CR-PREV-DTL-KEY.                 13870099
+           MOVE SA-PREV-ITEM        TO CR-PREV-ITEM.                    13880099
+           MOVE PA-RECS-READ-COUNT  TO CR-INPUT-READ-COUNT.             13890099
+           IF PW-FIRST-COMMIT                                           13900099
+               MOVE '9' TO TCKRSTCNTL-CKPT-STAT-CODE                    13910099
+               PERFORM 6300-UPDATE-CHECKPOINT-STATUS                    13920099
+               MOVE 'N' TO PW-FIRST-COMMIT-SW                           13930099
+           END-IF.                                                      13940099
+           PERFORM 6250-COMMIT.                                         13950099
+                                                                        13960099
+      ******************************************************************13970099
+      * 6250 COMMIT.                                                   *13980099
+      *  PERFORMS AN UPDATE OF THE CHECKPOINT INFORMATION TABLE AND    *13990099
+      *  PERFORMS A COMMIT.                                            *14000099
+      *  ==> PERFORMED FROM: 6200-COMMIT-PROCESSING.                   *14010099
+      ******************************************************************14020099
+       6250-COMMIT.                                                     14030099
+                                                                        14040099
+           MOVE '*6250-COMMIT.                   *' TO PW-PARA-NAME.    14050099
+                                                                        14070099
+           MOVE CR-CHECKPOINT-RESTART-AREA TO                           14080099
+                TCKRSTINF-WORK-STRG-DESC.                               14090099
+                                                                        14100099
+           EXEC SQL                                                     14110099
+             UPDATE TCKRSTINF                                           14120099
+                SET WORK_STRG_DESC = :TCKRSTINF-WORK-STRG-DESC          14130099
+              WHERE JOB_NAME       = :PC-JOB-NAME                       14140099
+                AND PLAN_NAME      = :PC-PROGRAM-NAME                   14150099
+           END-EXEC.                                                    14160099
+                                                                        14170099
+           IF SQLCODE = 0                                               14180099
+               CONTINUE                                                 14190099
+           ELSE                                                         14200099
+               PERFORM 9950-SQL-ERROR                                   14210099
+           END-IF.                                                      14220099
+                                                                        14230099
+           EXEC SQL                                                     14240099
+               COMMIT                                                   14250099
+           END-EXEC.                                                    14260099
+                                                                        14270099
+           IF SQLCODE = 0                                               14280099
+               ADD +1 TO CR-COMMIT-COUNT                                14290099
+           ELSE                                                         14300099
+               PERFORM 9950-SQL-ERROR                                   14310099
+           END-IF.                                                      14320099
+                                                                        14330099
+      ******************************************************************14340099
+      * 6300 UPDATE CHECKPOINT CONTROL STATUS.                         *14350099
+      *  ==> PERFORMED FROM: 6200-COMMIT-PROCESSING                    *14360099
+      ******************************************************************14370099
+       6300-UPDATE-CHECKPOINT-STATUS.                                   14380099
+                                                                        14390099
+           MOVE '*6300-UPDATE-CHECKPOINT-STATUS.  *' TO PW-PARA-NAME.   14400099
+                                                                        14420099
+           EXEC SQL                                                     14430099
+             UPDATE  TCKRSTCNTL                                         14440099
+                SET  CKPT_STAT_CODE = :TCKRSTCNTL-CKPT-STAT-CODE        14450099
+              WHERE  JOB_NAME  = :PC-JOB-NAME                           14460099
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                       14470099
+           END-EXEC.                                                    14480099
+                                                                        14490099
+           IF SQLCODE = 0                                               14500099
+               CONTINUE                                                 14510099
+           ELSE                                                         14520099
+               PERFORM 9950-SQL-ERROR                                   14530099
+           END-IF.                                                      14540099
+                                                                        14550099
+      ******************************************************************14560099
+      * 9020 DELETE A ROW FROM THE SKU TABLE.                          *14570099
+      ******************************************************************14580099
+       9020-DELETE-SKU-MASTER.                                          14590099
+                                                                        14600099
+           MOVE '*9020-DELETE-SKU-MASTER.         *' TO PW-PARA-NAME.   14610099
+                                                                        14630099
+           EXEC SQL                                                     14640099
+                DELETE FROM TSK                                         14650099
+0503RM           WHERE ITEM_NMBR = :PV-DELETE-ITM-NBR                   14670099
+           END-EXEC.                                                    14680099
+                                                                        14690099
+                                                                        14710099
+           PERFORM 9900-EVALUATE-SQLCODE.                               14750099
+0503RM     EVALUATE TRUE                                                14760099
+0503RM        WHEN SQLCODE = +0                                         14770099
+0503RM            ADD 1                  TO PA-MASTER-DELETES           14780099
+0503RM     END-EVALUATE.                                                14790099
+                                                                        14800099
+      ******************************************************************14810099
+      * 9040 DELETE A ROW FROM THE SKU X-REF TABLE.                    *14820099
+      ******************************************************************14830099
+       9040-DELETE-SKUXREF.                                             14840099
+                                                                        14850099
+           MOVE '*9040-DELETE-SKUXREF           *' TO PW-PARA-NAME.     14860099
+                                                                        14880099
+           EXEC SQL                                                     14890099
+                DELETE FROM TSKXREF                                     14900099
+0403RM           WHERE INTR_UPC_ID = :IM020-INTR-UPC-ID                 14910099
+           END-EXEC.                                                    14920099
+                                                                        14990099
+           PERFORM 9900-EVALUATE-SQLCODE.                               15000099
+0503RM     EVALUATE TRUE                                                15010099
+0503RM        WHEN SQLCODE = +0                                         15020099
+0503RM            ADD SQLERRD(3)        TO PA-TSKXREF-DELETES           15030099
+0503RM     END-EVALUATE.                                                15040099
+                                                                        15050099
+      ******************************************************************15060099
+      * 9060 DELETE A ROW FROM THE SKU TABLE.                          *15070099
+      ******************************************************************15080099
+       9060-DELETE-SKU-MASTER-RENUM.                                    15090099
+                                                                        15100099
+           MOVE '*9060-DELETE-SKU-MASTER-RENUM.   *' TO PW-PARA-NAME.   15110099
+                                                                        15130099
+           EXEC SQL                                                     15140099
+                DELETE FROM TSK                                         15150099
+0503RM           WHERE ITEM_NMBR   = :PV-DELETE-ITM-NBR                 15170099
+           END-EXEC.                                                    15210099
+                                                                        15220099
+                                                                        15230099
+           PERFORM 9900-EVALUATE-SQLCODE.                               15240099
+0503RM     EVALUATE TRUE                                                15250099
+0503RM        WHEN SQLCODE = +0                                         15260099
+0503RM            ADD 1                  TO PA-MASTER-DELETES           15270099
+0503RM     END-EVALUATE.                                                15280099
+                                                                        15290099
+      ******************************************************************15300099
+      * 9080 DELETE A ROW FROM THE SKU X-REF TABLE.                    *15310099
+      ******************************************************************15320099
+       9080-DELETE-SKUXREF-RENUM.                                       15330099
+                                                                        15340099
+           MOVE '*9080-DELETE-SKUXREF           *' TO PW-PARA-NAME.     15350099
+                                                                        15370099
+           EXEC SQL                                                     15380099
+                DELETE FROM TSKXREF                                     15390099
+0403RM           WHERE ITM_NBR     = :PV-DELETE-ITM-NBR                 15400099
+0403RM             AND SKU_STAT_CDE = '98'                              15410099
+           END-EXEC.                                                    15460099
+                                                                        15470099
+                                                                        15490099
+           PERFORM 9900-EVALUATE-SQLCODE.                               15500099
+0503RM     EVALUATE TRUE                                                15510099
+0503RM        WHEN SQLCODE = +0                                         15520099
+0503RM         ADD 1                       TO PA-TSKXREF-DELETES        15530099
+0503RM     END-EVALUATE.                                                15540099
+                                                                        15550099
+                                                                        15790099
+      ******************************************************************15800099
+      * 9120 PERM PRICE HISTORY ROWS DELETED.                          *15810099
+      ******************************************************************15820099
+       9120-DELETE-PPCPRC-ITEM.                                         15830099
+                                                                        15840099
+           MOVE '*9120-DELETE-PPCPRC-ITEM.        *' TO PW-PARA-NAME.   15850099
+                                                                        15870099
+           EXEC SQL                                                     15880099
+                DELETE FROM TPPCPRC                                     15890099
+0503RM            WHERE TSK_ITM_NBR = :PV-DELETE-ITM-NBR                15891099
+           END-EXEC                                                     15910099
+                                                                        15920099
+           EVALUATE TRUE                                                15930099
+              WHEN SQLCODE = +0                                         15940099
+                  ADD SQLERRD(3)         TO PA-PPCPRC-DELETES           15950099
+           END-EVALUATE.                                                15960099
+                                                                        15970099
+           PERFORM 9900-EVALUATE-SQLCODE.                               15980099
+                                                                        15990099
+                                                                        16230099
+      ******************************************************************16240099
+      * 9160 STORE ROW DELETED.                                        *16250099
+      ******************************************************************16260099
+       9160-DELETE-STORE-SKU.                                           16270099
+                                                                        16280099
+           MOVE '*9160-DELETE-STORE-SKU.          *' TO PW-PARA-NAME.   16290099
+                                                                        16302099
+           EXEC SQL                                                     16310099
+                DELETE FROM TSKST                                       16320099
+0904RM           WHERE ITEM_NMBR = :IM020-ITM-NBR                       16331099
+           END-EXEC.                                                    16340099
+                                                                        16350099
+                                                                        16370099
+           PERFORM 9900-EVALUATE-SQLCODE.                               16380099
+0503RM     EVALUATE TRUE                                                16390099
+0503RM        WHEN SQLCODE = +0                                         16400099
+0503RM            ADD SQLERRD(3)        TO PA-STORE-DELETES             16410099
+0503RM     END-EVALUATE.                                                16420099
+                                                                        16430099
+                                                                        16432099
+      ******************************************************************16440099
+       9180-INSERT-VSM-RESERVATION.                                     16450099
+      ******************************************************************16460099
+                                                                        16470099
+           MOVE '*9180-INSERT-VSM-RESERVATION     *' TO PW-PARA-NAME.   16480099
+                                                                        16500099
+1202RM     MOVE IM020-ENT-ID TO VSRSVN-ENT-ID.                          16510099
+1202RM     MOVE IM020-VS-NBR TO VSRSVN-VS-NBR.                          16520099
+1202RM     MOVE IM020-VS-ID  TO VSRSVN-VS-ID.                           16530099
+                                                                        16540099
+           EXEC SQL                                                     16550099
+               INSERT INTO TVSRSVN                                      16560099
+                 (ENT_ID                                                16570099
+                 ,VS_NBR                                                16580099
+                 ,VS_ID                                                 16590099
+                 ,RSRV_TYP_CDE                                          16600099
+                 ,SKU_STRGY_CDE                                         16610099
+                 ,DEPT_MDSEAR_ID                                        16620099
+                 ,MAJ_CL_MDSEAR_ID                                      16630099
+                 ,SUB_CL_MDSEAR_ID                                      16640099
+                 ,RSRV_BY_USR_ID                                        16650099
+                 ,RSRV_TMST)                                            16660099
+               VALUES                                                   16670099
+1202RM          (:VSRSVN-ENT-ID                                         16680099
+1202RM          ,:VSRSVN-VS-NBR                                         16690099
+1202RM          ,:VSRSVN-VS-ID                                          16700099
+                 ,'M'                                                   16740099
+                 ,' '                                                   16750099
+                 ,0.0                                                   16760099
+                 ,0.0                                                   16770099
+                 ,0.0                                                   16780099
+                 ,'IMKUP050'                                            16790099
+                 ,CURRENT TIMESTAMP)                                    16800099
+           END-EXEC.                                                    16810099
+                                                                        16820099
+      ******************************************************************16830099
+      *9200-DELETE-VSM-RESERVATION.                                     16840099
+      ******************************************************************16850099
+       9200-DELETE-VSM-RESERVATION.                                     16860099
+                                                                        16870099
+           MOVE '*9200-DELETE-VSM-RESERVATION     *' TO PW-PARA-NAME.   16880099
+                                                                        16900099
+           EXEC SQL                                                     16910099
+               DELETE FROM TVSRSVN                                      16920099
+                 WHERE RSRV_BY_USR_ID = 'IMKUP050'                      16930099
+           END-EXEC.                                                    16940099
+                                                                        16950099
+           PERFORM 9900-EVALUATE-SQLCODE.                               17000099
+                                                                        17010099
+      ******************************************************************17020099
+      * 9220 CHECK FOR VSM SKU/STYLE RESERVATIONS.                     *17030099
+      ******************************************************************17040099
+       9220-CHECK-VSM.                                                  17050099
+                                                                        17060099
+           MOVE '*9220-CHECK-VSM.                 *' TO PW-PARA-NAME.   17070099
+                                                                        17090099
+                                                                        17110099
+           PERFORM 9260-CHECK-VSM-STYLE-RESERVE.                        17130099
+                                                                        17150099
+                                                                        17470099
+      ******************************************************************17480099
+      * 9260 CHECK VSM STYLE RESERVE.                                  *17490099
+      * IF ROW IS FOUND ON TVSRSVN FOR CURRENT STYLE - IT MEANS IT IS  *17500099
+      * PRESENTLY BEING  UPDATED ONLINE BY A USER OF THE VSM SYSTEM.   *17510099
+      ******************************************************************17520099
+       9260-CHECK-VSM-STYLE-RESERVE.                                    17530099
+                                                                        17540099
+           MOVE '*9260-CHECK-VSM-STYLE-RESERVE.   *' TO PW-PARA-NAME.   17550099
+                                                                        17570099
+           MOVE IM020-ENT-ID        TO VNDSTL-ENT-ID.                   17580099
+           MOVE IM020-VS-ID         TO VNDSTL-VS-ID.                    17590099
+                                                                        17600099
+           EXEC SQL                                                     17610099
+               SELECT B.VS_ID,                                          17620099
+                      B.VS_NBR                                          17630099
+               INTO :VSRSVN-VS-ID,                                      17640099
+                    :VSRSVN-VS-NBR                                      17650099
+               FROM TVNDSTL A                                           17660099
+                  , TVSRSVN B                                           17670099
+               WHERE A.VS_ID  = B.VS_ID                                 17680099
+                 AND A.ENT_ID = B.ENT_ID                                17690099
+                 AND A.VS_ID  = :IM020-ENT-ID                           17700099
+                 AND A.ENT_ID = :IM020-VS-ID                            17710099
+           END-EXEC.                                                    17720099
+                                                                        17730099
+           EVALUATE TRUE                                                17740099
+               WHEN SQLCODE = 0                                         17750099
+                 SET PW-VSM-RESERVE-EXISTS TO TRUE                      17760099
+                 ADD 1 TO PA-TVSRSVN-SELECTS                            17770099
+               WHEN SQLCODE = +100                                      17780099
+                 SET PW-NO-VSM-RESERVE-EXISTS TO TRUE                   17790099
+                 ADD 1 TO PA-TVSRSVN-SELECTS                            17800099
+               WHEN SQLCODE NOT = 0 OR +100                             17810099
+                 DISPLAY '*** ENT ID:     ', IM020-ENT-ID               17820099
+                 DISPLAY '*** VS ID:      ', IM020-VS-ID                17830099
+                 PERFORM 9950-SQL-ERROR                                 17840099
+           END-EVALUATE.                                                17850099
+                                                                        17860099
+      ******************************************************************17870099
+      * 9280 SELECT THE ACTIVE CORRESPONDING TUPC ROW.                 *17880099
+      ******************************************************************17890099
+       9280-SELECT-TUPC.                                                17900099
+                                                                        17910099
+           MOVE '*9280-SELECT-TUPC.   *' TO PW-PARA-NAME.               17920099
+                                                                        17940099
+           EXEC SQL                                                     17950099
+               SELECT UPC_ID                                            17960099
+                     ,UPC_NBR                                           17970099
+                     ,INTR_UPC_ID                                       17980099
+                     ,UPC_TYP_CDE                                       17990099
+                INTO  :UPC-UPC-ID                                       18000099
+                     ,:UPC-UPC-NBR                                      18010099
+                     ,:UPC-INTR-UPC-ID                                  18020099
+                     ,:UPC-UPC-TYP-CDE                                  18030099
+                 FROM TUPC                                              18040099
+                 WHERE UPC_NBR      = :UPC-UPC-NBR                      18050099
+                   AND (EFF_END_DTE IS NULL OR                          18060099
+                        EFF_END_DTE > CURRENT DATE)                     18070099
+           END-EXEC.                                                    18080099
+                                                                        18090099
+           ADD 1 TO PA-TUPC-SELECT1                                     18100099
+                                                                        18110099
+           PERFORM 9900-EVALUATE-SQLCODE.                               18120099
+                                                                        18130099
+      ******************************************************************18140099
+      * 9300 EXPIRE TUPC.                                              *18150099
+      * DELETE THE ACTIVE CORRESPONDING TUPC ROW BY SETTING THE        *18160099
+      * EFFECTIVE END DATE EQUAL TO THE SYSTEM DATE.                   *18170099
+      ******************************************************************18180099
+       9300-EXPIRE-TUPC.                                                18190099
+                                                                        18200099
+           MOVE '*9300-EXPIRE-TUPC.   *' TO PW-PARA-NAME.               18210099
+                                                                        18230099
+           EXEC SQL                                                     18240099
+               UPDATE TUPC                                              18250099
+                   SET EFF_END_DTE        = CURRENT DATE                18260099
+                      ,LAST_UPD_BY_USR_ID = 'IMKUP050'                  18270099
+                      ,LAST_UPD_TMST      = CURRENT TIMESTAMP           18280099
+                   WHERE UPC_NBR      = :UPC-UPC-NBR                    18290099
+                     AND (EFF_END_DTE IS NULL OR                        18300099
+                          EFF_END_DTE > CURRENT DATE)                   18310099
+           END-EXEC.                                                    18320099
+                                                                        18330099
+                                                                        18350099
+           PERFORM 9900-EVALUATE-SQLCODE.                               18360099
+0503RM     EVALUATE TRUE                                                18370099
+0503RM        WHEN SQLCODE = +0                                         18380099
+0503RM            ADD +1                 TO PA-TUPC-EXPIRES             18390099
+0503RM     END-EVALUATE.                                                18400099
+                                                                        18410099
+                                                                        18420099
+      ******************************************************************19240099
+      * 9420 EXPIRE CURRENT TUPCPLS.                                   *19250099
+      ******************************************************************19260099
+       9420-EXPIRE-TUPCPLS.                                             19270099
+                                                                        19280099
+           MOVE '*9420-EXPIRE-TUPCPLS*' TO PW-PARA-NAME.                19290099
+                                                                        19310099
+           EXEC SQL                                                     19320099
+               UPDATE TUPCPLS                                           19330099
+                   SET EFF_END_TMST  = CURRENT TIMESTAMP                19340099
+                   WHERE UPC_ID      = :UPCPLS-UPC-ID                   19350099
+                     AND OPERCO_NBR  = '03'                             19360099
+                      AND EFF_BEG_TMST <= CURRENT TIMESTAMP             19370099
+                      AND (EFF_END_TMST IS NULL OR                      19380099
+                           EFF_END_TMST >= CURRENT TIMESTAMP)           19390099
+           END-EXEC.                                                    19400099
+                                                                        19410099
+                                                                        19430099
+           PERFORM 9900-EVALUATE-SQLCODE.                               19440099
+0403RM     IF SQLCODE = 0                                               19450099
+0403RM         ADD SQLERRD(3) TO PA-TUPCPLS-EXPIRES                     19460099
+0403RM     END-IF.                                                      19470099
+                                                                        19480099
+      ******************************************************************19500099
+      * 9440 DELETE FUTURE TUPCPLS ROWS.                               *19510099
+      ******************************************************************19520099
+       9440-DELETE-FUTURE-TUPCPLS.                                      19521099
+                                                                        19540099
+           MOVE '*9440-DELETE-FUTURE-TUPCPLS*' TO PW-PARA-NAME.         19550099
+                                                                        19560099
+           EXEC SQL                                                     19570099
+               DELETE FROM TUPCPLS                                      19580099
+               WHERE UPC_ID      = :UPCPLS-UPC-ID                       19600099
+                 AND OPERCO_NBR  = '03'                                 19610099
+                 AND EFF_BEG_TMST > CURRENT TIMESTAMP                   19620099
+                 AND EFF_END_TMST > CURRENT TIMESTAMP                   19630099
+           END-EXEC.                                                    19650099
+                                                                        19660099
+                                                                        19670099
+           PERFORM 9900-EVALUATE-SQLCODE.                               19680099
+0403RM     IF SQLCODE = 0                                               19690099
+0403RM         ADD SQLERRD(3) TO PA-TUPCPLS-DELETES                     19700099
+0403RM     END-IF.                                                      19701099
+                                                                        19702099
+      ******************************************************************19704099
+      * 9460 EXPIRE TWEBITM.                                           *19705099
+      ******************************************************************19706099
+       9460-EXPIRE-TWEBITM.                                             19706199
+                                                                        19708099
+           MOVE '*9460-EXPIRE-TWEBITM*' TO PW-PARA-NAME.                19709099
+           MOVE IM020-SUB-CL-MDSEAR-ID TO UPC-SUB-CL-MDSEAR-ID.         19709199
+           MOVE IM020-VS-ID TO UPC-VS-ID.                               19709299
+                                                                        19709399
+           EXEC SQL                                                     19709499
+               UPDATE TWEBITM A                                         19709599
+                 SET EFF_END_TMST  = CURRENT TIMESTAMP                  19709699
+                    ,WEB_ITM_DLTD_IND = 'Y'                             19709799
+                 WHERE EFF_BEG_TMST <= CURRENT TIMESTAMP                19709999
+                   AND (EFF_END_TMST IS NULL OR                         19710099
+                        EFF_END_TMST >= CURRENT TIMESTAMP)              19710199
+                   AND EXISTS                                           19710299
+                   (SELECT 1                                            19710399
+                    FROM TUPC B                                         19710499
+                    WHERE B.VS_ID = :UPC-VS-ID                          19710599
+                    AND B.SUB_CL_MDSEAR_ID = :UPC-SUB-CL-MDSEAR-ID      19710699
+                    AND A.INTR_UPC_ID = B.UPC_ID                        19710799
+                    AND B.EFF_END_DTE IS NULL)                          19710899
+           END-EXEC.                                                    19711399
+                                                                        19711499
+                                                                        19712099
+           PERFORM 9900-EVALUATE-SQLCODE.                               19713099
+0403RM     IF SQLCODE = 0                                               19714099
+0403RM         ADD SQLERRD(3) TO PA-TWEBITM-EXPIRES                     19715099
+0403RM     END-IF.                                                      19716099
+                                                                        19717099
+                                                                        19720099
+      ******************************************************************19920099
+      * 9500 EXPIRE TMDARVS.                                           *19930099
+      * BECAUSE THERE ARE NO OTHER ACTIVE TUPC ROWS REMAINING ON TUPC  *19940099
+      * FOR THE CURRENT STYLE WITHIN THE CURRENT SUBCLASS, EXPIRE THE  *19950099
+      * TMDARVS ROW.                                                   *19960099
+      ******************************************************************19970099
+       9500-EXPIRE-TMDARVS.                                             19980099
+                                                                        19990099
+           MOVE '*9500-EXPIRE-TMDARVS.            *' TO PW-PARA-NAME.   20000099
+                                                                        20020099
+           INITIALIZE PV-RETRY-COUNT.                                   20030099
+                                                                        20040099
+           EXEC SQL                                                     20050099
+               UPDATE TMDARVS                                           20060099
+                 SET ACTV_IND = 'N'                                     20070099
+                 WHERE SUB_CL_MDSEAR_ID = :IM020-SUB-CL-MDSEAR-ID       20080099
+                   AND VS_ID              = :IM020-VS-ID                20090099
+                   AND ACTV_IND           = 'Y'                         20100099
+           END-EXEC.                                                    20110099
+                                                                        20120099
+           PERFORM 9900-EVALUATE-SQLCODE.                               20130099
+           IF SQLCODE = 0                                               20140099
+               ADD 1 TO PA-TMDARVS-EXPIRES                              20150099
+           END-IF.                                                      20160099
+                                                                        20170099
+                                                                        20180099
+      ******************************************************************20190099
+      * 9510 CHECK FOR THE EXISTENCE OF ROWS FOR A VS-ID ON TMDARVS     20200099
+      ******************************************************************20210099
+       9510-CHECK-TMDARVS.                                              20220099
+                                                                        20230099
+0302RM     MOVE '*9510-CHECK-TMDARVS.             *' TO PW-PARA-NAME.   20240099
+                                                                        20260099
+           EXEC SQL                                                     20270099
+             SELECT 1                                                   20280099
+               INTO :PA-COUNT                                           20290099
+               FROM SYSIBM.SYSDUMMY1                                    20300099
+              WHERE EXISTS                                              20310099
+                   (SELECT 1                                            20320099
+                       FROM TMDARVS                                     20330099
+                       WHERE VS_ID    = :IM020-VS-ID                    20340099
+                         AND ACTV_IND = 'Y')                            20350099
+           END-EXEC.                                                    20360099
+                                                                        20410099
+                                                                        20440099
+           EVALUATE TRUE                                                20480099
+               WHEN SQLCODE = 0 AND PA-COUNT > 0                        20490099
+                 CONTINUE                                               20500099
+               WHEN SQLCODE = 0 AND PA-COUNT = 0                        20510099
+0302RM         WHEN SQLCODE = +100                                      20530099
+                 SET VSM-NO-TMDARVS-ROWS TO TRUE                        20540099
+               WHEN OTHER                                               20550099
+                 PERFORM 9900-EVALUATE-SQLCODE                          20560099
+           END-EVALUATE.                                                20570099
+                                                                        20580099
+                                                                        21010099
+      ******************************************************************21020099
+      * 9560 EXPIRE TVNDSTL.                                           *21030099
+      * BECAUSE THERE ARE NO OTHER ACTIVE MERCHANDISE AREA/VENDOR      *21040099
+      * STYLE ROWS FOR THE CURRENT STYLE, EXPIRE THE TVNDSTL ROW.      *21050099
+      ******************************************************************21060099
+       9560-EXPIRE-TVNDSTL.                                             21070099
+                                                                        21080099
+           MOVE '*9560-EXPIRE-TVNDSTL.            *' TO PW-PARA-NAME.   21090099
+           MOVE PC-PROGRAM-NAME     TO VNDSTL-LAST-UPD-BY-USR-ID.       21110099
+                                                                        21120099
+           EXEC SQL                                                     21130099
+               UPDATE TVNDSTL                                           21140099
+               SET EFF_END_DTE        = CURRENT DATE                    21150099
+                  ,LAST_UPD_BY_USR_ID = :VNDSTL-LAST-UPD-BY-USR-ID      21160099
+                  ,LAST_UPD_TMST      = CURRENT TIMESTAMP               21170099
+               WHERE VS_ID            = :VNDSTL-VS-ID                   21180099
+1202RM           AND EFF_END_DTE IS NULL                                21190099
+           END-EXEC.                                                    21200099
+                                                                        21210099
+           PERFORM 9900-EVALUATE-SQLCODE.                               21240099
+1202RM     IF SQLCODE = 0                                               21250099
+1202RM         ADD 1 TO PA-TVNDSTL-EXPIRES                              21260099
+1202RM     END-IF.                                                      21270099
+                                                                        21280099
+                                                                        21480099
+      ******************************************************************21770099
+      * 9620 WEEKLY ROW DELETE.                                        *21780099
+      ******************************************************************21790099
+       9620-DELETE-WEEKLY-SKU.                                          21800099
+                                                                        21810099
+           MOVE '*9620-DELETE-WEEKLY-SKU.         *' TO PW-PARA-NAME.   21820099
+                                                                        21840099
+           EXEC SQL                                                     21850099
+                DELETE FROM TSKSTWKS                                    21860099
+0503RM          WHERE ITEM_NMBR  = :PV-DELETE-ITM-NBR                   21862099
+           END-EXEC.                                                    21880099
+                                                                        21890099
+                                                                        21900099
+           PERFORM 9900-EVALUATE-SQLCODE.                               21910099
+                                                                        21920099
+0403RM     IF SQLCODE = 0                                               21930099
+               ADD SQLERRD(3) TO PA-WEEKLY-DELETES                      21940099
+0403RM     END-IF.                                                      21950099
+                                                                        21960099
+      ******************************************************************21970099
+      * 9640 INVENTORY ROW DELETE.                                     *21980099
+      ******************************************************************21990099
+       9640-DELETE-INVENTORY-SKU.                                       22000099
+                                                                        22010099
+           MOVE '*9640-DELETE-INVENTORY-SKU.      *' TO PW-PARA-NAME.   22020099
+                                                                        22040099
+           EXEC SQL                                                     22050099
+                DELETE FROM TSKSTWKI                                    22060099
+0503RM          WHERE ITEM_NMBR  = :PV-DELETE-ITM-NBR                   22062099
+           END-EXEC.                                                    22080099
+                                                                        22090099
+           PERFORM 9900-EVALUATE-SQLCODE.                               22100099
+                                                                        22110099
+0403RM     IF SQLCODE = 0                                               22120099
+               ADD SQLERRD(3)  TO PA-INVENTORY-DELETES                  22130099
+0403RM     END-IF.                                                      22140099
+                                                                        22150099
+      ******************************************************************22160099
+      * 9660 UPC/SKU ROW ITEM RETRIEVED.                               *22170099
+      ******************************************************************22180099
+       9660-FETCH-UPCSKU-ITEM.                                          22190099
+                                                                        22200099
+           MOVE '*9660-FETCH-UPCSKU-ITEM.         *' TO PW-PARA-NAME.   22210099
+                                                                        22230099
+           EXEC SQL                                                     22240099
+                FETCH UPCSKU_ITEM_CSR                                   22250099
+                 INTO :PV-DELETE-KOHLS-UPC-COMP3                        22260099
+           END-EXEC.                                                    22340099
+                                                                        22350099
+           MOVE SQLCODE                    TO FS-UPCSKU-ITEM-CODE.      22360099
+                                                                        22370099
+           EVALUATE TRUE                                                22380099
+               WHEN SQLCODE = 0                                         22390099
+                   MOVE PV-DELETE-KOHLS-UPC-COMP3                       22400099
+                       TO PV-DELETE-KOHLS-UPC-NUM                       22410099
+               WHEN SQLCODE = +100                                      22420099
+                   CONTINUE                                             22430099
+           END-EVALUATE.                                                22440099
+                                                                        22450099
+           PERFORM 9900-EVALUATE-SQLCODE.                               22460099
+                                                                        22470099
+      ******************************************************************22480099
+      * 9680 UPC/SKU ITEM ROW DELETE.                                  *22490099
+      ******************************************************************22500099
+       9680-DELETE-UPCSKU-ITEM.                                         22510099
+                                                                        22520099
+           MOVE '*9680-DELETE-UPCSKU-ITEM.        *' TO PW-PARA-NAME.   22530099
+                                                                        22550099
+           EXEC SQL                                                     22560099
+                DELETE FROM TUPCSKU                                     22570099
+                 WHERE UPC_NBR = :PV-DELETE-KOHLS-UPC-COMP3             22580099
+           END-EXEC.                                                    22590099
+                                                                        22600099
+           PERFORM 9900-EVALUATE-SQLCODE.                               22610099
+                                                                        22620099
+0403RM     IF SQLCODE = 0                                               22630099
+               ADD 1                   TO PA-UPCSKU-ITEM-DELETES        22640099
+0403RM     END-IF.                                                      22650099
+                                                                        22660099
+0503RM******************************************************************22670099
+0503RM* 9700-PROCESS-TSKXREF-CSR                                        22680099
+0503RM* PROCESS ALL RENUMBERED SKUS: DELETE THE SKUXREF ROW AND OTHER   22690099
+0503RM* SKU TABLES.                                                     22700099
+0503RM******************************************************************22710099
+0503RM 9700-PROCESS-TSKXREF-CSR.                                        22720099
+0503RM                                                                  22730099
+0503RM     MOVE '*9700-PROCESS-TSKXREF-CSR        *' TO PW-PARA-NAME.   22740099
+0503RM                                                                  22760099
+0503RM     EXEC SQL                                                     22770099
+0503RM          FETCH TSKXREF_CSR                                       22780099
+0403RM           INTO :PV-DELETE-ITM-NBR                                22790099
+0503RM     END-EXEC.                                                    22800099
+0503RM                                                                  22810099
+0503RM     EVALUATE TRUE                                                22820099
+0503RM         WHEN SQLCODE = 0                                         22830099
+0503RM              SET PW-PROCESSING-RENUM TO TRUE                     22840099
+0503RM              PERFORM 9080-DELETE-SKUXREF-RENUM                   22850099
+0503RM              PERFORM 4400-PROCESS-SKU-DELETE                     22860099
+0503RM         WHEN SQLCODE = +100                                      22870099
+0503RM              MOVE IM020-ITM-NBR        TO PV-DELETE-ITM-NBR      22880099
+0503RM              SET PS-RENUM-TSKXREF-DONE TO TRUE                   22890099
+0503RM     END-EVALUATE.                                                22900099
+0503RM                                                                  22910099
+0503RM     PERFORM 9900-EVALUATE-SQLCODE.                               22920099
+                                                                        22930099
+      ******************************************************************23140099
+      * 9780 BACKUP RECORDS ARE WRITTEN.                               *23150099
+      ******************************************************************23160099
+       9780-INSERT-TSKULOG.                                             23170099
+                                                                        23180099
+           MOVE '*9780-INSERT-TSKULOG.*' TO PW-PARA-NAME.               23190099
+                                                                        23210099
+           INITIALIZE PV-RETRY-COUNT.                                   23220099
+                                                                        23230099
+           PERFORM WITH TEST AFTER                                      23240099
+                   UNTIL ((SQLCODE = 0)                                 23250099
+                                OR                                      23260099
+                          (PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT))    23270099
+                                                                        23580099
+0403RM       EXEC SQL                                                   23590099
+0403RM            INSERT INTO TSKULOG                                   23600099
+0403RM                   (TRN_TMST                                      23610099
+0403RM                   ,INTR_UPC_ID                                   23620099
+0403RM                   ,FUNC_CDE                                      23630099
+0403RM                   ,MSG_SEQ_NBR                                   23640099
+0403RM                   ,MSG_TXT)                                      23650099
+0403RM            VALUES                                                23660099
+0403RM                  (CURRENT TIMESTAMP                              23670099
+0403RM                  ,:SKULOG-INTR-UPC-ID                            23680099
+0403RM                  ,:SKULOG-FUNC-CDE                               23690099
+0403RM                  ,:SKULOG-MSG-SEQ-NBR                            23700099
+0403RM                  ,:SKULOG-MSG-TXT)                               23710099
+0403RM       END-EXEC                                                   23720099
+                                                                        23730099
+             EVALUATE TRUE                                              23740099
+               WHEN SQLCODE IS = 0                                      23750099
+                 ADD +1        TO PA-TSKULOG-INSERTS                    23760099
+               WHEN SQLCODE = -911                                      23770099
+               WHEN SQLCODE = -913                                      23780099
+                 ADD +1        TO PV-RETRY-COUNT                        23790099
+               WHEN SQLWARN0 NOT = SPACES                               23800099
+               WHEN SQLCODE < 0                                         23810099
+               WHEN SQLCODE > 0                                         23820099
+                 PERFORM 9950-SQL-ERROR                                 23830099
+             END-EVALUATE                                               23840099
+                                                                        23850099
+           END-PERFORM.                                                 23860099
+                                                                        23870099
+           IF SQLCODE = -911 OR                                         23880099
+              SQLCODE = -913                                            23890099
+               PERFORM 9950-SQL-ERROR                                   23900099
+           END-IF.                                                      23910099
+                                                                        23920099
+                                                                        25080099
+      ******************************************************************25090099
+      * 9900 EVALUATE SQL CODE.                                        *25100099
+      ******************************************************************25110099
+       9900-EVALUATE-SQLCODE.                                           25120099
+                                                                        25130099
+           EVALUATE TRUE                                                25140099
+              WHEN SQLCODE = +0                                         25150099
+              WHEN SQLCODE = +100                                       25160099
+                 CONTINUE                                               25170099
+              WHEN OTHER                                                25180099
+                 PERFORM 9950-SQL-ERROR                                 25190099
+           END-EVALUATE.                                                25200099
+                                                                        25210099
+      ******************************************************************25220099
+      * 9950 ABEND ROUTINE FOR BAD SQL CALLS.                          *25230099
+      ******************************************************************25240099
+       9950-SQL-ERROR.                                                  25250099
+                                                                        25260099
+           DISPLAY '** ABEND **          = SQL ERROR'.                  25270099
+           DISPLAY '** PROGRAM **        = IMKUP050'                    25280099
+           DISPLAY '** PARAGRAPH **        = ' PW-PARA-NAME.            25290099
+           DISPLAY '** LAST ITEM COMMITTED = ' CR-PREV-ITEM.            25300099
+           DISPLAY '** COMMIT COUNT        = ' CR-COMMIT-COUNT.         25310099
+                                                                        25320099
+      ******************************************************************25330099
+      *  THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-   25340099
+      *  MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE        25350099
+      *  'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE    25360099
+      *  FORMAT.                                                        25370099
+      ******************************************************************25380099
+           COPY DPPD004.                                                25390099
+           EJECT                                                        25400099
+                                                                        25410099
+           EXEC SQL                                                     25420099
+                ROLLBACK                                                25430099
+           END-EXEC.                                                    25440099
+                                                                        25450099
+           MOVE +4013                      TO ABEND-CODE.               25460099
+           CALL 'ILBOABN0' USING ABEND-CODE.                            25470099
+                                                                        25480099

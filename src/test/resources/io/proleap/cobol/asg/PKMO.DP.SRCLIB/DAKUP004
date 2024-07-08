@@ -1,0 +1,748 @@
+       IDENTIFICATION DIVISION.                                                 
+       PROGRAM-ID.           DAKUP004.                                          
+       AUTHOR.               PAUL KEBER                                         
+       INSTALLATION.         KOHLS DEPARTMENT STORES.                           
+       DATE-WRITTEN          05/17/2006.                                        
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *   DAKUP004 - AVAILABLE VENDOR FUNDING DATABASE PURGE           *        
+      *                                                                *        
+      *   THIS PROGRAM WILL DELETE ALL ROWS FROM DAT_AVL_VND_FUND WITH *        
+      *   A REMAINING AVAILABLE COST AMOUNT OF ZERO AND WITH NO        *        
+      *   INCOMPLETE DEBIT ALLOWANCES.                                 *        
+      *                                                                *        
+      *   AN INPUT FILE OF DAT_AVL_VND_FUND EXTRACT RECORDS THAT ARE   *        
+      *   POTENTIAL PURGE CANDIDATES WILL BE MATCHED WITH A TDAALW     *        
+      *   EXTRACT FILE OF NON-COMPLETED AND NON-REJECTED DEBIT         *        
+      *   ALLOWANCES WHOSE NET COST AMOUNT IS SUMMED UP BY VENDOR/     *        
+      *   DEPARTMENT.  THOSE DAT_AVL_VND_FUND EXTRACT RECORDS THAT     *        
+      *   HAVE NO MATCHING TDAALW UNLOAD RECORD WILL BE DELETED FROM   *        
+      *   THE DAT_AVL_VND_FUND TABLE.  THOSE DAT_AVL_VND_FUND EXTRACT  *        
+      *   RECORDS THAT MATCH A TDAALW UNLOAD RECORD BY VENDOR/         *        
+      *   DEPARTMENT WILL BE ANALYZED FOR POSSIBLE DELETION.  EACH     *        
+      *   DAT_AVL_VND_FUND EXTRACT RECORD'S TOTAL AVAILABLE COST       *        
+      *   AMOUNT IS SUBTRACTED FROM THE TDAALW UNLOAD RECORD NET COST  *        
+      *   AMOUNT.  ONCE THE TDAALW UNLOAD RECORD NET COST AMOUNT       *        
+      *   REACHES ZERO, ANY REMAINING DAT_AVL_VND_FUND EXTRACT RECORDS *        
+      *   WILL BE DELETED FROM DAT_AVL_VND_FUND.                       *        
+      *                                                                *        
+      *   CHECKPOINT RESTART LOGIC IS USED IN THIS PROGRAM.            *        
+      *                                                                *        
+      ******************** HISTORY OF CHANGES **************************        
+      * CHG ID/                                                        *        
+      * WR/PROJ  DATE        DESCRIPTION OF CHANGES                    *        
+      * -------  ----------  ----------------------------------------  *        
+      * WR30021  05-17-2006  P. KEBER - INITIAL CODING.                *        
+      * 8613F    07-17-2015  S. BARTELT                                *        
+      *                      RMS 9 REMEDIATION. CHANGED FROM           *        
+      *                      AUTO LOGON TO EXTERNAL SIGN ON            *        
+      ******************************************************************        
+                                                                                
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+                                                                                
+       CONFIGURATION SECTION.                                                   
+                                                                                
+       SOURCE-COMPUTER. IBM-3090.                                               
+       OBJECT-COMPUTER. IBM-3090.                                               
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+       FILE-CONTROL.                                                            
+           SELECT DAT-AVL-VND-FUND-FILE                                         
+               ASSIGN TO INP01.                                                 
+                                                                                
+           SELECT TDAALW-SORTSUM-FILE                                           
+               ASSIGN TO INP02.                                                 
+                                                                                
+                                                                                
+8613F      SELECT ORACLE-LOGIN-FILE                                             
+8613F          ASSIGN TO ORALOGON.                                              
+                                                                                
+       DATA DIVISION.                                                           
+                                                                                
+       FILE SECTION.                                                            
+       FD  DAT-AVL-VND-FUND-FILE                                                
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  DAT-AVL-VND-FUND-RECORD         PIC X(47).                           
+                                                                                
+       FD  TDAALW-SORTSUM-FILE                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  TDAALW-SORTSUM-RECORD           PIC X(28).                           
+                                                                                
+                                                                                
+8613F  FD  ORACLE-LOGIN-FILE                                                    
+8613F      RECORDING MODE IS F                                                  
+8613F      LABEL RECORDS ARE STANDARD                                           
+8613F      BLOCK CONTAINS 0 RECORDS                                             
+8613F      DATA RECORD IS ORACLE-LOGIN-REC.                                     
+8613F  01  ORACLE-LOGIN-REC.                                                    
+8613F      05  FILLER                  PIC X(80).                               
+                                                                                
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+8613F  01  CC-ORACLE-CONNECTION.                                                
+8613F      05  CC-ORACLE-USERID           PIC X(40).                            
+8613F          88 CC-AUTO-LOGON                           VALUE '/'.            
+8613F      05  CC-ORACLE-PASSWORD         PIC X(40).                            
+                                                                                
+      *****************************************************************         
+      *  PROGRAM'S ACCUMULATORS                                       *         
+      *****************************************************************         
+       01  PA-PROGRAM-ACCUMULATORS.                                             
+           05  PA-AVL-VND-FUND-RECS-READ   PIC 9(09)       VALUE ZEROES.        
+           05  PA-TDAALW-RECS-READ         PIC 9(09)       VALUE ZEROES.        
+           05  PA-ROWS-DELETED             PIC 9(09)       VALUE ZEROES.        
+           05  PA-ROWS-TO-COMMIT           PIC 9(09)       VALUE ZEROES.        
+           05  PA-NUMBER-OF-COMMIT         PIC 9(09)       VALUE ZEROES.        
+                                                                                
+      *****************************************************************         
+      *  PROGRAM'S CONSTANTS                                          *         
+      *****************************************************************         
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-PROGRAM-NAME             PIC X(08)       VALUE                
+               'DAKUP004'.                                                      
+           05  PC-JOB-NAME                 PIC X(08)       VALUE                
+               'DAK600  '.                                                      
+           05  PC-ORACLE-PROD-ID           PIC X(1)        VALUE '/'.           
+           05  PC-ORACLE-PROD-ID-LGTH      PIC 9(02)       VALUE 1.             
+8613F      05  PC-AUTO-LOGON               PIC X(01)       VALUE '/'.           
+                                                                                
+      *****************************************************************         
+      *  PROGRAM'S SWITCHES                                           *         
+      *****************************************************************         
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-END-OF-AVL-VND-FUND-FILE-SW                                   
+                                           PIC X(01)       VALUE 'N'.           
+               88  PS-END-OF-AVL-VND-FUND-FILE             VALUE 'Y'.           
+               88  PS-NOT-END-OF-AVL-VND-FND-FILE          VALUE 'N'.           
+           05  PS-END-OF-TDAALW-FILE-SW    PIC X(01)       VALUE 'N'.           
+               88  PS-END-OF-TDAALW-FILE                   VALUE 'Y'.           
+               88  PS-NOT-END-OF-TDAALW-FILE               VALUE 'N'.           
+           05  PS-END-OF-CONTROL-CARDS-SW  PIC X(01)       VALUE 'N'.           
+               88  PS-END-OF-CONTROL-CARDS                 VALUE 'Y'.           
+               88  PS-NOT-END-OF-CONTROL-CARDS             VALUE 'N'.           
+           05  PS-FIRST-COMMIT-SW          PIC X(01)       VALUE 'N'.           
+               88  PS-FIRST-COMMIT                         VALUE 'Y'.           
+               88  PS-NOT-FIRST-COMMIT                     VALUE 'N'.           
+           05  PS-OPERATION-ATTEMPTED      PIC X(40)       VALUE SPACES.        
+               88  PS-CHECKPOINT-UPDATE-MSG                VALUE                
+                   'UPDATE CHECKPOINT FAILED                '.                  
+               88  PS-COMMIT-MSG                           VALUE                
+                   'COMMIT FAILED                           '.                  
+               88  PS-ORA-LOGIN-MSG                        VALUE                
+                   'ORACLE LOGIN FAILED                     '.                  
+               88  PS-DELETE-AVL-FUND-MSG                  VALUE                
+                   'DELETE OF AVAILABLE FUND FAILED         '.                  
+               88  PS-GET-RESTART-MSG                      VALUE                
+                   'GETTING RESTARTING INFORMATION FAILED   '.                  
+               88  PS-CHECK-RESTART-MSG                    VALUE                
+                   'CHECKING RESTARTING CONTROL FAILED      '.                  
+8613F      05  PS-ORACLE-LOGIN-EOF-SW      PIC  X         VALUE 'N'.            
+8613F          88  ORACLE-LOGIN-EOF                       VALUE 'Y'.            
+                                                                                
+      *****************************************************************         
+      *  PROGRAM'S VARIABLES                                          *         
+      *****************************************************************         
+       01  PV-PROGRAM-VARIABLES.                                                
+           05  PV-RMNG-NET-COST-AMT        PIC S9(11)V99   VALUE +0             
+                                                           COMP-3.              
+           05  PV-PARAGRAPH-NAME           PIC X(40)       VALUE SPACES.        
+           05  PV-CURR-FSCL-QTR-BEG.                                            
+               10  PV-CURR-BEG-DTE         PIC X(10)       VALUE SPACES.        
+               10  PV-CURR-BEG-TIME        PIC X(09)       VALUE                
+                   '-00.00.00'.                                                 
+8613F      05  PV-ORACLE-USERID-LEN        PIC S9(04)      VALUE ZEROS.         
+8613F      05  PV-ORACLE-PASSWORD-LEN      PIC S9(04)      VALUE ZEROS.         
+                                                                                
+      *****************************************************************         
+      *  INPUT AVAILABLE VENDOR FUNDING DATABASE EXTRACT LAYOUT       *         
+      *****************************************************************         
+      *01  DA107-AVL-VND-FUND-EXTRACT-REC.                                      
+           COPY DARD107.                                                        
+                                                                                
+      *****************************************************************         
+      *  INPUT TDAALW DATABASE EXTRACT LAYOUT                         *         
+      *****************************************************************         
+      *01  DA108-AVL-VND-FUND-TDAALW-REC.                                       
+           COPY DARD108.                                                        
+                                                                                
+      *****************************************************************         
+      *  CHECKPOINT RESTART VARIABLE AREA                             *         
+      *****************************************************************         
+       01  CR-CHECKPOINT-RESTART-AREA.                                          
+           05  CR-AREA-LEN                 PIC S9(04)      VALUE +75            
+                                                           COMP.                
+           05  CR-CHECKPOINT-RESTART-VAR.                                       
+               10  CR-ROWS-DELETED         PIC 9(09)       VALUE ZEROES.        
+               10  CR-NUMBER-OF-COMMIT     PIC 9(09)       VALUE ZEROES.        
+               05  CR-AVL-VND-FUND-RECS-READ                                    
+                                           PIC 9(09)       VALUE ZEROES.        
+               05  CR-TDAALW-RECS-READ     PIC 9(09)       VALUE ZEROES.        
+               05  CR-ENT-ID               PIC 9(09)       VALUE ZEROES.        
+               05  CR-DEPT-NBR             PIC X(03)       VALUE SPACES.        
+               05  CR-SCL-NBR              PIC X(02)       VALUE SPACES.        
+               05  CR-BEG-DTE              PIC X(10)       VALUE SPACES.        
+               05  CR-RMNG-NET-COST-AMT    PIC S9(11)V99   VALUE ZEROES.        
+                                                                                
+                                                                                
+      *****************************************************************         
+      *  ABEND CODE AREA                                              *         
+      *****************************************************************         
+       01  PV-ABEND-CODE                   PIC S9(04)      VALUE ZEROES         
+                               COMP SYNC.                                       
+           88  ABEND-4003-CNTL-CARD-EMPTY                  VALUE +4003.         
+           88  ABEND-4004-CNTL-CARD-ERRORS                 VALUE +4004.         
+           88  ABEND-4013-DB-ERROR                         VALUE +4013.         
+                                                                                
+                                                                                
+       01  WS-MSG-TEXT                     PIC X(512)      VALUE SPACES.        
+       01  WS-MAX-SIZE                     PIC S9(09)      VALUE +512           
+                               COMP.                                            
+       01  WS-MSG-LENGTH                   PIC S9(09)      VALUE ZEROES         
+                               COMP.                                            
+                                                                                
+      ******************************************************************        
+      *    ORACLE DECLARE SECTION                                               
+      ******************************************************************        
+           EXEC SQL BEGIN DECLARE SECTION END-EXEC.                             
+                                                                                
+       01  USERNAME                        PIC X(10)      VARYING.              
+       01  PASSWD                          PIC X(10)      VARYING.              
+                                                                                
+      ******************************************************************        
+      * COBOL DECLARATION FOR TABLE TCKRSTINF                          *        
+      ******************************************************************        
+       01  DCLTCKRSTINF.                                                        
+           10 TCKRSTINF-JOB-NAME                PIC X(8).                       
+           10 TCKRSTINF-PLAN-NAME               PIC X(8).                       
+           10 TCKRSTINF-RST-TRANS-SEQ-NMBR PIC S999999999V USAGE COMP-3.        
+           10 TCKRSTINF-SEQ-NMBR                PIC S999V USAGE COMP-3.         
+           10 TCKRSTINF-WORK-STRG-DESC          PIC X(102).                     
+           10 FILLER REDEFINES TCKRSTINF-WORK-STRG-DESC.                        
+              15 TCKRSTINF-WORK-STRG-DESC-LEN   PIC S9(4) USAGE COMP.           
+              15 TCKRSTINF-WORK-STRG-DESC-TEXT  PIC X(0100).                    
+                                                                                
+      ******************************************************************        
+      * COBOL DECLARATION FOR TABLE TCKRSTCNTL                         *        
+      ******************************************************************        
+       01  DCLTCKRSTCNTL.                                                       
+           10 TCKRSTCNTL-JOB-NAME             PIC X(8).                         
+           10 TCKRSTCNTL-PLAN-NAME            PIC X(8).                         
+           10 TCKRSTCNTL-CKPT-STAT-CODE       PIC X(1).                         
+           10 TCKRSTCNTL-CKPT-CNTL-CODE       PIC X(1).                         
+           10 TCKRSTCNTL-CKPT-TYPE-CODE       PIC X(1).                         
+           10 TCKRSTCNTL-CKPT-FRQNCY-QTY      PIC S99999V USAGE COMP-3.         
+           10 TCKRSTCNTL-TRANS-QTY        PIC S999999999V USAGE COMP-3.         
+           10 TCKRSTCNTL-PREP-TMESTP          PIC X(26).                        
+           10 TCKRSTCNTL-CKPT-TAKEN-QTY   PIC S999999999V USAGE COMP-3.         
+           10 TCKRSTCNTL-TRANS-PRCSD-QTY  PIC S999999999V USAGE COMP-3.         
+           10 TCKRSTCNTL-RST-QTY              PIC S99999V USAGE COMP-3.         
+           10 TCKRSTCNTL-PRCSD-TMESTP         PIC X(26).                        
+           10 TCKRSTCNTL-CKPT-DURATION-TIME   PIC X(8).                         
+                                                                                
+      ******************************************************************        
+      * COBOL DECLARATION FOR TABLE DAT_AVL_VND_FUND                            
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE DAT00002                                                 
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL END DECLARE SECTION END-EXEC.                               
+      *                                                                         
+      * ORA COMMUNICATION AREA                                                  
+      *                                                                         
+        01       SQLCA.                                                         
+                 05  SQLCAID               PIC X(8).                            
+                 05  SQLCABC               PIC S9(9) COMPUTATIONAL.             
+                 05  SQLCODE               PIC S9(9) COMPUTATIONAL.             
+                 05  SQLERRM.                                                   
+                     49 SQLERRML           PIC S9(4) COMPUTATIONAL.             
+                     49 SQLERRMC           PIC X(70).                           
+                 05  SQLERRP               PIC X(8).                            
+                 05  SQLERRD OCCURS 6 TIMES                                     
+                                           PIC S9(9) COMPUTATIONAL.             
+                 05  SQLWARN.                                                   
+                     10 SQLWARN0           PIC X(1).                            
+                     10 SQLWARN1           PIC X(1).                            
+                     10 SQLWARN2           PIC X(1).                            
+                     10 SQLWARN3           PIC X(1).                            
+                     10 SQLWARN4           PIC X(1).                            
+                     10 SQLWARN5           PIC X(1).                            
+                     10 SQLWARN6           PIC X(1).                            
+                     10 SQLWARN7           PIC X(1).                            
+                 05  SQLEXT                PIC X(8).                            
+      ******************************************************************        
+      * ORA COMMUNICATION AREA2                                                 
+           COPY SQLCA2.                                                         
+                                                                                
+       PROCEDURE DIVISION.                                                      
+                                                                                
+      ******************************************************************        
+      *    MAINLINE LOGIC                                              *        
+      ******************************************************************        
+                                                                                
+       0000-MAINLINE.                                                           
+                                                                                
+           PERFORM 1000-INITIALIZATION.                                         
+                                                                                
+           PERFORM 2000-PROCESS-INPUT                                           
+               UNTIL PS-END-OF-AVL-VND-FUND-FILE.                               
+                                                                                
+           PERFORM 9900-EOJ-LOGIC.                                              
+                                                                                
+           GOBACK.                                                              
+                                                                                
+      ******************************************************************        
+      *    LOGON TO ORACLE, AND DECLARE THE ORACLE CURSORS.            *        
+      ******************************************************************        
+       1000-INITIALIZATION.                                                     
+                                                                                
+           OPEN INPUT  DAT-AVL-VND-FUND-FILE                                    
+                       TDAALW-SORTSUM-FILE                                      
+8613F                  ORACLE-LOGIN-FILE.                                       
+                                                                                
+           DISPLAY ' '.                                                         
+                                                                                
+           PERFORM 6000-READ-AVL-VND-FUND-FILE.                                 
+           IF PS-END-OF-AVL-VND-FUND-FILE                                       
+               DISPLAY ' *** NOTHING TO PROCESS ***'                            
+               DISPLAY ' '                                                      
+           ELSE                                                                 
+               PERFORM 6100-READ-TDAALW-SORTSUM-FILE                            
+               PERFORM 1100-LOGON-TO-ORACLE                                     
+               PERFORM 1200-RESTART-PREP                                        
+           END-IF.                                                              
+                                                                                
+      ****************************************************************          
+      * LOGON                                                        *          
+      ****************************************************************          
+       1100-LOGON-TO-ORACLE.                                                    
+                                                                                
+           DISPLAY '**------ LOGGING ON TO ORACLE ------**'.                    
+                                                                                
+8613F      MOVE '1100-LOGON-TO-ORACLE'   TO PV-PARAGRAPH-NAME.                  
+8613F                                                                           
+8613F      READ ORACLE-LOGIN-FILE INTO CC-ORACLE-CONNECTION                     
+8613F         AT END                                                            
+8613F            SET ORACLE-LOGIN-EOF      TO TRUE.                             
+8613F                                                                           
+8613F      IF CC-AUTO-LOGON                                                     
+8613F         DISPLAY PC-PROGRAM-NAME ' - AUTO LOGON TO ORACLE'                 
+8613F         EXEC SQL                                                          
+8613F              CONNECT :PC-AUTO-LOGON                                       
+8613F         END-EXEC                                                          
+8613F      ELSE                                                                 
+8613F         INITIALIZE PV-ORACLE-USERID-LEN                                   
+8613F                    PV-ORACLE-PASSWORD-LEN                                 
+8613F         INSPECT CC-ORACLE-USERID                                          
+8613F                 TALLYING PV-ORACLE-USERID-LEN                             
+8613F                 FOR CHARACTERS BEFORE INITIAL SPACE                       
+8613F         INSPECT CC-ORACLE-PASSWORD                                        
+8613F                 TALLYING PV-ORACLE-PASSWORD-LEN                           
+8613F                 FOR CHARACTERS BEFORE INITIAL SPACE                       
+8613F         MOVE CC-ORACLE-USERID (1:PV-ORACLE-USERID-LEN)     TO             
+8613F                 USERNAME-ARR                                              
+8613F         MOVE PV-ORACLE-USERID-LEN    TO USERNAME-LEN                      
+8613F         MOVE CC-ORACLE-PASSWORD (1:PV-ORACLE-PASSWORD-LEN) TO             
+8613F                 PASSWD-ARR                                                
+8613F         MOVE PV-ORACLE-PASSWORD-LEN  TO PASSWD-LEN                        
+8613F         MOVE CC-ORACLE-PASSWORD (1:PV-ORACLE-PASSWORD-LEN) TO             
+8613F              PASSWD-ARR                                                   
+8613F         MOVE PV-ORACLE-PASSWORD-LEN  TO PASSWD-LEN                        
+8613F         MOVE CC-ORACLE-USERID (1:PV-ORACLE-USERID-LEN)     TO             
+8613F              USERNAME-ARR                                                 
+8613F         MOVE PV-ORACLE-USERID-LEN    TO USERNAME-LEN                      
+8613F         MOVE CC-ORACLE-PASSWORD (1:PV-ORACLE-PASSWORD-LEN) TO             
+8613F              PASSWD-ARR                                                   
+8613F         MOVE PV-ORACLE-PASSWORD-LEN  TO PASSWD-LEN                        
+8613F         DISPLAY PC-PROGRAM-NAME  ' - LOGON TO ORACLE AS USER '            
+8613F              USERNAME-ARR                                                 
+8613F         EXEC SQL                                                          
+8613F              CONNECT :USERNAME IDENTIFIED BY :PASSWD                      
+8613F         END-EXEC                                                          
+8613F         INITIALIZE CC-ORACLE-PASSWORD                                     
+8613F                    PASSWD                                                 
+8613F      END-IF.                                                              
+8613F                                                                           
+8613F      IF (SQLCODE NOT = 0)                                                 
+8613F          PERFORM 9990-SQL-ERROR                                           
+8613F      END-IF.                                                              
+                                                                                
+                                                                                
+                                                                                
+      ******************************************************************        
+      *      PREPARE CHECKPOINT RESTART OR SET INPUT TO THE PROPER     *        
+      *      RESTARTING POINT.                                         *        
+      ******************************************************************        
+       1200-RESTART-PREP.                                                       
+                                                                                
+           PERFORM 8600-INIT-CHECKPOINT-SELECT.                                 
+                                                                                
+           IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                                   
+               PERFORM 8700-SELECT-RESTART-INFO                                 
+               MOVE TCKRSTINF-WORK-STRG-DESC                                    
+                   TO CR-CHECKPOINT-RESTART-AREA                                
+      * RE-ESTABLISH COUNTS FOR PROCESSED INPUT                                 
+               MOVE CR-ROWS-DELETED     TO PA-ROWS-DELETED                      
+               MOVE CR-NUMBER-OF-COMMIT TO PA-NUMBER-OF-COMMIT                  
+                                                                                
+               DISPLAY '*** RESTART AFTER'                                      
+                       ' AVL-VND REC #:' CR-AVL-VND-FUND-RECS-READ              
+                       '  ENT-ID: ' CR-ENT-ID                                   
+                       ' DEPT: ' CR-DEPT-NBR                                    
+                       ' SUB-CLASS: ' CR-SCL-NBR                                
+                       ' EFF-BEG-DTE: ' CR-BEG-DTE                              
+               DISPLAY '***              '                                      
+                       ' TDAALW REC #: ' CR-TDAALW-RECS-READ                    
+                       ' RMNG NET CST: ' CR-RMNG-NET-COST-AMT                   
+                                                                                
+               PERFORM 6000-READ-AVL-VND-FUND-FILE                              
+                   UNTIL PA-AVL-VND-FUND-RECS-READ                              
+                         > CR-AVL-VND-FUND-RECS-READ                            
+                     OR PS-END-OF-AVL-VND-FUND-FILE                             
+               IF PS-END-OF-AVL-VND-FUND-FILE                                   
+                   DISPLAY 'NOTHING TO COMMIT AFTER RESTART'                    
+               ELSE                                                             
+                    DISPLAY '*** RESTART RECORD IS'                             
+                            ' ENT-ID: ' DA107-ENTITY-ID                         
+                            ' DEPT: ' DA107-DEPT-NBR                            
+                    PERFORM 6100-READ-TDAALW-SORTSUM-FILE                       
+                       UNTIL PA-TDAALW-RECS-READ = CR-TDAALW-RECS-READ          
+                         OR PS-END-OF-TDAALW-FILE                               
+                    MOVE CR-RMNG-NET-COST-AMT TO PV-RMNG-NET-COST-AMT           
+               END-IF                                                           
+           ELSE                                                                 
+               SET PS-FIRST-COMMIT      TO TRUE                                 
+               INITIALIZE CR-CHECKPOINT-RESTART-VAR                             
+           END-IF.                                                              
+                                                                                
+           DISPLAY 'COMMITS WILL BE TAKEN EVERY '                               
+                   TCKRSTCNTL-CKPT-FRQNCY-QTY ' RECORDS.'.                      
+                                                                                
+      ******************************************************************        
+      *    2000-PROCESS-INPUT                                          *        
+      *      THIS IS PERFORMED ONLY VIA THE 0000-MAINLINE              *        
+      *      PURPOSE: READ AND PROCESS THE INPUT FILES TO DELETE FROM  *        
+      *               THE DAT_AVL_VND_FUND TABLE                       *        
+      ******************************************************************        
+       2000-PROCESS-INPUT.                                                      
+                                                                                
+           IF DA107-ENTITY-ID < DA108-ENTITY-ID                                 
+             OR (DA107-ENTITY-ID = DA108-ENTITY-ID                              
+                 AND DA107-DEPT-NBR < DA108-DEPT-NBR)                           
+             OR PS-END-OF-TDAALW-FILE                                           
+               PERFORM 7000-DELETE-AVL-VND-FUND                                 
+               PERFORM 6000-READ-AVL-VND-FUND-FILE                              
+           ELSE                                                                 
+               IF DA107-ENTITY-ID > DA108-ENTITY-ID                             
+                 OR (DA107-ENTITY-ID = DA108-ENTITY-ID                          
+                     AND DA107-DEPT-NBR > DA108-DEPT-NBR)                       
+                   PERFORM 6100-READ-TDAALW-SORTSUM-FILE                        
+               ELSE                                                             
+      *            RECORDS MATCHING ON VENDOR AND DEPARTMENT                    
+                   IF PV-RMNG-NET-COST-AMT <= +0                                
+                       PERFORM 7000-DELETE-AVL-VND-FUND                         
+                   ELSE                                                         
+                       IF DA107-AVL-COST-AMT > PV-RMNG-NET-COST-AMT             
+                           MOVE +0 TO PV-RMNG-NET-COST-AMT                      
+                       ELSE                                                     
+                           SUBTRACT DA107-AVL-COST-AMT                          
+                                 FROM PV-RMNG-NET-COST-AMT                      
+                       END-IF                                                   
+                   END-IF                                                       
+                   PERFORM 6000-READ-AVL-VND-FUND-FILE                          
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  READ CONTROL CARD FILE                                        *        
+      ******************************************************************        
+       6000-READ-AVL-VND-FUND-FILE.                                             
+                                                                                
+           READ DAT-AVL-VND-FUND-FILE INTO                                      
+                 DA107-AVL-VND-FUND-EXTRACT-REC                                 
+               AT END                                                           
+                   SET PS-END-OF-AVL-VND-FUND-FILE TO TRUE                      
+               NOT AT END                                                       
+                   ADD +1 TO PA-AVL-VND-FUND-RECS-READ                          
+           END-READ.                                                            
+                                                                                
+      ******************************************************************        
+      *  READ PURCHASE ADJUSTMENT FILE                                 *        
+      ******************************************************************        
+       6100-READ-TDAALW-SORTSUM-FILE.                                           
+                                                                                
+           READ TDAALW-SORTSUM-FILE INTO DA108-AVL-VND-FUND-TDAALW-REC          
+               AT END                                                           
+                   SET PS-END-OF-TDAALW-FILE TO TRUE                            
+               NOT AT END                                                       
+                   ADD +1 TO PA-TDAALW-RECS-READ                                
+                   MOVE DA108-NET-COST-AMT TO PV-RMNG-NET-COST-AMT              
+           END-READ.                                                            
+                                                                                
+      ******************************************************************        
+      *  DELETE DAT_AVL_VND_FUND ROW                                   *        
+      ******************************************************************        
+       7000-DELETE-AVL-VND-FUND.                                                
+                                                                                
+           MOVE '7000-DELETE-AVL-VND-FUND' TO PV-PARAGRAPH-NAME.                
+                                                                                
+           MOVE DA107-ENTITY-ID          TO ENT-ID.                             
+           MOVE DA107-DEPT-NBR           TO DEPT-NBR.                           
+           MOVE DA107-SUB-CL-NBR         TO SUB-CL-NBR.                         
+           MOVE DA107-EFF-BEG-DTE        TO PV-CURR-BEG-DTE.                    
+           MOVE PV-CURR-FSCL-QTR-BEG     TO EFF-BEG-DTE.                        
+                                                                                
+           EXEC SQL                                                             
+               DELETE FROM DAT_AVL_VND_FUND                                     
+                 WHERE ENT_ID      = :ENT-ID                                    
+                   AND DEPT_NBR    = :DEPT-NBR                                  
+                   AND SUB_CL_NBR  = :SUB-CL-NBR                                
+                   AND EFF_BEG_DTE                                              
+                       = TO_DATE(:EFF-BEG-DTE, 'YYYY-MM-DD-HH24:MI:SS')         
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = 0                                                 
+                   ADD +1                        TO PA-ROWS-DELETED             
+                   PERFORM 8000-CHECK-COMMIT                                    
+               WHEN OTHER                                                       
+                   DISPLAY '** ENT-ID:      ' ENT-ID                            
+                   DISPLAY '** DEPT-NBR:    ' DEPT-NBR                          
+                   DISPLAY '** SUB-CLASS:   ' SUB-CL-NBR                        
+                   DISPLAY '** EFF-BEG-DTE: ' EFF-BEG-DTE                       
+                   DISPLAY '** AVL-VND REC: ' PA-AVL-VND-FUND-RECS-READ         
+                   SET PS-DELETE-AVL-FUND-MSG  TO TRUE                          
+                   PERFORM 9990-SQL-ERROR                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *    COMMIT-CHANGES.                                             *        
+      *      PURPOSE: COMMIT CHANGES TO THUS FAR                       *        
+      ******************************************************************        
+       8000-CHECK-COMMIT.                                                       
+                                                                                
+           ADD +1                        TO PA-ROWS-TO-COMMIT.                  
+           IF PA-ROWS-TO-COMMIT >= TCKRSTCNTL-CKPT-FRQNCY-QTY                   
+               MOVE PA-ROWS-DELETED          TO CR-ROWS-DELETED                 
+               ADD +1                        TO PA-NUMBER-OF-COMMIT             
+               MOVE ZEROES                   TO PA-ROWS-TO-COMMIT               
+               MOVE PA-NUMBER-OF-COMMIT      TO CR-NUMBER-OF-COMMIT             
+               MOVE PA-AVL-VND-FUND-RECS-READ                                   
+                                           TO CR-AVL-VND-FUND-RECS-READ         
+               MOVE PA-TDAALW-RECS-READ      TO CR-TDAALW-RECS-READ             
+               MOVE ENT-ID                   TO CR-ENT-ID                       
+               MOVE DA107-DEPT-NBR(2:3)      TO CR-DEPT-NBR                     
+               MOVE DA107-SUB-CL-NBR(3:2)    TO CR-SCL-NBR                      
+               MOVE PV-CURR-FSCL-QTR-BEG     TO CR-BEG-DTE                      
+               MOVE PV-RMNG-NET-COST-AMT     TO CR-RMNG-NET-COST-AMT            
+               MOVE CR-CHECKPOINT-RESTART-AREA                                  
+                   TO TCKRSTINF-WORK-STRG-DESC                                  
+               IF PS-FIRST-COMMIT                                               
+                   MOVE '9' TO TCKRSTCNTL-CKPT-STAT-CODE                        
+                   PERFORM 8900-UPDATE-CHECKPOINT-STATUS                        
+                   SET PS-NOT-FIRST-COMMIT   TO TRUE                            
+               END-IF                                                           
+               PERFORM 8800-COMMIT-CHANGES                                      
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * CHECK STATUS CODE TO SEE IF THIS IS A RESTART CONDITION        *        
+      ******************************************************************        
+       8600-INIT-CHECKPOINT-SELECT.                                             
+                                                                                
+           EXEC SQL                                                             
+             SELECT                                                             
+                     CKPT_STAT_CODE                                             
+                    ,CKPT_FRQNCY_QTY                                            
+               INTO                                                             
+                     :TCKRSTCNTL-CKPT-STAT-CODE                                 
+                    ,:TCKRSTCNTL-CKPT-FRQNCY-QTY                                
+               FROM                                                             
+                     TCKRSTCNTL                                                 
+               WHERE                                                            
+                     JOB_NAME  = :PC-JOB-NAME                                   
+                 AND PLAN_NAME = :PC-PROGRAM-NAME                               
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE '8600-INIT-CHECKPOINT-SELECT' TO PV-PARAGRAPH-NAME          
+               SET PS-CHECK-RESTART-MSG           TO TRUE                       
+               PERFORM 9990-SQL-ERROR                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * OBTAIN INFORMATION REGARDING WHERE TO RESTART TABLE PROCESSING *        
+      ******************************************************************        
+       8700-SELECT-RESTART-INFO.                                                
+                                                                                
+           EXEC SQL                                                             
+               SELECT                                                           
+                        WORK_STRG_DESC                                          
+                 INTO                                                           
+                       :TCKRSTINF-WORK-STRG-DESC                                
+                 FROM                                                           
+                       TCKRSTINF                                                
+                 WHERE                                                          
+                       JOB_NAME  = :PC-JOB-NAME                                 
+                   AND PLAN_NAME = :PC-PROGRAM-NAME                             
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE '8700-SELECT-RESTART-INFO  ' TO PV-PARAGRAPH-NAME           
+               SET PS-GET-RESTART-MSG            TO TRUE                        
+               PERFORM 9990-SQL-ERROR                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      * UPDATE CHECKPOINT INFORMATION TABLE. TAKE A COMMIT.                     
+      ******************************************************************        
+       8800-COMMIT-CHANGES.                                                     
+                                                                                
+           EXEC SQL                                                             
+               UPDATE                                                           
+                      TCKRSTINF                                                 
+                  SET                                                           
+                      WORK_STRG_DESC = :TCKRSTINF-WORK-STRG-DESC                
+                WHERE                                                           
+                      JOB_NAME       = :PC-JOB-NAME                             
+                  AND PLAN_NAME      = :PC-PROGRAM-NAME                         
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE  '8800-COMMIT-CHANGES    ' TO PV-PARAGRAPH-NAME             
+               SET PS-CHECKPOINT-UPDATE-MSG    TO TRUE                          
+               PERFORM 9990-SQL-ERROR                                           
+           END-IF.                                                              
+                                                                                
+           EXEC SQL                                                             
+               COMMIT                                                           
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE NOT = 0                                                   
+               MOVE  '8800-COMMIT-CHANGES    ' TO PV-PARAGRAPH-NAME             
+               SET PS-COMMIT-MSG               TO TRUE                          
+               PERFORM 9990-SQL-ERROR                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * UPDATE CHECKPOINT STATUS                                                
+      ******************************************************************        
+       8900-UPDATE-CHECKPOINT-STATUS.                                           
+                                                                                
+           EXEC SQL                                                             
+               UPDATE                                                           
+                      TCKRSTCNTL                                                
+                  SET                                                           
+                      CKPT_STAT_CODE = :TCKRSTCNTL-CKPT-STAT-CODE               
+                WHERE                                                           
+                      JOB_NAME  = :PC-JOB-NAME                                  
+                  AND PLAN_NAME = :PC-PROGRAM-NAME                              
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE '8900-UPDATE-CHECKPOINT-STATUS' TO PV-PARAGRAPH-NAME        
+               SET PS-CHECKPOINT-UPDATE-MSG         TO TRUE                     
+               PERFORM 9990-SQL-ERROR                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *    9900-EOJ-LOGIC.                                             *        
+      *      THIS IS PERFORMED AT END OF INPUT FILE.                   *        
+      *      PURPOSE: CLOSE INPUT FILE, COMMIT CHANGES AND DISPLAY     *        
+      *      RECORD COUNTS.                                            *        
+      ******************************************************************        
+       9900-EOJ-LOGIC.                                                          
+      * FORCE A COMMIT, IF THERE ARE UNCOMMITTED ROWS                           
+           IF PA-ROWS-TO-COMMIT > ZEROES                                        
+               MOVE TCKRSTCNTL-CKPT-FRQNCY-QTY                                  
+                   TO PA-ROWS-TO-COMMIT                                         
+               PERFORM 8000-CHECK-COMMIT                                        
+           END-IF.                                                              
+                                                                                
+           IF PA-AVL-VND-FUND-RECS-READ > ZEROES                                
+               MOVE '0' TO TCKRSTCNTL-CKPT-STAT-CODE                            
+               PERFORM 8900-UPDATE-CHECKPOINT-STATUS                            
+                                                                                
+               EXEC SQL                                                         
+                   COMMIT RELEASE                                               
+               END-EXEC                                                         
+           END-IF.                                                              
+                                                                                
+           CLOSE DAT-AVL-VND-FUND-FILE                                          
+                 TDAALW-SORTSUM-FILE.                                           
+                                                                                
+           DISPLAY ' '.                                                         
+           DISPLAY 'AVL-VND RECS READ ' PA-AVL-VND-FUND-RECS-READ.              
+           DISPLAY 'TDAALW RECS READ  ' PA-TDAALW-RECS-READ.                    
+           DISPLAY 'ROWS DELETED      ' PA-ROWS-DELETED.                        
+           DISPLAY 'COMMITS           ' PA-NUMBER-OF-COMMIT.                    
+           DISPLAY '**------ END ' PC-PROGRAM-NAME ' ------**'.                 
+                                                                                
+                                                                                
+      ******************************************************************        
+      * DISPLAYS ERRORS ENCOUNTERED ON SQL REQUEST                              
+      ******************************************************************        
+       9990-SQL-ERROR.                                                          
+                                                                                
+           MOVE SQLCODE    TO SQLCODE2.                                         
+           MOVE SQLERRD(3) TO SQLERRD3.                                         
+           DISPLAY '** ABEND **       ** = SQLERROR'.                           
+           DISPLAY '** PROGRAM        ** = ' PC-PROGRAM-NAME.                   
+           DISPLAY '** PARAGRAPH      ** = ' PV-PARAGRAPH-NAME.                 
+           DISPLAY '** SQLCODE        ** = ' SQLCODE2.                          
+           DISPLAY '** ROWS PROCESSED ** = ' SQLERRD3.                          
+           DISPLAY '** SQLERRM        ** = ' SQLERRM.                           
+           DISPLAY '** SQLERRMC       ** = ' SQLERRMC.                          
+           DISPLAY '** SQLERRD(5)     ** = ' SQLERRD(5).                        
+           DISPLAY '** OPERATION      ** = ' PS-OPERATION-ATTEMPTED.            
+           DISPLAY '** LAST COMMIT AVL-VND = '                                  
+                 CR-AVL-VND-FUND-RECS-READ.                                     
+           DISPLAY '** LAST COMMIT TDAALW  = ' CR-TDAALW-RECS-READ.             
+           DISPLAY '** LAST COMMIT ENT-ID  = ' CR-ENT-ID.                       
+           DISPLAY '** LAST COMMIT DEPT    = ' CR-DEPT-NBR.                     
+           DISPLAY '** LAST COMMIT SUB-CLS = ' CR-SCL-NBR.                      
+           DISPLAY '** LAST COMMIT BEG-DTE = ' CR-BEG-DTE.                      
+           DISPLAY '** LAST COMMIT NET-CST = ' CR-RMNG-NET-COST-AMT.            
+                                                                                
+           MOVE SPACES TO WS-MSG-TEXT.                                          
+      *    GET FULL TEXT OF ERROR MESSAGE                                       
+                                                                                
+           CALL 'SQLGLM' USING WS-MSG-TEXT,                                     
+                               WS-MAX-SIZE,                                     
+                               WS-MSG-LENGTH.                                   
+           DISPLAY 'MESSAGE TEXT      ** = ' WS-MSG-TEXT.                       
+                                                                                
+           EXEC SQL                                                             
+               ROLLBACK WORK RELEASE                                            
+           END-EXEC.                                                            
+                                                                                
+           SET ABEND-4013-DB-ERROR  TO TRUE.                                    
+                                                                                
+           PERFORM 9999-ABEND.                                                  
+                                                                                
+      ******************************************************************        
+      * PROGRAM ABEND PARAGRAPH                                                 
+      ******************************************************************        
+       9999-ABEND.                                                              
+                                                                                
+           CALL 'ILBOABN0'  USING PV-ABEND-CODE.                                
+                                                                                
+      ******************************************************************        
+      *    END OF SOURCE CODE FOR DAKUP004                             *        
+      ******************************************************************        

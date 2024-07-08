@@ -1,0 +1,532 @@
+      ******************************************************************        
+       IDENTIFICATION DIVISION.                                                 
+      ******************************************************************        
+                                                                                
+       PROGRAM-ID.    FSKUT031.                                                 
+       AUTHOR.        M JOHNSON.                                                
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+       DATE-WRITTEN.  09-2004.                                                  
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      * PROGRAM OBJECTIVE:                                                      
+      * ------------------                                                      
+      * SEQUENTIALLY READ A FILE CONTAINING ITEM LOCATION INFORMATION           
+      * AND WRITE OUT A FILE THAT CONTAINS THE ORIGINAL ITEM LOCATION           
+      * INFORMATION AND THE QTY ONHAND FROM THE TSKST DB2 TABLE.                
+      * IF THE DATA IS FOUND ON THE TSKST TABLE                                 
+MK    *   AND IF INTRANSIT OR STORE EXPECTED EXISTS                             
+      *     COMPUTE THE ONHAND AMOUNT                                           
+      *     COMPUTE THE STORE ONHAND AMOUNT                                     
+      *     MOVE THE INTRANSIT INFORMATION                                      
+      *     WRITE OUT THE UPDATED INFORMATION                                   
+      * ELSE                                                                    
+      *     DO NOT WRITE OUT A RECORD                                           
+      * END IF                                                                  
+      *                                                                         
+      ******************************************************************        
+      * CHANGE HISTORY:                                                         
+      * ---------------                                                         
+      * WR/PROJ DATE       PGMR        DESCRIPTION OF CHANGES                   
+      * ------- ---------- ----------- --------------------------------         
+      * WR27494 09-10-2004 M JOHNSON   ORIGINAL IMPLEMENTATION                  
+      *                                FALL04 PERFORMANCE TUNING                
+      *                                                                         
+      * WR27494 09-17-2004 M JOHNSON   THE INPUT RECORD LAYOUT WAS              
+      *                                CHANGED AND READ INTO FSRD066.           
+      *                                THE INPUT RECORD LENGTH WAS              
+      *                                REDUCED AND ALSO ADDED MOVES             
+      *                                FROM THE INPUT TO THE OUTPUT.            
+      * WR27494 10-17-2004 B FORD      REMOVED INTERMEDIATE RECORD COUNT        
+      *                                DISPLAYS AND UN-NEEDED FIELDS.           
+      *                                ADDED RTL-CHG-DTE AND STAT-CHG-DT        
+      *                                AND CHANGED LRECL.                       
+      * WR26354 03-30-2005 M KLAMIK    ADDED CALL TO XLKUT074 TO GET            
+      *                                INTRANSIT AND STORE EXPECTED.            
+      *                                STORE EXPECTED WILL BE USED TO           
+      *                                CALCULATE STORE ON-HAND.                 
+      *                                STORE ON-HAND WILL BE STORED ON          
+      *                                FILE IN THE ENROUTE FIELDS.              
+      * WR26354 04-21-2005 M KLAMIK    XL MODULE COULD NOT HANDLE               
+      *                                VOLUME.  CHANGED TO CALL XL              
+      *                                TABLE DIRECTLY-PCT_TRN_CLSN_BAL.         
+KP1005* WR29725 10-27-2005 K PETERSON  CHANGES REQUIRED FOR MARKDOWN            
+KP1005*                                OPTIMIZATION.  INCREASED LENGTH          
+KP1005*                                OF INPUT FILE.                           
+      ******************************************************************        
+                                                                                
+      ******************************************************************        
+       ENVIRONMENT DIVISION.                                                    
+      ******************************************************************        
+                                                                                
+      ******************************************************************        
+       CONFIGURATION SECTION.                                                   
+                                                                                
+       SOURCE-COMPUTER.    IBM-3090.                                            
+       OBJECT-COMPUTER.    IBM-3090.                                            
+                                                                                
+      ******************************************************************        
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+      ******************************************************************        
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT FS-CLEAR-PRC-FILE                                             
+             ASSIGN TO INP01.                                                   
+                                                                                
+           SELECT FS-CLEAR-PRC-W-ONHAND-FILE                                    
+             ASSIGN TO OUT01.                                                   
+                                                                                
+      /                                                                         
+      ******************************************************************        
+       DATA DIVISION.                                                           
+      ******************************************************************        
+                                                                                
+      ******************************************************************        
+       FILE SECTION.                                                            
+                                                                                
+       FD  FS-CLEAR-PRC-FILE                                                    
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+                                                                                
+KP1005 01  FS-CLEAR-PRC-DTL            PIC  X(71).                              
+                                                                                
+       FD  FS-CLEAR-PRC-W-ONHAND-FILE                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+                                                                                
+       01  FS-CLEAR-PRC-W-ONHAND-DTL   PIC  X(250).                             
+                                                                                
+      ******************************************************************        
+       WORKING-STORAGE SECTION.                                                 
+      ******************************************************************        
+                                                                                
+      ******************************************************************        
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-EDIT-ERROR-SW        PIC  X(01)          VALUE 'N'.           
+               88  PS-EDIT-ERROR                           VALUE 'Y'.           
+           05  PS-CLEAR-PRC-EOF-SW     PIC  X(01)          VALUE 'N'.           
+               88  PS-CLEAR-PRC-EOF                        VALUE 'Y'.           
+           05  PS-TSKST-FND-SW         PIC  X(01)          VALUE 'N'.           
+               88  PS-TSKST-FND                            VALUE 'Y'.           
+      ******************************************************************        
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-PROGRAM-NAME         PIC  X(08)          VALUE                
+               'FSKUT031'.                                                      
+           05  PC-MAX-RETRIES          PIC S9(04)          VALUE +3             
+                                                           COMP SYNC.           
+MK         05  PC-IT                   PIC X(02)           VALUE 'IT'.          
+MK         05  PC-SE                   PIC X(02)           VALUE 'SE'.          
+                                                                                
+      ******************************************************************        
+       01  PT-PROGRAM-TOTALS.                                                   
+           05  PT-CLEAR-PRC-RCD-READ   PIC S9(09)          VALUE +0             
+                                                           COMP-3.              
+           05  PT-TSKST-RCD-FND        PIC S9(09)          VALUE +0             
+                                                           COMP-3.              
+           05  PT-TSKST-RCD-NOT-FND    PIC S9(09)          VALUE +0             
+                                                           COMP-3.              
+           05  PT-FS-CLR-PRC-WON-WRTTN PIC S9(09)          VALUE +0             
+                                                           COMP-3.              
+      *    05  PT-DISPLAY-CNTR         PIC S9(09)          VALUE +0             
+      *                                                    COMP-3.              
+      *        88  PT-DISPLAY-CNTR-CNT                     VALUE                
+      *            5000000.                                                     
+      *            5000.                                                        
+                                                                                
+      ******************************************************************        
+       01  ABEND-CODE                  PIC S9(04)          VALUE +0             
+                                                           COMP SYNC.           
+                                                                                
+      ******************************************************************        
+      *01  SDT-SYSTEM-DATE-TIME.                                                
+      *    05  SDT-YYYYMMDD            PIC  X(10)          VALUE SPACE.         
+      *    05  FILLER REDEFINES SDT-YYYYMMDD.                                   
+      *        10  SDT-YYYYMMDD-CCYY.                                           
+      *            15  SDT-YYYYMMDD-CC PIC  X(02).                              
+      *            15  SDT-YYYYMMDD-YY PIC  X(02).                              
+      *        10  FILLER              PIC  X(01).                              
+      *        10  SDT-YYYYMMDD-MM     PIC  X(02).                              
+      *        10  FILLER              PIC  X(01).                              
+      *        10  SDT-YYYYMMDD-DD     PIC  X(02).                              
+      *    05  SDT-HHMMSS              PIC  X(08)          VALUE SPACE.         
+      *    05  FILLER REDEFINES SDT-HHMMSS.                                     
+      *        10  SDT-HHMMSS-HH       PIC  X(02).                              
+      *        10  FILLER              PIC  X(01).                              
+      *        10  SDT-HHMMSS-MM       PIC  X(02).                              
+      *        10  FILLER              PIC  X(01).                              
+      *        10  SDT-HHMMSS-SS       PIC  X(02).                              
+      *                                                                         
+      ******************************************************************        
+       01  PV-PROGRAM-VARIABLES.                                                
+           05  PV-SQL-SUB              PIC  9(03)          VALUE ZEROS.         
+           05  PV-RETRY-COUNT          PIC  9(03)          VALUE ZEROS.         
+           05  PV-PARAGRAPH-NAME       PIC  X(30)          VALUE SPACE.         
+           05  PV-DB2-OPERATION-ATTEMPTED                                       
+                                       PIC  X(30)          VALUE SPACE.         
+                                                                                
+      ******************************************************************        
+      *  INVENTORY MANAGEMENT CLEARANCE ITEM INFO - INPUT RECORD                
+      ******************************************************************        
+           COPY FSRD066.                                                        
+                                                                                
+      ******************************************************************        
+      *  FASHION SALES CLEARANCE ITEM INFO - OUTPUT RECORD                      
+      ******************************************************************        
+           COPY FSRD065.                                                        
+                                                                                
+      *****************************************************************         
+      *  DCLGEN LAYOUT AND COBOL DECLARATION OF FS-SKU STORE DB2 TABLE          
+      *****************************************************************         
+           EXEC SQL                                                             
+               INCLUDE TSKST                                                    
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  DCLGEN LAYOUT AND COBOL DECLARATION OF LOCATION DB2 TABLE              
+      *****************************************************************         
+           EXEC SQL                                                             
+               INCLUDE XMT00001                                                 
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  DCLGEN LAYOUT AND COBOL DECLARATION OF PCT DB2 TABLE                   
+      *****************************************************************         
+           EXEC SQL                                                             
+               INCLUDE PCT00014                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  COMMUNICATIONS AREA FOR DB2                                   *        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  COMMUNICATIONS AREA FOR DB2                                            
+      ******************************************************************        
+           COPY SQLCA2.                                                         
+                                                                                
+      ******************************************************************        
+      *  DB2 FORMATTED ERROR MESSAGE                                            
+      ******************************************************************        
+           COPY DPWS004.                                                        
+                                                                                
+      ******************************************************************        
+       PROCEDURE DIVISION.                                                      
+      ******************************************************************        
+                                                                                
+      ******************************************************************        
+      *  CONTROLS THE MAIN PROCESSING OF THE PROGRAM                            
+      ******************************************************************        
+       0000-CLEAR-PRC-ONHAND-QTY.                                               
+                                                                                
+      *    PERFORM 0100-INITIALIZE.                                             
+                                                                                
+           PERFORM 8000-OPEN-FILES.                                             
+                                                                                
+           PERFORM 8100-READ-CLEAR-PRC-RCD.                                     
+                                                                                
+           PERFORM 1000-PROCESS-CLEAR-PRC-ITM                                   
+               UNTIL PS-CLEAR-PRC-EOF                                           
+               OR PS-EDIT-ERROR.                                                
+                                                                                
+           PERFORM 8900-CLOSE-FILES.                                            
+                                                                                
+           PERFORM 0900-DISPLAY-PGM-TOTALS.                                     
+                                                                                
+           GOBACK.                                                              
+                                                                                
+      ******************************************************************        
+      * 0100-INITIALIZE.                                                        
+      ******************************************************************        
+      *0100-INITIALIZE.                                                         
+      *                                                                         
+      *    PERFORM 7600-SELECT-DATE-TIME.                                       
+      *                                                                         
+      *    DISPLAY 'FSKUT031 RUN DATE: ' SDT-YYYYMMDD ' - '                     
+      *       SDT-HHMMSS.                                                       
+                                                                                
+      ******************************************************************        
+      *    PERFORM 0900-DISPLAY-PGM-TOTALS.                                     
+      ******************************************************************        
+       0900-DISPLAY-PGM-TOTALS.                                                 
+                                                                                
+           DISPLAY '** FSKUT031 - PROGRAM TOTALS **'.                           
+           DISPLAY '** FSKUT031 - ' PT-CLEAR-PRC-RCD-READ                       
+               ' NUMBER RECORDS READ **'.                                       
+           DISPLAY '** FSKUT031 - ' PT-TSKST-RCD-FND                            
+               ' TSKST ROWS FND **'.                                            
+           DISPLAY '** FSKUT031 - ' PT-TSKST-RCD-NOT-FND                        
+               ' TSKST ROWS NOT FND **'.                                        
+           DISPLAY '** FSKUT031 - ' PT-FS-CLR-PRC-WON-WRTTN                     
+               ' NUMBER RECORDS WRITTEN **'.                                    
+                                                                                
+      /                                                                         
+      ******************************************************************        
+      * 1000-PROCESS-CLEAR-PRC-ITM                                              
+      ******************************************************************        
+       1000-PROCESS-CLEAR-PRC-ITM.                                              
+                                                                                
+           PERFORM 7000-SELECT-TSKST-ROW.                                       
+           IF PS-TSKST-FND                                                      
+               PERFORM 2000-FMT-FS-CLR-PRC-WOH-RCD                              
+           ELSE                                                                 
+               MOVE ZEROS              TO FS065-OH-QTY                          
+                                          FS065-OH-AMT                          
+               ADD +1                  TO PT-TSKST-RCD-NOT-FND                  
+           END-IF.                                                              
+                                                                                
+           PERFORM 8100-READ-CLEAR-PRC-RCD.                                     
+                                                                                
+      /                                                                         
+      ******************************************************************        
+       2000-FMT-FS-CLR-PRC-WOH-RCD.                                             
+                                                                                
+           INITIALIZE                  FS065-RCP-SKU-LIST-REC.                  
+           MOVE FS066-ITM-NBR          TO FS065-ITM-NBR.                        
+           MOVE FS066-STR-LVL-STAT-CDE TO FS065-STR-LVL-STAT-CDE.               
+           MOVE FS066-SUM-LVL-CDE      TO FS065-SUM-LVL-CDE.                    
+           MOVE FS066-SKU              TO FS065-SKU.                            
+           MOVE FS066-INTR-UPC-ID      TO FS065-INTR-UPC-ID.                    
+           MOVE FS066-UNT-RTL-AMT      TO FS065-UNT-RTL-AMT.                    
+           MOVE FS066-STR-NBR          TO FS065-STR-NBR.                        
+           MOVE FS066-UNT-RTL-CHG-DTE  TO FS065-UNT-RTL-CHG-DTE.                
+           MOVE FS066-STAT-CHG-DTE     TO FS065-STAT-CHG-DTE.                   
+                                                                                
+           MOVE TSKST-ONHAND-QTY       TO FS065-OH-QTY.                         
+           COMPUTE FS065-OH-AMT =                                               
+             FS065-OH-QTY * FS065-UNT-RTL-AMT.                                  
+                                                                                
+MK    **** PLEASE NOTE THAT WE ARE USING THE OBSOLETE ENROUTE                   
+MK    **** FIELDS AS THE NEW STORE ONHAND FIELDS.                               
+MK    **** ALSO, THE INTRANSIT FIELDS WILL CONTAIN THE CORRECT                  
+MK    **** INFORMATION FROM THE XL TABLE.                                       
+MK         PERFORM 7500-GET-STORE-EXPECTED.                                     
+MK                                                                              
+MK         COMPUTE FS065-ENTRE-QTY =                                            
+MK           TSKST-ONHAND-QTY - PCT00014-TRN-CLSN-QTY.                          
+MK         COMPUTE FS065-ENTRE-AMT =                                            
+MK           FS065-ENTRE-QTY * FS065-UNT-RTL-AMT.                               
+MK                                                                              
+MK         PERFORM 7550-GET-INTRANSIT.                                          
+MK                                                                              
+MK         MOVE PCT00014-TRN-CLSN-QTY TO FS065-IN-TRNST-QTY.                    
+MK         COMPUTE FS065-IN-TRNST-AMT =                                         
+MK           FS065-IN-TRNST-QTY * FS065-UNT-RTL-AMT.                            
+                                                                                
+           EVALUATE TRUE                                                        
+             WHEN FS066-TICKET-COLOR = 'W'                                      
+               MOVE 'WHITE'            TO FS065-TICKET-COLOR                    
+             WHEN FS066-TICKET-COLOR = 'Y'                                      
+               MOVE 'YELLOW'           TO FS065-TICKET-COLOR                    
+             WHEN FS066-TICKET-COLOR = 'R'                                      
+               MOVE 'RED'              TO FS065-TICKET-COLOR                    
+             WHEN OTHER                                                         
+               MOVE 'UNKNOWN'          TO FS065-TICKET-COLOR                    
+           END-EVALUATE                                                         
+                                                                                
+           MOVE FS066-SKU-LVL-STAT-CDE TO FS065-SKU-LVL-STAT-CDE.               
+           ADD +1                      TO PT-TSKST-RCD-FND.                     
+           PERFORM 8200-WRITE-FS-CLR-PRC-WOH-RCD.                               
+                                                                                
+      /                                                                         
+      ******************************************************************        
+      * 7000-SELECT-TSKST-ROW.                                                  
+      ******************************************************************        
+       7000-SELECT-TSKST-ROW.                                                   
+                                                                                
+           INITIALIZE                  PS-TSKST-FND-SW                          
+                                                                                
+           PERFORM                                                              
+             WITH TEST AFTER                                                    
+             VARYING PV-SQL-SUB                                                 
+               FROM 1 BY 1                                                      
+               UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                               
+               OR SQLCODE = 0                                                   
+               OR SQLCODE = +100)                                               
+                                                                                
+             EXEC SQL                                                           
+               SELECT ITEM_NMBR,                                                
+                      ONHAND_QTY,                                               
+                      LOC_NBR                                                   
+               INTO :TSKST-ITEM-NMBR,                                           
+                    :TSKST-ONHAND-QTY,                                          
+                    :TSKST-LOC-NBR                                              
+               FROM TSKST                                                       
+               WHERE ITEM_NMBR = :FS066-ITM-NBR                                 
+               AND LOC_NBR = :FS066-STR-NBR                                     
+               WITH UR                                                          
+             END-EXEC                                                           
+                                                                                
+             EVALUATE TRUE                                                      
+               WHEN SQLCODE = 0                                                 
+                 SET PS-TSKST-FND      TO TRUE                                  
+               WHEN SQLCODE = +100                                              
+                 CONTINUE                                                       
+               WHEN SQLCODE = -904                                              
+                 CONTINUE                                                       
+               WHEN SQLWARN0 NOT = SPACES                                       
+               WHEN SQLCODE < 0                                                 
+               WHEN SQLCODE > 0                                                 
+                 DISPLAY 'FSKUT031 - INVALID ITEM NMBR ' FS065-ITM-NBR          
+                 DISPLAY 'FSKUT031 - INVALID LOC NMR ' FS065-STR-NBR            
+                 MOVE '7000-SELECT-TSKST-ROW'                                   
+                                       TO PV-PARAGRAPH-NAME                     
+                 MOVE 'SELECT TSKST TABLE'                                      
+                                       TO PV-DB2-OPERATION-ATTEMPTED            
+                 PERFORM 9900-SQL-ABEND                                         
+             END-EVALUATE                                                       
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-SQL-SUB > PC-MAX-RETRIES                                       
+               MOVE '7000-SELECT-TSKST-ROW'                                     
+                                       TO PV-PARAGRAPH-NAME                     
+               MOVE 'MAX RETRIES EXCEEDED'                                      
+                                       TO PV-DB2-OPERATION-ATTEMPTED            
+               PERFORM 9900-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * CALL TO GET STORE EXPECTED.                                             
+      ******************************************************************        
+        7500-GET-STORE-EXPECTED.                                                
+                                                                                
+           INITIALIZE                  DCLPCT00014.                             
+                                                                                
+           MOVE FS066-INTR-UPC-ID      TO PCT00014-INTR-UPC-ID.                 
+           MOVE FS066-STR-NBR          TO PCT00014-LOC-NBR.                     
+           MOVE PC-SE                  TO PCT00014-TRN-CLSN-CDE.                
+                                                                                
+           EXEC SQL                                                             
+            SELECT   TRN_CLSN_QTY                                               
+              INTO  :PCT00014-TRN-CLSN-QTY                                      
+              FROM  PCT_TRN_CLSN_BAL                                            
+             WHERE  INTR_UPC_ID   = :PCT00014-INTR-UPC-ID                       
+               AND  TRN_CLSN_CDE  = :PCT00014-TRN-CLSN-CDE                      
+               AND  LOC_NBR       = :PCT00014-LOC-NBR                           
+              WITH  UR                                                          
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+             WHEN SQLCODE = 0                                                   
+               CONTINUE                                                         
+             WHEN OTHER                                                         
+               MOVE ZERO TO PCT00014-TRN-CLSN-QTY                               
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      * CALL TO GET INTRANSIT.                                                  
+      ******************************************************************        
+        7550-GET-INTRANSIT.                                                     
+                                                                                
+           INITIALIZE                  DCLPCT00014.                             
+                                                                                
+           MOVE FS066-INTR-UPC-ID      TO PCT00014-INTR-UPC-ID.                 
+           MOVE FS066-STR-NBR          TO PCT00014-LOC-NBR.                     
+           MOVE PC-IT                  TO PCT00014-TRN-CLSN-CDE.                
+                                                                                
+           EXEC SQL                                                             
+            SELECT   TRN_CLSN_QTY                                               
+              INTO  :PCT00014-TRN-CLSN-QTY                                      
+              FROM  PCT_TRN_CLSN_BAL                                            
+             WHERE  INTR_UPC_ID   = :PCT00014-INTR-UPC-ID                       
+               AND  TRN_CLSN_CDE  = :PCT00014-TRN-CLSN-CDE                      
+               AND  LOC_NBR       = :PCT00014-LOC-NBR                           
+              WITH  UR                                                          
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+             WHEN SQLCODE = 0                                                   
+               CONTINUE                                                         
+             WHEN OTHER                                                         
+               MOVE ZERO TO PCT00014-TRN-CLSN-QTY                               
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      * 7600-SELECT-DATE-TIME.                                                  
+      ******************************************************************        
+      *7600-SELECT-DATE-TIME.                                                   
+      *                                                                         
+      *    EXEC SQL                                                             
+      *      SELECT CURRENT DATE,                                               
+      *             CURRENT TIME                                                
+      *      INTO :SDT-YYYYMMDD,                                                
+      *            :SDT-HHMMSS                                                  
+      *      FROM SYSIBM.SYSDUMMY1                                              
+      *    END-EXEC.                                                            
+                                                                                
+      /*****************************************************************        
+      * 8000-OPEN-FILES.                                                        
+      ******************************************************************        
+       8000-OPEN-FILES.                                                         
+                                                                                
+           OPEN INPUT FS-CLEAR-PRC-FILE.                                        
+           OPEN OUTPUT FS-CLEAR-PRC-W-ONHAND-FILE.                              
+                                                                                
+      ******************************************************************        
+      * 8100-READ-CLEAR-PRC-RCD                                                 
+      ******************************************************************        
+       8100-READ-CLEAR-PRC-RCD.                                                 
+                                                                                
+           READ FS-CLEAR-PRC-FILE                                               
+             INTO FS066-RCP-SKU-LIST-REC                                        
+               AT END                                                           
+                 SET PS-CLEAR-PRC-EOF  TO TRUE.                                 
+                                                                                
+           IF NOT PS-CLEAR-PRC-EOF                                              
+             ADD +1                    TO PT-CLEAR-PRC-RCD-READ                 
+      *                                   PT-DISPLAY-CNTR                       
+      *      IF PT-DISPLAY-CNTR-CNT                                             
+      *        PERFORM 7600-SELECT-DATE-TIME                                    
+      *        DISPLAY 'FSKUT031 - ' SDT-YYYYMMDD ' - '                         
+      *          SDT-HHMMSS ' NBR RCDS READ '                                   
+      *          PT-CLEAR-PRC-RCD-READ ' ITEM NBR '                             
+      *          FS065-ITM-NBR ' LOC NBR ' FS065-STR-NBR                        
+      *        MOVE +0                  TO PT-DISPLAY-CNTR                      
+      *      END-IF                                                             
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 8200-WRITE-FS-CLR-PRC-WOH-RCD                                           
+      ******************************************************************        
+       8200-WRITE-FS-CLR-PRC-WOH-RCD.                                           
+                                                                                
+           WRITE FS-CLEAR-PRC-W-ONHAND-DTL                                      
+             FROM FS065-RCP-SKU-LIST-REC.                                       
+                                                                                
+           ADD +1                      TO PT-FS-CLR-PRC-WON-WRTTN.              
+                                                                                
+      ******************************************************************        
+      * 8900-CLOSE-FILES.                                                       
+      ******************************************************************        
+       8900-CLOSE-FILES.                                                        
+                                                                                
+           CLOSE FS-CLEAR-PRC-FILE                                              
+                 FS-CLEAR-PRC-W-ONHAND-FILE.                                    
+                                                                                
+      ******************************************************************        
+      * PERFORMS THE ABEND FOR THE PROGRAM IN THE                               
+      * EVENT THAT AN SQL ERROR OR WARNING CODE OCCURS.                         
+      ******************************************************************        
+       9900-SQL-ABEND.                                                          
+                                                                                
+           DISPLAY '** ABEND     **'.                                           
+           DISPLAY '** PROGRAM   ** = FSKUT031'.                                
+           DISPLAY '** PARAGRAPH ** = ' PV-PARAGRAPH-NAME.                      
+           DISPLAY '** OPERATION ** = ' PV-DB2-OPERATION-ATTEMPTED.             
+                                                                                
+           PERFORM 0900-DISPLAY-PGM-TOTALS.                                     
+                                                                                
+      ******************************************************************        
+      * THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-            
+      * MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE                 
+      * 'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE             
+      * FORMAT.                                                                 
+      ******************************************************************        
+           COPY DPPD004.                                                        
+                                                                                
+           MOVE +4013                  TO ABEND-CODE.                           
+           CALL 'ILBOABN0'             USING ABEND-CODE.                        
+                                                                                

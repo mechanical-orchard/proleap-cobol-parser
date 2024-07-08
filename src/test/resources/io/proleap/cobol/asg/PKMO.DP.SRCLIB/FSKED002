@@ -1,0 +1,1280 @@
+      ******************************************************************        
+       IDENTIFICATION DIVISION.                                                 
+      ******************************************************************        
+      *                                                                         
+       PROGRAM-ID.    FSKED002.                                                 
+       AUTHOR.        KRISTIN PETERSON.                                         
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+       DATE-WRITTEN.  01-03-2003.                                               
+       DATE-COMPILED.                                                           
+      *                                                                         
+      ******************************************************************        
+      *       FSKED002 - EDIT ADJUSTMENT TRANSACTIONS AND LOAD TO               
+      *                  THE ON-HAND ADJUSTMENT AUDIT TABLE.                    
+      ******************************************************************        
+      *   THIS PROGRAM RUNS UNDER THE DB2 CHECKPOINT RESTART SYSTEM.            
+      *   PRIOR TO THIS PROGRAM RUNNING THE ADJUSTMENT TRANSACTIONS             
+      *   ARE SORTED BY ITEM NUMBER, LOCATION NUMBER, ADJUSTMENT TYPE,          
+      *   ACTION CODE AND BATCH NUMBER.                                         
+      *                                                                         
+      *   AFTER THE ADJUSTMENT TRANSACTION FILE IS SORTED IT IS                 
+      *   PROCESSED BY A TRANSACTION PREPARATION PROGRAM (FSKUT060)             
+      *   WHICH READS THE RECORDS, APPENDS ADDITIONAL INFORMATION ONTO          
+      *   EACH TRANSACTION BASED ON HOW CHECKPOINTS ARE TO BE TAKEN BY          
+      *   THE MAINTENANCE PROGRAM, AND PASSES THE MODIFIED RECORD TO            
+      *   THE TRANSACTION PREPARATION MODULE (DPKUT900).  A UNIQUE              
+      *   SEQUENCE NUMBER IS THEN ASSIGNED TO EACH TRANSACTION AND THE          
+      *   RECORDS ARE WRITTEN OUT TO A SEQUENTIAL FILE.  AFTER GOING            
+      *   THROUGH THE TRANSACTION PREPARATION PROCESS THE FILE IS               
+      *   READY TO BE PROCESSED BY THIS PROGRAM WHILE RUNNING UNDER             
+      *   UNDER THE DB2 CHECKPOINT RESTART SYSTEM.                              
+      *                                                                         
+      *   THE MODIFIED ADJUSTMENT TRANSACTION FILE IS NOT READ BY THIS          
+      *   PROGRAM.  INSTEAD THE TRANSACTIONS ARE PASSED TO THE                  
+      *   MAINTENANCE PROGRAM FOR PROCESSING BY THE TRANSACTION                 
+      *   PRESENTATION MODULE (DPKUT901).  COMMUNICATION BETWEEN THE            
+      *   MAINTENANCE PROGRAM AND PRESENTATION MODULE IS DONE USING             
+      *   FUNCTON CODES (OPEN, TRANS, CKPT, RSTRT AND CLOSE).                   
+      *                                                                         
+      *   AN 'OPEN' REQUEST IS ISSUED TO FIRST ESTABLISH COMMUNICATION          
+      *   BETWEEN THE TWO PROGRAMS; THIS VERIFIES THAT THE MAINTENANCE          
+      *   PROGRAM IS SET UP TO USE THE CHECKPOINT RESTART SYSTEM, THAT          
+      *   THERE IS AN ADJUSTMENT TRANSACTION FILE THAT HAS GONE                 
+      *   THROUGH THE TRANSACTION PREPARATION PROCESS READY TO BE               
+      *   PROCESSED, AND WHETHER THIS IS A NORMAL RUN OR RESTART.               
+      *                                                                         
+      *   A 'TRANS' REQUEST IS ISSUED TO REQUEST THE NEXT ADJUSTMENT            
+      *   TRANSACTION TO BE PROCESSED.                                          
+      *                                                                         
+      *   A 'CKPT' REQUEST IS ISSUED IF THE MAINTENANCE PROGRAM WANTS           
+      *   TO REQUEST A CHECKPOINT.                                              
+      *                                                                         
+      *   A 'RSTRT' REQUEST IS ISSUED WHEN THE MAINTENANCE PROGRAM              
+      *   RECEIVES AN SQLCODE -911 FROM ACCESSING THE SKU TABLES AND            
+      *   NEEDS TO RESUME PROCESSING FROM THE LAST CHECKPOINT THAT WAS          
+      *   TAKEN.                                                                
+      *                                                                         
+      *   A 'CLOSE' REQUEST IS ISSUED TO TERMINATE COMMUNICATION WITH           
+      *   THE TRANSACTION PRESENTATION MODULE AFTER ALL TRANSACTIONS            
+      *   HAVE BEEN PROCESSED.                                                  
+      *                                                                         
+      *   IF THE CHECKPOINT CONTROLS (TCKRSTCNTL) FOR THE MAINTENANCE           
+      *   PROGRAM ARE SETUP TO TAKE CHECKPOINTS AUTOMATICALLY, THE              
+      *   TRANSACTION PRESENTATION MODULE WILL CONTROL WHEN A CHECK-            
+      *   POINT IS TO BE TAKEN.  BECAUSE THE MAINTENANCE PROGRAM                
+      *   DOESN'T KNOW WHEN A CHECKPONT IS BEING TAKEN, WHATEVER                
+      *   THINGS IN WORKING-STORAGE NEED TO BE SAVED TO DO A RESTART            
+      *   SHOULD BE PASSED TO THE PRESENATION MODULE ON EVERY CALL.             
+      *                                                                         
+      *   WHEN THE MAINTENANCE PROGRAM IS BEING RESTARTED THE TRANS-            
+      *   ACTION PRESENTATION MODULE WILL PASS BACK THE TRANSACTION             
+      *   TO BE PROCESSED AFTER THE LAST CHECKPOINT THAT WAS TAKEN AND          
+      *   WORKING-STORAGE AS IT LOOKED AT THE TIME OF THE LAST CHECK-           
+      *   POINT.  THE MAINTENANCE PROGRAM MUST THEN OVERLAY WORKING-            
+      *   STORAGE WITH THE WORKING-STORAGE RETURNED FROM THE TRANSAC-           
+      *   TION PRESENTATION MODULE.                                             
+      *                                                                         
+      *   THIS PROGRAM PROCESSES THE ADJUSTMENT (DFSMSA70) BATCH                
+      *   MAINTENANCE TRANSACTIONS.  A FILE OF ADJUSTMENT TRANSACTIONS          
+      *   IS PRODUCED BY PROGRAM FSKUT120.  THIS FILE IS THEN SORTED            
+      *   AND PROCESSED BY CHECKPOINT/RESTART PREP PROGRAM FSKUT060,            
+      *   WHICH CREATES THE INPUT FILE USED IN THIS PROGRAM.                    
+      *                                                                         
+      *   INPUT FILES:    NONE (RECORDS ARE IN THE CHECKPOINT/RESTART           
+      *                   PROCESS MODULE - WHICH IS CALLED FROM                 
+      *                   THIS PROGRAM.)                                        
+      *                                                                         
+      *   OUTPUT FILES:   NONE                                                  
+      *                                                                         
+      *   I/O:   XMT_LOC            DB2 TABLE   SELECT                          
+      *          XMT_DC_LOC_ASGMT   DB2 TABLE   SELECT                          
+      *          TSKXREF            DB2 TABLE   SELECT                          
+      *          FSTT_OH_ADJ_AUD    DB2 TABLE   INSERT                          
+      *                                                                         
+      *   GENERAL LOGIC DESCRIPTION:                                            
+      *                                                                         
+      *   THIS PROGRAM EDITS THE TRANSACTIONS AND INSERTS THEM TO               
+      *   TABLE FSTT_OH_ADJ_AUD.  TRANSACTIONS THAT PASS ALL EDITS              
+      *   ARE INSERTED TO THE TABLE WITH A STATUS OF 'A' (AUDIT).               
+      *   TRANSACTIONS THAT DO NOT PASS ALL EDITS ARE INSERTED TO THE           
+      *   TABLE WITH A STATUS OF 'E' (ERROR).  BYPASSED TRANSACTIONS            
+      *   ARE INSERTED TO THE TABLE WITH A STATUS OF 'B' (BYPASSED).            
+      *                                                                         
+      ******************************************************************        
+      *  CHANGE LOG:                                                            
+      *                                                                         
+      *  01/03/03 - KRISTIN PETERSON                                            
+      *             (WR #23946) NEW PROGRAM FOR NIS CORE UPDATES -              
+      *             CONVERGENCE PROJECT.  THIS PROGRAM EDITS ADJUSTMENT         
+      *             TRANSACTIONS AND LOADS THEM TO THE ON-HAND                  
+      *             ADJUSTMENT AUDIT WORK TABLE.                                
+      *                                                                         
+      *  04/14/04 - MARIA KLAMIK                                                
+      *             (WR #26355) CHANGE FOR STORE NUMBER EXPANSION.              
+      *             REMOVED ADJUSTMENT TYPES 141 AND 142.  ADDED CODE           
+      *             TO HANDLE UNIT BOOKING ADJUSTMENTS.                         
+      *                                                                         
+      *  07/31/06 - RICH KELLEN                                                 
+      *             (WR #30723) REMOVE CHECK FOR SKU_STAT_CDE NOT = '00'        
+      *                                                                         
+      *  10/14/09 - PAUL KEBER             INC #: INC000000995601               
+      *             REMOVED LOCATION TABLE AND FILLER FROM WORK-STORAGE-        
+      *             PASSED SENT TO TRANSACTION PRESENTATION MODULE.             
+OCFSFS*  08/27/13 - RACHEL GRAMANN                                              
+OCFSFS*             OCF SHIP FROM STORE PROJECT TO FEED MERCHANDISE             
+OCFSFS*             CHANGES TO FASHION SALES                                    
+MIRAKL*  07/07/20 - COGNIZANT                        #CHG0246563                
+MIRAKL*             ADDED LOGIC TO BYPASS THE ADJUSTMENT TRANSACTION            
+MIRAKL*             FOR DEPARTMENT 985(MARKETPLACE - MIRAKL)                    
+260107*  08/19/21 - GERMAN BANDA                     #CHG0260107                
+260107*             ADDED COPYBOOK DPWS991 TO MAKE THE CALL TO                  
+260107*             DPKUT901 DYNAMIC.                                           
+      ******************************************************************        
+       ENVIRONMENT DIVISION.                                                    
+      ******************************************************************        
+      *                                                                         
+       CONFIGURATION SECTION.                                                   
+       SOURCE-COMPUTER.  IBM-3090.                                              
+       OBJECT-COMPUTER.  IBM-3090.                                              
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT CONTROL-CARD-FILE                                             
+               ASSIGN TO INP02.                                                 
+                                                                                
+      ******************************************************************        
+       DATA DIVISION.                                                           
+      ******************************************************************        
+                                                                                
+       FILE SECTION.                                                            
+                                                                                
+       FD  CONTROL-CARD-FILE                                                    
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           RECORD CONTAINS 80 CHARACTERS                                        
+           BLOCK CONTAINS 0 RECORDS.                                            
+                                                                                
+       01  CC-CONTROL-CARD-RECORD        PIC X(80).                             
+                                                                                
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  ABEND-CODE                    PIC S9(04)    VALUE ZERO               
+                                                       COMP                     
+                                                       SYNC.                    
+                                                                                
+      * WORKING-STORAGE FOR FORMATTING DB2 ERROR MESSAGES                       
+                                                                                
+           COPY DPWS004.                                                        
+                                                                                
+      * WORKING-STORAGE FOR CALENDAR ROUTINE                                    
+                                                                                
+           COPY DPWS500.                                                        
+                                                                                
+      * CONTROL CARD FILE LAYOUT.                                               
+                                                                                
+       01  CC-CONTROL-CARD.                                                     
+           05  CC-PROCESS-DATE           PIC  X(10).                            
+           05  FILLER                    PIC  X(01).                            
+           05  CC-PROCESS-EMPTY-IND      PIC  X(01).                            
+MK         05  FILLER                    PIC  X(01).                            
+MK         05  CC-JOB-NUMBER             PIC  X(08).                            
+MK         05  FILLER                    PIC  X(59).                            
+                                                                                
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-OPEN-FUNC              PIC X(05)     VALUE 'OPEN '.           
+           05  PC-TRANS-FUNC             PIC X(05)     VALUE 'TRANS'.           
+           05  PC-CLOSE-FUNC             PIC X(05)     VALUE 'CLOSE'.           
+           05  PC-RSTRT-FUNC             PIC X(05)     VALUE 'RSTRT'.           
+           05  PC-CKPT-PLAN-NAME         PIC X(08)     VALUE 'FSKED002'.        
+           05  PC-PROGRAM-NAME           PIC X(08)     VALUE 'FSKED002'.        
+           05  PC-PHYSINV-BATCH-NMBR     PIC X(04)     VALUE 'INOL'.            
+MK         05  PC-INV-ADJ-BATCH-NMBR     PIC X(04)     VALUE 'INAD'.            
+           05  PC-MAX-RETRIES            PIC S9(04)    VALUE +3                 
+                                                       COMP SYNC.               
+                                                                                
+      ******************************************************************        
+      *  ADJUSTMENT TRANSACTION RECORD LAYOUT                                   
+      ******************************************************************        
+           COPY FSRD035.                                                        
+                                                                                
+      ******************************************************************        
+      *  DCLGEN MEMBER FOR TABLE XMT_LOC (LOCATION TABLE)                       
+      *  THIS IS A MERCHANDISING DOMAIN REPLICATED TABLE.                       
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE XMT00001                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  DCLGEN MEMBER FOR TABLE XMT_DC_LOC_ASGMT                               
+      *  (DC TO LOCATION ASSIGNMENT TABLE)                                      
+      *  THIS IS A MERCHANDISING DOMAIN REPLICATED TABLE.                       
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE XMT00002                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  DCLGEN MEMBER FOR TABLE TSKXREF (CROSS REFERENCE TABLE)                
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TSKXREF                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  DCLGEN MEMBER FOR TABLE FSTT_OH_ADJ_AUD                                
+      *  (FASHION SALES ON-HAND ADJUSTMENT AUDIT WORK TABLE)                    
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE FST00003                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  COMMUNICATIONS AREA FOR DB2                                            
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  SQL ERROR AREA                                                         
+      ******************************************************************        
+           COPY SQLCA2.                                                         
+      ******************************************************************        
+      *  TRANSACTION PRESENTATION MODULE COMMUNICATIONS AREA                    
+      ******************************************************************        
+260107     COPY DPWS991.                                                        
+015900                                                                          
+           COPY DPLS001.                                                        
+         05  WORK-STORAGE-PASSED.                                               
+           10  PA-PROGRAM-ACCUMULATORS                 COMP-3.                  
+               15  PA-ST-INPUT           PIC S9(7)     VALUE 0.                 
+               15  PA-STORE-SUB          PIC S9(5)     VALUE 0.                 
+               15  PA-INPUT-AMT          PIC S9(9)V99  VALUE 0.                 
+               15  PA-INPUT-QTY          PIC S9(7)     VALUE 0.                 
+               15  PA-RECORD-TOTAL       PIC S9(7)     VALUE 0.                 
+           10  PA-DB2-ACCESS-COUNTS.                                            
+               15  PA-DB2-TSKXREF-SEL    PIC S9(7)     VALUE 0.                 
+               15  PA-DB2-ADJ-AUD-INS    PIC S9(7)     VALUE 0.                 
+           10  PS-PROGRAM-SWITCHES.                                             
+               15  PS-END-OF-CSR-SW      PIC X(1)      VALUE SPACES.            
+                   88  PS-END-OF-CSR                   VALUE 'Y'.               
+               15  PS-MAINT-EOF-SW       PIC X(1)      VALUE SPACES.            
+                   88  PS-MAINT-EOF                    VALUE 'Y'.               
+           10  PV-PROGRAM-VARIABLES.                                            
+               15  PV-PARAGRAPH-NAME     PIC X(30)     VALUE SPACES.            
+MK             15  PV-JOB-NUMBER         PIC X(08)     VALUE SPACES.            
+               15  PV-DB2-OPERATION-ATTEMPTED                                   
+                                         PIC X(30)     VALUE SPACES.            
+               15  PV-RETRY-COUNT        PIC S9(04)    VALUE ZERO               
+                                                       COMP SYNC.               
+               15  PV-PROCESS-DATE.                                             
+                   20  PV-PROCESS-YEAR   PIC X(04)     VALUE SPACES.            
+                   20  FILLER            PIC X(01)     VALUE '-'.               
+                   20  PV-PROCESS-MONTH  PIC X(02)     VALUE SPACES.            
+                   20  FILLER            PIC X(01)     VALUE '-'.               
+                   20  PV-PROCESS-DAY    PIC X(02)     VALUE SPACES.            
+               15  PV-TRN-ERR-CODE       PIC X(03)     VALUE SPACES.            
+                   88  PV-NO-ERRORS                    VALUE  '000'.            
+               15  PV-ADJ-TYPE           PIC X(03)     VALUE SPACES.            
+                   88  PV-VALID-ADJ-TYPE               VALUES '121',            
+                                                              '123',            
+OCFSFS                                                        '125',            
+                                                              '143'.            
+MK                 88  PV-VALID-INV-ADJ-TYPE           VALUES '121'.            
+               15  PV-ACTION-CODE        PIC X(01)     VALUE SPACES.            
+                   88  PV-VALID-ACTION-CODE            VALUES '+',              
+                                                              '-',              
+                                                              'R'.              
+               15  PV-UNIT-BOOKING-CODE  PIC X(01)     VALUE SPACES.            
+                   88  PV-NOT-UNT-BKG-ADJ              VALUES ' ',              
+                                                              'N'.              
+                   88  PV-POST-UNT-BKG-ADJ             VALUE  'Y'.              
+                                                                                
+               15  PV-PREV-ITM-NBR       PIC S9(15)V   VALUE +1 COMP-3.         
+               15  PV-PREV-DEPT          PIC S9(04)V   VALUE +0 COMP-3.         
+               15  PV-PREV-CLASS         PIC S9(04)V   VALUE +0 COMP-3.         
+               15  PV-PREV-SUBCLASS      PIC S9(04)V   VALUE +0 COMP-3.         
+               15  PV-PREV-ERR-CDE       PIC X(03)     VALUE  '000'.            
+                   88  PV-PREV-NO-ERRORS               VALUE  '000'.            
+                   88  PV-PREV-ITM-NBR-ERR             VALUES '004'             
+                                                              '005'.            
+                                                                                
+               15  PV-ADJ-QTY-X          PIC X(08)     VALUE SPACES.            
+               15  PV-ADJ-QTY-9   REDEFINES                                     
+                   PV-ADJ-QTY-X          PIC 9(08).                             
+                                                                                
+MK    *** PLEASE NOTE THAT PV-LOC-NBR-X AND PV-LOC-NBR-9 SHOULD NOT             
+MK    *** BE USED FOR ANYTHING OTHER THAN THE NUMERIC EDIT CHECKING.            
+MK    *** THIS FIELD CANNOT SUPPORT THE 5 DIGITS NEEDED FOR LOCATION            
+MK    *** NUMBER.  A 5 DIGIT LOCATION NUMBER WILL BE TRUNCATED.                 
+               15  PV-LOC-NBR-X          PIC X(04)     VALUE SPACES.            
+               15  PV-LOC-NBR-9   REDEFINES                                     
+                   PV-LOC-NBR-X          PIC 9(04).                             
+                                                                                
+               15  PV-ADJ-INPUT-CNT      PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TSKXREF-SELECT-CNT                                        
+                                         PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TSKXREF-SEL-RENUM-CNT                                     
+                                         PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TSKXREF-ITM-NOT-FND-CNT                                   
+                                         PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TSKXREF-RENUM-NOT-FND-CNT                                 
+                                         PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TRN-STAT-A-CNT     PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TRN-STAT-B-CNT     PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TRN-STAT-E-CNT     PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TRN-ERR-001-CNT    PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TRN-ERR-002-CNT    PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TRN-ERR-003-CNT    PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TRN-ERR-004-CNT    PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TRN-ERR-005-CNT    PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TRN-ERR-006-CNT    PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TRN-ERR-007-CNT    PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TRN-ERR-008-CNT    PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TRN-ERR-009-CNT    PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TRN-ERR-010-CNT    PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-TRN-ERR-011-CNT    PIC S9(09)    VALUE +0 COMP-3.         
+               15  PV-INSERT-CNT         PIC S9(09)    VALUE +0 COMP-3.         
+                                                                                
+      ******************************************************************        
+      *     FORMATTED FIELDS FOR END OF JOB DISPLAY COUNTS.                     
+      ******************************************************************        
+       01  PV-DISPLAY-COUNTS.                                                   
+           10  PV-ADJ-INPUT-CNT-DISP PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TSKXREF-SELECT-CNT-DISP                                       
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TSKXREF-ITM-NF-DISP                                           
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TSKXREF-SEL-RENUM-CNT-DISP                                    
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TSKXREF-RENUM-NF-CNT-DISP                                     
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-STAT-A-CNT-DISP                                           
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-STAT-B-CNT-DISP                                           
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-STAT-E-CNT-DISP                                           
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-ERR-001-CNT-DISP                                          
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-ERR-002-CNT-DISP                                          
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-ERR-003-CNT-DISP                                          
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-ERR-004-CNT-DISP                                          
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-ERR-005-CNT-DISP                                          
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-ERR-006-CNT-DISP                                          
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-ERR-007-CNT-DISP                                          
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-ERR-008-CNT-DISP                                          
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-ERR-009-CNT-DISP                                          
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-ERR-010-CNT-DISP                                          
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-TRN-ERR-011-CNT-DISP                                          
+                                     PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+           10  PV-INSERT-CNT-DISP    PIC ZZZ,ZZZ,ZZ9 VALUE ZEROES.              
+                                                                                
+      ******************************************************************        
+      *     VALID LOCATION TABLE                                                
+      ******************************************************************        
+       01  LOCATION-TABLE-INFO.                                                 
+           10  TABLE-MAX.                                                       
+               15  LOC-TABLE-MAX         PIC 9(4)       VALUE 5000.             
+                                                                                
+           10  TABLE-PARMS.                                                     
+               15  LOCATION-TBL-SIZE     PIC 9(04)      VALUE ZEROES.           
+                                                                                
+           10  LOCATION-TABLE.                                                  
+               15  LOCATION-ENTRY        OCCURS 5000 TIMES                      
+                                         ASCENDING KEY IS LOC-NBR               
+                                         INDEXED BY LOC-INDEX.                  
+                   20  LOC-NBR           PIC S9(04) COMP.                       
+                                                                                
+      ******************************************************************        
+      *  DECLARE SQL STATEMENT FOR RETRIEVING STORES FROM THE                   
+      *  LOCATION TABLE.                                                        
+      ******************************************************************        
+           EXEC SQL                                                             
+               DECLARE LOC_CSR CURSOR FOR                                       
+                SELECT A.LOC_NBR                                                
+                  FROM XMT_LOC A                                                
+                 WHERE A.LOC_TYP_CDE = 'DS'                                     
+                   AND ((A.FINCL_CLO_DTE >= CURRENT DATE)                       
+                    OR  (A.FINCL_CLO_DTE IS NULL))                              
+                   AND EXISTS                                                   
+                       (SELECT 1                                                
+                          FROM XMT_DC_LOC_ASGMT B                               
+                         WHERE A.LOC_NBR = B.LOC_NBR                            
+                           AND B.PO_STRT_DTE <= CURRENT DATE)                   
+                UNION                                                           
+                SELECT LOC_NBR                                                  
+                  FROM XMT_LOC                                                  
+                 WHERE LOC_TYP_CDE = 'CS'                                       
+                   AND ((FINCL_CLO_DTE >= CURRENT DATE)                         
+                    OR  (FINCL_CLO_DTE IS NULL))                                
+                  ORDER BY LOC_NBR                                              
+                WITH UR                                                         
+           END-EXEC.                                                            
+      *                                                                         
+      ******************************************************************        
+       PROCEDURE DIVISION.                                                      
+                                                                                
+       0000-MAINLINE-PROCESSING.                                                
+                                                                                
+           PERFORM 1000-INITIALIZATION.                                         
+                                                                                
+           PERFORM 2000-PROCESS-MAINTENANCE                                     
+             UNTIL PS-MAINT-EOF.                                                
+                                                                                
+           PERFORM 9000-END-OF-JOB.                                             
+                                                                                
+           GOBACK.                                                              
+                                                                                
+      ******************************************************************        
+      * PERFORM ALL PROGRAM INITIALIZATION.                                     
+      ******************************************************************        
+       1000-INITIALIZATION.                                                     
+                                                                                
+           OPEN INPUT  CONTROL-CARD-FILE.                                       
+                                                                                
+           PERFORM 1100-PROCESS-CONTROL-CARD.                                   
+           PERFORM 1200-LOAD-LOCATION-TBL.                                      
+                                                                                
+      **** INITIALIZE THE DCLGEN FOR FSTT_OH_ADJ_AUD                            
+           INITIALIZE DCLFST00003.                                              
+                                                                                
+      **** READ THE FIRST TRANSACTON                                            
+           MOVE PC-OPEN-FUNC TO DP001-FUNC-CODE.                                
+           PERFORM 7000-BUILD-COMM-AREA-TRAN-PRES.                              
+                                                                                
+      ******************************************************************        
+      * VALIDATE THE CONTROL CARD DATE                                          
+      ******************************************************************        
+       1100-PROCESS-CONTROL-CARD.                                               
+                                                                                
+           READ CONTROL-CARD-FILE INTO CC-CONTROL-CARD                          
+               AT END DISPLAY '** ABEND ** IN PROGRAM FSKED002'                 
+                      DISPLAY '** CONTROL-CARD-FILE EMPTY'                      
+                      MOVE +4003 TO ABEND-CODE                                  
+                      CALL 'ILBOABN0' USING ABEND-CODE.                         
+                                                                                
+           DISPLAY SPACES.                                                      
+           DISPLAY '** FSKED002 CONTROL-CARD: ' CC-PROCESS-DATE.                
+                                                                                
+           PERFORM 1110-VALIDATE-CC-DATE.                                       
+           PERFORM 1120-VALIDATE-CC-IND.                                        
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  CHECK THAT THE CONTROL CARD DATE IS A VALID DATE.                      
+      ******************************************************************        
+       1110-VALIDATE-CC-DATE.                                                   
+                                                                                
+           INITIALIZE DPG51 DPG52 DPG53 DPG54 DPG55 DPG56.                      
+      *    SET DPG51-FISCAL-454-CALENDAR                                        
+           SET DPG51-FISCAL-JAN-DEC-F2                                          
+               DPG51-DO-NOT-INCR-DECR-DATE                                      
+               DPG52-LK-DTE-ISO-FMT        TO TRUE.                             
+                                                                                
+           MOVE CC-PROCESS-DATE TO DPG52-LK-DATE-INPUT                          
+                                                                                
+           CALL DP500-KOHLS-CALENDAR-ROUTINE                                    
+               USING DPG51 DPG52 DPG53 DPG54 DPG55 DPG56.                       
+                                                                                
+           IF DPG54-DATE-INVALID                                                
+               DISPLAY '** ABEND ** IN FSKED002'                                
+               DISPLAY '** PARAGRAPH: 1110-VALIDATE-CC-DATE.'                   
+               DISPLAY '** INVALID PROCESS DATE ON CONTROL CARD.'               
+               DISPLAY '** CALENDAR ROUTINE ERROR MESSAGE = '                   
+                           DPG54-ERROR-MESSAGE                                  
+               DISPLAY '** DPG51 = ' DPG51                                      
+               DISPLAY '** DPG52 = ' DPG52                                      
+               DISPLAY '** DPG53 = ' DPG53                                      
+               DISPLAY '** DPG54 = ' DPG54                                      
+               DISPLAY '** DPG55 = ' DPG55                                      
+               DISPLAY '** DPG56 = ' DPG56                                      
+               MOVE +4003 TO ABEND-CODE                                         
+               CALL 'ILBOABN0' USING ABEND-CODE                                 
+           ELSE                                                                 
+               IF DPG54-SEVERE-ERROR                                            
+                   DISPLAY '** ABEND ** IN FSKED002'                            
+                   DISPLAY '** INVALID RETURN FROM CALENDAR ROUTINE.'           
+                   DISPLAY '** CALLED BY 1110-VALIDATE-CC-DATE.'                
+                   DISPLAY '** ERROR MESSAGE = ' DPG54-ERROR-MESSAGE            
+                   DISPLAY '** DPG51 = ' DPG51                                  
+                   DISPLAY '** DPG52 = ' DPG52                                  
+                   DISPLAY '** DPG53 = ' DPG53                                  
+                   DISPLAY '** DPG54 = ' DPG54                                  
+                   DISPLAY '** DPG55 = ' DPG55                                  
+                   DISPLAY '** DPG56 = ' DPG56                                  
+                   MOVE +4003 TO ABEND-CODE                                     
+                   CALL 'ILBOABN0' USING ABEND-CODE                             
+               ELSE                                                             
+                   IF DPG54-WARNING-ERROR                                       
+                       DISPLAY                                                  
+                             '** WARNING RETURNED BY CALENDAR ROUTINE.'         
+                       DISPLAY                                                  
+                             '** CALLED BY 1110-VALIDATE-CC-DATE.'              
+                       DISPLAY                                                  
+                             '** WARNING MESSAGE = ' DPG54-ERROR-MESSAGE        
+                   END-IF                                                       
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+           MOVE DPG55-DB2-ISO-DATE-FMT TO PV-PROCESS-DATE.                      
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  CHECK THAT THE CONTROL CARD 'PROCESS EMPTY' INDICATOR IS VALID.        
+      ******************************************************************        
+       1120-VALIDATE-CC-IND.                                                    
+                                                                                
+           IF CC-PROCESS-EMPTY-IND = 'N' OR 'Y'                                 
+              DISPLAY '** FSKED002 PROCESS EMPTY INDICATOR = '                  
+                                              CC-PROCESS-EMPTY-IND              
+           ELSE                                                                 
+              DISPLAY '** ABEND ** IN PROGRAM FSKED002'                         
+              DISPLAY '** CONTROL CARD FIELD INVALID'                           
+              DISPLAY '** CC-PROCESS-EMPTY-IND VALID VALUES - Y OR N'           
+              DISPLAY '** CC-PROCESS-EMPTY-IND = ' CC-PROCESS-EMPTY-IND         
+              MOVE +4003 TO ABEND-CODE                                          
+              CALL 'ILBOABN0' USING ABEND-CODE                                  
+           END-IF.                                                              
+                                                                                
+           IF CC-JOB-NUMBER > SPACES                                            
+              DISPLAY '** FSKED002 ---> JOB NUMBER = '                          
+                                              CC-JOB-NUMBER                     
+              MOVE CC-JOB-NUMBER TO PV-JOB-NUMBER                               
+           ELSE                                                                 
+              DISPLAY '** ABEND ** IN PROGRAM FSKED002'                         
+              DISPLAY '** CONTROL CARD FIELD INVALID'                           
+              DISPLAY '** CC-JOB-NUMBER DOES NOT EXIST'                         
+              DISPLAY '** CC-JOB-NUMBER = ' CC-JOB-NUMBER                       
+              MOVE +4003 TO ABEND-CODE                                          
+              CALL 'ILBOABN0' USING ABEND-CODE                                  
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  LOAD WORKING-STORAGE LOCATION TABLE WITH VALID LOCATIONS.              
+      ******************************************************************        
+       1200-LOAD-LOCATION-TBL.                                                  
+                                                                                
+           MOVE '1200-LOAD-LOCATION-TBL' TO PV-PARAGRAPH-NAME.                  
+           EXEC SQL                                                             
+               OPEN LOC_CSR                                                     
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE SQLCODE                                                     
+              WHEN +0                                                           
+                CONTINUE                                                        
+              WHEN OTHER                                                        
+                MOVE 'OPEN LOCATION CURSOR' TO                                  
+                    PV-DB2-OPERATION-ATTEMPTED                                  
+                PERFORM 9999-SQL-ABEND                                          
+           END-EVALUATE.                                                        
+                                                                                
+           MOVE ZERO TO LOCATION-TBL-SIZE.                                      
+           MOVE 'N' TO PS-END-OF-CSR-SW.                                        
+           PERFORM 1201-FETCH-LOC-CSR.                                          
+                                                                                
+           PERFORM VARYING LOC-INDEX FROM 1 BY 1                                
+                             UNTIL LOC-INDEX > LOC-TABLE-MAX                    
+                                OR PS-END-OF-CSR                                
+             MOVE XMT00001-LOC-NBR      TO LOC-NBR(LOC-INDEX)                   
+             ADD 1 TO LOCATION-TBL-SIZE                                         
+             PERFORM 1201-FETCH-LOC-CSR                                         
+           END-PERFORM.                                                         
+                                                                                
+           IF LOC-INDEX >  LOC-TABLE-MAX                                        
+             DISPLAY '*********** ABEND ************************'               
+             DISPLAY ' TABLE OVERFLOW ON LOCATION-TABLE         '               
+             DISPLAY ' INCREASE LOC-TABLE-MAX LIMIT             '               
+             DISPLAY ' CURRENT LIMIT = ' LOC-TABLE-MAX                          
+             DISPLAY '******************************************'               
+             DISPLAY '  '                                                       
+             MOVE +4004 TO ABEND-CODE                                           
+             CALL 'ILBOABN0' USING ABEND-CODE                                   
+           END-IF.                                                              
+                                                                                
+           EXEC SQL                                                             
+               CLOSE LOC_CSR                                                    
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE SQLCODE                                                     
+              WHEN +0                                                           
+                CONTINUE                                                        
+              WHEN OTHER                                                        
+                MOVE 'CLOSE LOCATION CURSOR' TO                                 
+                    PV-DB2-OPERATION-ATTEMPTED                                  
+                PERFORM 9999-SQL-ABEND                                          
+           END-EVALUATE.                                                        
+                                                                                
+       1201-FETCH-LOC-CSR.                                                      
+                                                                                
+           MOVE '1201-FETCH-LOC-CSR' TO PV-PARAGRAPH-NAME.                      
+                                                                                
+           EXEC SQL                                                             
+               FETCH LOC_CSR                                                    
+               INTO :XMT00001-LOC-NBR                                           
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE SQLCODE                                                     
+             WHEN +0                                                            
+                   CONTINUE                                                     
+             WHEN +100                                                          
+                   SET PS-END-OF-CSR TO TRUE                                    
+             WHEN OTHER                                                         
+                   MOVE 'FETCH LOCATION CURSOR' TO                              
+                        PV-DB2-OPERATION-ATTEMPTED                              
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  PROCESS THE ADJUSTMENT TRANSACTIONS.                                   
+      ******************************************************************        
+       2000-PROCESS-MAINTENANCE.                                                
+                                                                                
+           PERFORM 2100-EDIT-AND-FORMAT-ADJ-TRAN.                               
+                                                                                
+           PERFORM 8000-INSERT-ADJ-TRANS.                                       
+                                                                                
+      **** SAVE FIELDS TO AVOID CALLING TSKXREF AGAIN FOR                       
+      **** THE SAME ITEM                                                        
+           MOVE FST00003-ITM-NBR     TO PV-PREV-ITM-NBR.                        
+           MOVE FST00003-DEPT-NBR    TO PV-PREV-DEPT.                           
+           MOVE FST00003-MAJ-CL-NBR  TO PV-PREV-CLASS.                          
+           MOVE FST00003-SUB-CL-NBR  TO PV-PREV-SUBCLASS.                       
+           MOVE FST00003-ERR-TYP-CDE TO PV-PREV-ERR-CDE.                        
+                                                                                
+      **** INITIALIZE THE DCLGEN FOR FSTT_OH_ADJ_AUD                            
+           INITIALIZE DCLFST00003.                                              
+                                                                                
+           MOVE PC-TRANS-FUNC TO DP001-FUNC-CODE.                               
+           PERFORM 7000-BUILD-COMM-AREA-TRAN-PRES.                              
+                                                                                
+      ******************************************************************        
+      *  EDIT THE ADJUSTMENT TRANSACTION AND FORMAT THE ROW TO BE               
+      *  INSERTED TO TABLE FSTT_OH_ADJ_AUD.                                     
+      ******************************************************************        
+       2100-EDIT-AND-FORMAT-ADJ-TRAN.                                           
+                                                                                
+      **** INITIALIZE THE ERROR CODE TO '000' (NO ERRORS).                      
+      **** THIS CODE WILL BE OVERLAID IF AN ERROR IS FOUND.                     
+           MOVE '000' TO FST00003-ERR-TYP-CDE                                   
+                         PV-TRN-ERR-CODE.                                       
+                                                                                
+      **** PERFORM GENERAL EDITS ON THE ADJUSTMENT DATA                         
+                                                                                
+           MOVE FS035-ADJ-QTY     TO PV-ADJ-QTY-X.                              
+           IF  PV-ADJ-QTY-9 NOT NUMERIC                                         
+               MOVE ZERO          TO FST00003-ADJ-QTY                           
+               MOVE '003'         TO PV-TRN-ERR-CODE                            
+               ADD  +1            TO PV-TRN-ERR-003-CNT                         
+           ELSE                                                                 
+               MOVE FS035-ADJ-QTY TO FST00003-ADJ-QTY                           
+           END-IF.                                                              
+                                                                                
+MK    *** PLEASE NOTE THAT PV-LOC-NBR-X AND PV-LOC-NBR-9 SHOULD NOT             
+MK    *** BE USED FOR ANYTHING OTHER THAN THE NUMERIC EDIT CHECKING.            
+MK    *** THIS FIELD CANNOT SUPPORT THE 5 DIGITS NEEDED FOR LOCATION            
+MK    *** NUMBER.  A 5 DIGIT LOCATION NUMBER WILL BE TRUNCATED.                 
+           MOVE FS035-LOC-NBR     TO PV-LOC-NBR-X.                              
+           IF  PV-LOC-NBR-9 NOT NUMERIC                                         
+               MOVE ZERO          TO FST00003-LOC-NBR                           
+               MOVE '002'         TO PV-TRN-ERR-CODE                            
+               ADD  +1            TO PV-TRN-ERR-002-CNT                         
+           ELSE                                                                 
+               MOVE FS035-LOC-NBR TO FST00003-LOC-NBR                           
+           END-IF.                                                              
+                                                                                
+           IF  FS035-ITM-NBR NOT NUMERIC                                        
+               MOVE ZERO          TO FST00003-ITM-NBR                           
+               MOVE '001'         TO PV-TRN-ERR-CODE                            
+               ADD  +1            TO PV-TRN-ERR-001-CNT                         
+           ELSE                                                                 
+               MOVE FS035-ITM-NBR TO FST00003-ITM-NBR                           
+               IF  PV-NO-ERRORS                                                 
+                   PERFORM 2105-VALIDATE-ITEM                                   
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+           IF  PV-NO-ERRORS                                                     
+               PERFORM 2120-VALIDATE-LOCATION                                   
+           END-IF.                                                              
+                                                                                
+           MOVE FS035-ADJ-TYP TO FST00003-ADJ-TYP-CDE                           
+           MOVE FS035-ACTN-CDE TO FST00003-ACTN-CDE                             
+                                                                                
+           IF  PV-NO-ERRORS                                                     
+               MOVE FS035-ACTN-CDE TO PV-ACTION-CODE                            
+               IF  NOT PV-VALID-ACTION-CODE                                     
+MK                 IF FS035-BTCH-NBR = PC-INV-ADJ-BATCH-NMBR                    
+MK                    IF FS035-ACTN-CDE = '0'                                   
+MK                       MOVE '+' TO FST00003-ACTN-CDE                          
+MK                    ELSE                                                      
+MK                       MOVE '008' TO PV-TRN-ERR-CODE                          
+MK                       ADD  +1    TO PV-TRN-ERR-008-CNT                       
+MK                    END-IF                                                    
+MK                 ELSE                                                         
+                      MOVE '008' TO PV-TRN-ERR-CODE                             
+                      ADD  +1    TO PV-TRN-ERR-008-CNT                          
+MK                 END-IF                                                       
+               END-IF                                                           
+               MOVE FS035-ADJ-TYP TO PV-ADJ-TYPE                                
+               IF  NOT PV-VALID-ADJ-TYPE                                        
+MK                IF FS035-BTCH-NBR = PC-INV-ADJ-BATCH-NMBR                     
+MK                   IF NOT PV-VALID-INV-ADJ-TYPE                               
+MK                      MOVE '007' TO PV-TRN-ERR-CODE                           
+MK                      ADD  +1    TO PV-TRN-ERR-007-CNT                        
+MK                   END-IF                                                     
+MK                ELSE                                                          
+                     MOVE '007' TO PV-TRN-ERR-CODE                              
+                     ADD  +1    TO PV-TRN-ERR-007-CNT                           
+MK                END-IF                                                        
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+      **** ADJUSTMENT TYPE AND ACTION CODE HAVE SPECIFIC VALID                  
+      **** COMBINATIONS                                                         
+           IF  PV-NO-ERRORS                                                     
+               EVALUATE TRUE                                                    
+                   WHEN FS035-RCPT-ADJ                                          
+                       IF  FS035-ACTN-PLS                                       
+                       OR  FS035-ACTN-NEG                                       
+                           CONTINUE                                             
+                       ELSE                                                     
+                           MOVE '009' TO PV-TRN-ERR-CODE                        
+                           ADD  +1    TO PV-TRN-ERR-009-CNT                     
+                       END-IF                                                   
+                   WHEN FS035-OH-ADJ-ONLY                                       
+                       IF  FS035-ACTN-NEG                                       
+                           CONTINUE                                             
+                       ELSE                                                     
+                           MOVE '009' TO PV-TRN-ERR-CODE                        
+                           ADD  +1    TO PV-TRN-ERR-009-CNT                     
+                       END-IF                                                   
+               END-EVALUATE                                                     
+           END-IF.                                                              
+                                                                                
+      **** UNIT BOOKING EDITS                                                   
+                                                                                
+           IF  FS035-BTCH-NBR = (PC-PHYSINV-BATCH-NMBR                          
+MK           OR PC-INV-ADJ-BATCH-NMBR)                                          
+               MOVE FS035-UNT-BKG-IND TO PV-UNIT-BOOKING-CODE                   
+               EVALUATE TRUE                                                    
+                  WHEN PV-NOT-UNT-BKG-ADJ                                       
+MK                    IF FS035-BTCH-NBR = PC-INV-ADJ-BATCH-NMBR                 
+MK                       MOVE 'U'   TO FST00003-UNT-BKG-CDE                     
+MK                    ELSE                                                      
+                         MOVE 'N'   TO FST00003-UNT-BKG-CDE                     
+MK                    END-IF                                                    
+                  WHEN PV-POST-UNT-BKG-ADJ                                      
+MK                    IF FS035-BTCH-NBR = PC-INV-ADJ-BATCH-NMBR                 
+MK                       MOVE 'U'   TO FST00003-UNT-BKG-CDE                     
+MK                    ELSE                                                      
+                         MOVE 'P'   TO FST00003-UNT-BKG-CDE                     
+MK                    END-IF                                                    
+                  WHEN OTHER                                                    
+                      MOVE FS035-UNT-BKG-IND TO FST00003-UNT-BKG-CDE            
+                      IF  PV-NO-ERRORS                                          
+                          MOVE '010' TO PV-TRN-ERR-CODE                         
+                          ADD  +1    TO PV-TRN-ERR-010-CNT                      
+                      END-IF                                                    
+               END-EVALUATE                                                     
+           ELSE                                                                 
+               MOVE 'N' TO FST00003-UNT-BKG-CDE                                 
+           END-IF.                                                              
+                                                                                
+           IF  PV-NO-ERRORS                                                     
+               IF (PV-NOT-UNT-BKG-ADJ                                           
+               AND (FS035-BTCH-NBR = PC-PHYSINV-BATCH-NMBR))                    
+                   MOVE '011' TO PV-TRN-ERR-CODE                                
+                   ADD  +1    TO PV-TRN-ERR-011-CNT                             
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+      **** CHECK IF THE TRANSACTION SHOULD BE BYPASSED AND                      
+      **** SET THE TRANSACTION STATUS CODE                                      
+                                                                                
+           IF  PV-NO-ERRORS                                                     
+               IF  (FS035-RCPT-ADJ                                              
+               AND FS035-ACTN-PLS                                               
+               AND FS035-ADJ-QTY = 0)                                           
+MIRAKL         OR (FST00003-DEPT-NBR = 985)                                     
+                   MOVE 'B' TO FST00003-TRN-STAT-CDE                            
+                   ADD  +1  TO PV-TRN-STAT-B-CNT                                
+               ELSE                                                             
+                   MOVE 'A' TO FST00003-TRN-STAT-CDE                            
+                   ADD  +1  TO PV-TRN-STAT-A-CNT                                
+               END-IF                                                           
+           ELSE                                                                 
+               MOVE 'E'             TO FST00003-TRN-STAT-CDE                    
+               MOVE PV-TRN-ERR-CODE TO FST00003-ERR-TYP-CDE                     
+               ADD  +1              TO PV-TRN-STAT-E-CNT                        
+           END-IF.                                                              
+                                                                                
+      **** FINISH FORMATTING THE ROW TO BE INSERTED TO TABLE                    
+      **** FSTT_OH_ADJ_AUD.                                                     
+                                                                                
+           MOVE PV-PROCESS-DATE       TO FST00003-PRCG-DTE.                     
+           MOVE FS035-BTCH-NBR        TO FST00003-BTCH-NBR.                     
+           MOVE FS035-ADJ-SRC-PGM-NM  TO FST00003-SRC-PGM-NM.                   
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  VALIDATE THE ITEM NUMBER.                                              
+      *    --  IF THE ITEM NUMBER IS DIFFERENT THAN THAT OF THE                 
+      *        PREVIOUS TRANSACTION, SELECT THE ITEM FROM TSKXREF.              
+      *    --  IF THE ITEM NUMBER IS THE SAME AS THAT OF THE PREVIOUS           
+      *        TRANSACTION, DO NOT SELECT ITEM FROM TSKXREF.  CHECK             
+      *        IF THERE WAS AN ITEM NUMBER ERROR ON THE PREVIOUS TRAN.          
+      ******************************************************************        
+       2105-VALIDATE-ITEM.                                                      
+                                                                                
+           IF  FS035-ITM-NBR NOT = PV-PREV-ITM-NBR                              
+               PERFORM 2110-SELECT-ITEM                                         
+           ELSE                                                                 
+               IF  PV-PREV-ITM-NBR-ERR                                          
+                   MOVE PV-PREV-ERR-CDE TO PV-TRN-ERR-CODE                      
+                   IF  PV-PREV-ERR-CDE = '004'                                  
+                       ADD  +1 TO PV-TRN-ERR-004-CNT                            
+                       MOVE +0 TO FST00003-DEPT-NBR                             
+                                  FST00003-MAJ-CL-NBR                           
+                                  FST00003-SUB-CL-NBR                           
+                   ELSE                                                         
+                       IF  PV-PREV-ERR-CDE = '005'                              
+                           ADD  +1 TO PV-TRN-ERR-005-CNT                        
+                           MOVE PV-PREV-DEPT     TO FST00003-DEPT-NBR           
+                           MOVE PV-PREV-CLASS    TO FST00003-MAJ-CL-NBR         
+                           MOVE PV-PREV-SUBCLASS TO FST00003-SUB-CL-NBR         
+                       END-IF                                                   
+                   END-IF                                                       
+               ELSE                                                             
+                   MOVE PV-PREV-DEPT     TO FST00003-DEPT-NBR                   
+                   MOVE PV-PREV-CLASS    TO FST00003-MAJ-CL-NBR                 
+                   MOVE PV-PREV-SUBCLASS TO FST00003-SUB-CL-NBR                 
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  VALIDATE THAT THE ITEM NUMBER EXISTS.                                  
+      *    --  IF THE ITEM STATUS IS '98', SELECT THE RENUMBERED ITEM           
+      ******************************************************************        
+       2110-SELECT-ITEM.                                                        
+                                                                                
+           MOVE FS035-ITM-NBR TO SKXREF-ITM-NBR.                                
+                                                                                
+           MOVE ZERO TO PV-RETRY-COUNT.                                         
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-RETRY-COUNT FROM 1 BY 1                               
+                 UNTIL PV-RETRY-COUNT > PC-MAX-RETRIES                          
+                    OR SQLCODE = +0                                             
+                    OR SQLCODE = +100                                           
+                                                                                
+               EXEC SQL                                                         
+                                                                                
+                 SELECT SKU_STAT_CDE                                            
+                      , DEPT                                                    
+                      , CLASS                                                   
+                      , SUBCLASS                                                
+                   INTO :SKXREF-SKU-STAT-CDE                                    
+                      , :SKXREF-DEPT                                            
+                      , :SKXREF-CLASS                                           
+                      , :SKXREF-SUBCLASS                                        
+                   FROM TSKXREF                                                 
+                  WHERE ITM_NBR = :SKXREF-ITM-NBR                               
+                  WITH UR                                                       
+                                                                                
+               END-EXEC                                                         
+                                                                                
+               EVALUATE SQLCODE                                                 
+                   WHEN +0                                                      
+                       MOVE SKXREF-DEPT     TO FST00003-DEPT-NBR                
+                       MOVE SKXREF-CLASS    TO FST00003-MAJ-CL-NBR              
+                       MOVE SKXREF-SUBCLASS TO FST00003-SUB-CL-NBR              
+                       ADD  +1              TO PV-TSKXREF-SELECT-CNT            
+                       IF  SKXREF-SKU-STAT-CDE = '98'                           
+                           PERFORM 2115-SELECT-RENUM-ITEM                       
+                       END-IF                                                   
+                   WHEN +100                                                    
+                       MOVE '004' TO PV-TRN-ERR-CODE                            
+                       ADD  +1    TO PV-TRN-ERR-004-CNT                         
+                       ADD  +1    TO PV-TSKXREF-SELECT-CNT                      
+                       ADD  +1    TO PV-TSKXREF-ITM-NOT-FND-CNT                 
+                   WHEN -904                                                    
+                   WHEN -911                                                    
+                   WHEN -913                                                    
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       MOVE '2110-SELECT-ITEM'                                  
+                                        TO PV-PARAGRAPH-NAME                    
+                       MOVE 'SELECT ITEM FROM TSKXREF'                          
+                                        TO PV-DB2-OPERATION-ATTEMPTED           
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+                                                                                
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-RETRY-COUNT > PC-MAX-RETRIES                                  
+               MOVE 'TSKXREF-1 MAX RETRIES EXCEEDED'                            
+                                        TO PV-DB2-OPERATION-ATTEMPTED           
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  FOR ITEMS WITH A STATUS OF '98', SELECT THE RENUMBERED ITEM            
+      *  FROM TSKST.                                                            
+      ******************************************************************        
+       2115-SELECT-RENUM-ITEM.                                                  
+                                                                                
+           MOVE FS035-ITM-NBR TO SKXREF-ITM-NBR.                                
+                                                                                
+           MOVE ZERO TO PV-RETRY-COUNT.                                         
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-RETRY-COUNT FROM 1 BY 1                               
+                 UNTIL PV-RETRY-COUNT > PC-MAX-RETRIES                          
+                    OR SQLCODE = +0                                             
+                    OR SQLCODE = +100                                           
+                                                                                
+               EXEC SQL                                                         
+                                                                                
+                 SELECT B.ITM_NBR                                               
+                      , B.DEPT                                                  
+                      , B.CLASS                                                 
+                      , B.SUBCLASS                                              
+                   INTO :SKXREF-ITM-NBR                                         
+                      , :SKXREF-DEPT                                            
+                      , :SKXREF-CLASS                                           
+                      , :SKXREF-SUBCLASS                                        
+                   FROM TSKXREF A                                               
+                      , TSKXREF B                                               
+                  WHERE A.ITM_NBR      = :SKXREF-ITM-NBR                        
+                    AND A.INTR_UPC_ID  = B.INTR_UPC_ID                          
+                    AND B.SKU_STAT_CDE NOT IN ('98')                            
+                  WITH UR                                                       
+                                                                                
+               END-EXEC                                                         
+                                                                                
+               EVALUATE SQLCODE                                                 
+                   WHEN +0                                                      
+                       MOVE SKXREF-ITM-NBR  TO FST00003-ITM-NBR                 
+                       MOVE SKXREF-DEPT     TO FST00003-DEPT-NBR                
+                       MOVE SKXREF-CLASS    TO FST00003-MAJ-CL-NBR              
+                       MOVE SKXREF-SUBCLASS TO FST00003-SUB-CL-NBR              
+                       ADD  +1    TO PV-TSKXREF-SEL-RENUM-CNT                   
+                   WHEN +100                                                    
+                       MOVE '005' TO PV-TRN-ERR-CODE                            
+                       ADD  +1    TO PV-TRN-ERR-005-CNT                         
+                       ADD  +1    TO PV-TSKXREF-SEL-RENUM-CNT                   
+                       ADD  +1    TO PV-TSKXREF-RENUM-NOT-FND-CNT               
+                   WHEN -904                                                    
+                   WHEN -911                                                    
+                   WHEN -913                                                    
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       MOVE '2115-SELECT-RENUM-ITEM'                            
+                                        TO PV-PARAGRAPH-NAME                    
+                       MOVE 'SELECT RENUM ITEM FROM TSKXREF'                    
+                                        TO PV-DB2-OPERATION-ATTEMPTED           
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+                                                                                
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-RETRY-COUNT > PC-MAX-RETRIES                                  
+               MOVE 'TSKXREF-2 MAX RETRIES EXCEEDED'                            
+                                    TO PV-DB2-OPERATION-ATTEMPTED               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  VALIDATE THAT THE LOCATION NUMBER EXISTS IN THE INTERNAL               
+      *  LOCATION TABLE.  VALID LOCATION TYPES ARE 'DS' (DEPT STORE)            
+      *  AND 'CS' (CENTRAL STOCK).                                              
+      ******************************************************************        
+       2120-VALIDATE-LOCATION.                                                  
+                                                                                
+           SET LOC-INDEX TO 1.                                                  
+           SEARCH LOCATION-ENTRY                                                
+             AT END                                                             
+               MOVE '006' TO PV-TRN-ERR-CODE                                    
+               ADD  +1    TO PV-TRN-ERR-006-CNT                                 
+             WHEN LOC-NBR(LOC-INDEX) = FS035-LOC-NBR                            
+               NEXT SENTENCE                                                    
+             WHEN LOC-INDEX > LOCATION-TBL-SIZE                                 
+               MOVE '006' TO PV-TRN-ERR-CODE                                    
+               ADD  +1    TO PV-TRN-ERR-006-CNT                                 
+           END-SEARCH.                                                          
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  THIS MODULE BUILDS THE COMMUNICATION AREA NECESSARY TO INVOKE          
+      *  THE TRANSACTION PRESENTATION MODULE AND SETS PROGRAM CONTROLS          
+      *  BASED ON THE RETURN CODE RETURNED FROM THE PRESENTATION MOD-           
+      *  ULE.                                                                   
+      ******************************************************************        
+       7000-BUILD-COMM-AREA-TRAN-PRES.                                          
+                                                                                
+           MOVE LENGTH OF WORK-STORAGE-PASSED                                   
+                                           TO DP001-WORK-STRG-LENGTH.           
+MK         MOVE PV-JOB-NUMBER              TO DP001-JOB-NAME.                   
+           MOVE PC-CKPT-PLAN-NAME          TO DP001-PLAN-NAME.                  
+                                                                                
+           PERFORM Z900-CALL-TRANS-PRES-MODULE.                                 
+                                                                                
+           IF  DP001-PREP-TRANS-EOF                                             
+               SET PS-MAINT-EOF TO TRUE                                         
+           ELSE                                                                 
+               MOVE DP001-TRANS-RECORD TO FS035-ADJUSTMENT-RECORD               
+               ADD +1 TO PV-ADJ-INPUT-CNT                                       
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *   INSERT A ROW TO TABLE FSTT_OH_ADJ_AUD                                 
+      ******************************************************************        
+       8000-INSERT-ADJ-TRANS.                                                   
+                                                                                
+           MOVE '8000-INSERT-ADJ-TRANS' TO PV-PARAGRAPH-NAME.                   
+                                                                                
+           EXEC SQL                                                             
+               INSERT INTO  FSTT_OH_ADJ_AUD                                     
+                          ( PRCG_DTE                                            
+                           ,ITM_NBR                                             
+                           ,LOC_NBR                                             
+                           ,ADJ_TYP_CDE                                         
+                           ,ACTN_CDE                                            
+                           ,ADJ_QTY                                             
+                           ,BTCH_NBR                                            
+                           ,UNT_BKG_CDE                                         
+                           ,DEPT_NBR                                            
+                           ,MAJ_CL_NBR                                          
+                           ,SUB_CL_NBR                                          
+                           ,SRC_PGM_NM                                          
+                           ,ERR_TYP_CDE                                         
+                           ,CRE_TMST                                            
+                           ,TRN_STAT_CDE                                        
+                           ,LAST_UPD_TMST)                                      
+                   VALUES ( :FST00003-PRCG-DTE                                  
+                           ,:FST00003-ITM-NBR                                   
+                           ,:FST00003-LOC-NBR                                   
+                           ,:FST00003-ADJ-TYP-CDE                               
+                           ,:FST00003-ACTN-CDE                                  
+                           ,:FST00003-ADJ-QTY                                   
+                           ,:FST00003-BTCH-NBR                                  
+                           ,:FST00003-UNT-BKG-CDE                               
+                           ,:FST00003-DEPT-NBR                                  
+                           ,:FST00003-MAJ-CL-NBR                                
+                           ,:FST00003-SUB-CL-NBR                                
+                           ,:FST00003-SRC-PGM-NM                                
+                           ,:FST00003-ERR-TYP-CDE                               
+                           , CURRENT TIMESTAMP                                  
+                           ,:FST00003-TRN-STAT-CDE                              
+                           , CURRENT TIMESTAMP)                                 
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE SQLCODE                                                     
+             WHEN +0                                                            
+                   ADD +1 TO PV-INSERT-CNT                                      
+             WHEN OTHER                                                         
+                   MOVE 'INSERT TO FSTT_OH_ADJ_AUD' TO                          
+                         PV-DB2-OPERATION-ATTEMPTED                             
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  DISPLAY RECORD COUNTS AND CLOSE FILES                                  
+      ******************************************************************        
+       9000-END-OF-JOB.                                                         
+                                                                                
+           DISPLAY SPACES.                                                      
+                                                                                
+           MOVE PV-ADJ-INPUT-CNT         TO PV-ADJ-INPUT-CNT-DISP.              
+           DISPLAY 'NBR OF ADJUSTMENT INPUT RECS READ   = '                     
+                                            PV-ADJ-INPUT-CNT-DISP.              
+           DISPLAY SPACES.                                                      
+                                                                                
+           MOVE PV-TSKXREF-SELECT-CNT    TO PV-TSKXREF-SELECT-CNT-DISP.         
+           DISPLAY 'NBR OF INITIAL SELECTS ON TSKXREF   = '                     
+                                            PV-TSKXREF-SELECT-CNT-DISP.         
+                                                                                
+           MOVE PV-TSKXREF-ITM-NOT-FND-CNT                                      
+                                         TO PV-TSKXREF-ITM-NF-DISP.             
+           DISPLAY 'NBR OF ITEMS NOT FOUND              = '                     
+                                            PV-TSKXREF-ITM-NF-DISP.             
+                                                                                
+           DISPLAY SPACES.                                                      
+                                                                                
+           MOVE PV-TSKXREF-SEL-RENUM-CNT TO                                     
+                                         PV-TSKXREF-SEL-RENUM-CNT-DISP.         
+           DISPLAY 'NBR OF SELECTS ON TSKXREF FOR RENUM = '                     
+                                         PV-TSKXREF-SEL-RENUM-CNT-DISP.         
+                                                                                
+           MOVE PV-TSKXREF-RENUM-NOT-FND-CNT TO                                 
+                                         PV-TSKXREF-RENUM-NF-CNT-DISP.          
+           DISPLAY 'NBR OF RENUMBERED ITEMS NOT FOUND   = '                     
+                                         PV-TSKXREF-RENUM-NF-CNT-DISP.          
+                                                                                
+           DISPLAY SPACES.                                                      
+                                                                                
+           MOVE PV-TRN-STAT-A-CNT TO PV-TRN-STAT-A-CNT-DISP.                    
+           DISPLAY 'NBR OF AUDIT TRANSACTIONS    = '                            
+                                     PV-TRN-STAT-A-CNT-DISP.                    
+                                                                                
+           MOVE PV-TRN-STAT-E-CNT TO PV-TRN-STAT-E-CNT-DISP.                    
+           DISPLAY 'NBR OF ERROR TRANSACTIONS    = '                            
+                                     PV-TRN-STAT-E-CNT-DISP.                    
+                                                                                
+           MOVE PV-TRN-STAT-B-CNT TO PV-TRN-STAT-B-CNT-DISP.                    
+           DISPLAY 'NBR OF BYPASSED TRANSACTIONS = '                            
+                                     PV-TRN-STAT-B-CNT-DISP.                    
+                                                                                
+           DISPLAY SPACES.                                                      
+                                                                                
+           MOVE PV-INSERT-CNT     TO PV-INSERT-CNT-DISP.                        
+           DISPLAY 'NBR OF ROWS INSERTED TO FSTT_OH_ADJ_AUD = '                 
+                                     PV-INSERT-CNT-DISP.                        
+                                                                                
+           DISPLAY SPACES.                                                      
+                                                                                
+           IF  PV-TRN-ERR-001-CNT > 0                                           
+               MOVE PV-TRN-ERR-001-CNT TO PV-TRN-ERR-001-CNT-DISP               
+               DISPLAY 'ERROR CODE 001 - NBR OF ERRORS = '                      
+                                          PV-TRN-ERR-001-CNT-DISP               
+           END-IF.                                                              
+                                                                                
+           IF  PV-TRN-ERR-002-CNT > 0                                           
+               MOVE PV-TRN-ERR-002-CNT TO PV-TRN-ERR-002-CNT-DISP               
+               DISPLAY 'ERROR CODE 002 - NBR OF ERRORS = '                      
+                                          PV-TRN-ERR-002-CNT-DISP               
+           END-IF.                                                              
+                                                                                
+           IF  PV-TRN-ERR-003-CNT > 0                                           
+               MOVE PV-TRN-ERR-003-CNT TO PV-TRN-ERR-003-CNT-DISP               
+               DISPLAY 'ERROR CODE 003 - NBR OF ERRORS = '                      
+                                          PV-TRN-ERR-003-CNT-DISP               
+           END-IF.                                                              
+                                                                                
+           IF  PV-TRN-ERR-004-CNT > 0                                           
+               MOVE PV-TRN-ERR-004-CNT TO PV-TRN-ERR-004-CNT-DISP               
+               DISPLAY 'ERROR CODE 004 - NBR OF ERRORS = '                      
+                                          PV-TRN-ERR-004-CNT-DISP               
+           END-IF.                                                              
+                                                                                
+           IF  PV-TRN-ERR-005-CNT > 0                                           
+               MOVE PV-TRN-ERR-005-CNT TO PV-TRN-ERR-005-CNT-DISP               
+               DISPLAY 'ERROR CODE 005 - NBR OF ERRORS = '                      
+                                          PV-TRN-ERR-005-CNT-DISP               
+           END-IF.                                                              
+                                                                                
+           IF  PV-TRN-ERR-006-CNT > 0                                           
+               MOVE PV-TRN-ERR-006-CNT TO PV-TRN-ERR-006-CNT-DISP               
+               DISPLAY 'ERROR CODE 006 - NBR OF ERRORS = '                      
+                                          PV-TRN-ERR-006-CNT-DISP               
+           END-IF.                                                              
+                                                                                
+           IF  PV-TRN-ERR-007-CNT > 0                                           
+               MOVE PV-TRN-ERR-007-CNT TO PV-TRN-ERR-007-CNT-DISP               
+               DISPLAY 'ERROR CODE 007 - NBR OF ERRORS = '                      
+                                          PV-TRN-ERR-007-CNT-DISP               
+           END-IF.                                                              
+                                                                                
+           IF  PV-TRN-ERR-008-CNT > 0                                           
+               MOVE PV-TRN-ERR-008-CNT TO PV-TRN-ERR-008-CNT-DISP               
+               DISPLAY 'ERROR CODE 008 - NBR OF ERRORS = '                      
+                                          PV-TRN-ERR-008-CNT-DISP               
+           END-IF.                                                              
+                                                                                
+           IF  PV-TRN-ERR-009-CNT > 0                                           
+               MOVE PV-TRN-ERR-009-CNT TO PV-TRN-ERR-009-CNT-DISP               
+               DISPLAY 'ERROR CODE 009 - NBR OF ERRORS = '                      
+                                          PV-TRN-ERR-009-CNT-DISP               
+           END-IF.                                                              
+                                                                                
+           IF  PV-TRN-ERR-010-CNT > 0                                           
+               MOVE PV-TRN-ERR-010-CNT TO PV-TRN-ERR-010-CNT-DISP               
+               DISPLAY 'ERROR CODE 010 - NBR OF ERRORS = '                      
+                                          PV-TRN-ERR-010-CNT-DISP               
+           END-IF.                                                              
+                                                                                
+           IF  PV-TRN-ERR-011-CNT > 0                                           
+               MOVE PV-TRN-ERR-011-CNT TO PV-TRN-ERR-011-CNT-DISP               
+               DISPLAY 'ERROR CODE 011 - NBR OF ERRORS = '                      
+                                          PV-TRN-ERR-011-CNT-DISP               
+           END-IF.                                                              
+                                                                                
+           IF  PV-ADJ-INPUT-CNT = 0                                             
+               IF  CC-PROCESS-EMPTY-IND = 'Y'                                   
+                   DISPLAY SPACES                                               
+                   DISPLAY '****************************************'           
+                   DISPLAY '*************  FSKED002  ***************'           
+                   DISPLAY '****************************************'           
+                   DISPLAY '********  NO RECORDS PROCESSED  ********'           
+                   DISPLAY '****************************************'           
+                   DISPLAY '******  JOB SET TO PROCESS EMPTY  ******'           
+                   DISPLAY '****************************************'           
+               ELSE                                                             
+                   DISPLAY SPACES                                               
+                   DISPLAY '****************************************'           
+                   DISPLAY '*************  FSKED002  ***************'           
+                   DISPLAY '****************************************'           
+                   DISPLAY '********  NO RECORDS PROCESSED  ********'           
+                   DISPLAY '****************************************'           
+                   DISPLAY '* ERROR ERROR ERROR ERROR ERROR ERROR  *'           
+                   DISPLAY '****************************************'           
+                   MOVE +4005 TO ABEND-CODE                                     
+                   CALL 'ILBOABN0' USING ABEND-CODE                             
+              END-IF                                                            
+           END-IF.                                                              
+                                                                                
+           DISPLAY SPACES.                                                      
+                                                                                
+           CLOSE CONTROL-CARD-FILE.                                             
+                                                                                
+           MOVE PC-CLOSE-FUNC TO DP001-FUNC-CODE.                               
+           PERFORM 7000-BUILD-COMM-AREA-TRAN-PRES.                              
+                                                                                
+                                                                                
+      *****************************************************************         
+      * 9999-SQL-ABEND - PERFORMS THE ABEND FOR THE PROGRAM IN THE              
+      * EVENT THAT AN SQL ERROR OR WARNING CODE OCCURS.                         
+      *****************************************************************         
+       9999-SQL-ABEND.                                                          
+                                                                                
+           DISPLAY '** ABEND     **'.                                           
+           DISPLAY '** PROGRAM   ** = ' PC-PROGRAM-NAME.                        
+           DISPLAY '** PARAGRAPH ** = ' PV-PARAGRAPH-NAME.                      
+           DISPLAY '** OPERATION ** = ' PV-DB2-OPERATION-ATTEMPTED.             
+                                                                                
+      *****************************************************************         
+      * THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-            
+      * MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE                 
+      * 'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE             
+      * FORMAT.                                                                 
+      *****************************************************************         
+           COPY DPPD004.                                                        
+                                                                                
+           MOVE +4013 TO ABEND-CODE.                                            
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    
+                                                                                
+      *                                                                         
+      *                                                                         
+      *                                                                         
+      *                                                                         
+      *                                                                         
+      *                                                                         
+           COPY DPPD001.                                                        

@@ -1,0 +1,1986 @@
+       IDENTIFICATION DIVISION.                                                 
+       PROGRAM-ID.    ICKUT085.                                                 
+       AUTHOR.        COGNIZANT.                                                
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+       DATE-WRITTEN.  04/25/2009.                                               
+       DATE-COMPILED.                                                           
+                                                                                
+      *****************************************************************         
+      * ICKUT085 - EXPLODE COUNT GROUPING TO COUNT/STORE LEVEL                  
+      *            ANY CHANGES TO ICKUP052 LOGIC DOES NEED A CHANGE IN          
+      *            THIS PROGRAM TOO.                                            
+      *****************************************************************         
+      *        THIS PROGRAM WILL LOOK FOR USA IC COUNTS IN 4                    
+      *        CONDITIONS, THOSE PUT INTO 'SCHEDULED' STATUS 1 DAY AGO,         
+      *        THOSE THAT ARE CURRENTLY OCCURING (AND NOT COMPLETED)            
+      *        AND ONLY ON THE START DATE OF THE WINDOW PERIOD,                 
+      *        AND THOSE THAT HAVE BEEN SPECIFIED AS REPEATING ON A             
+      *        DAILY, WEEKLY OR MONTHLY PERIOD FOR A SPECIFIED RANGE            
+      *        OF TIME. FOR ALL THE ABOVE CONDITIONS, RECORDS WILL BE           
+      *        EXTRACTED ONLY IF THE FASHION SALES UPDATE IND IS 'Y'.           
+      *        THOSE IN THE FIRST 3 CONDITIONS MUST BE NON-REPEATING            
+      *        AND WILL BE WRITTEN TO THE CNT-STORE-EXP-FILE.                   
+      *                                                                         
+      *        THE 3 NON-REPEATING COUNTS LISTED ABOVE WILL BE SPECIFIED        
+      *        AT A GROUP LEVEL (MAJ CLS,SUB CLS,STYLE,SKU) AND                 
+      *        SKU IS DETERMINED IN PROGRAM ICKUT086. THOSE SPECIFIED AS        
+      *        IMMEDIATE COUNTS WILL BE PROCESSED IN PROGRAM ICKUT086           
+      *        AS IMMEDIATE COUNTS ARE SPECIFIED AT A SKU LEVEL AND             
+      *        ICKUT086 PROCESSES COUNTS AT THE SKU LEVEL.                      
+      *****************************************************************         
+      *                                                                         
+      *  FILES READ ARE:                                                        
+      *      NONE                                                               
+      *****************************************************************         
+      * 04/25/09 - RAJAMANI K       -  INC NO. INC000000772351                  
+      *    - NEW PROGRAM.                                                       
+      *      THE PROGRAM PROGRAM THAT USES THE IC COUNT SETUP TABLES TO         
+      *      DETERMINE WHICH LOCATIONS ARE TO BE INCLUDED IN                    
+      *      AN INVENTORY COUNT AND WRITES A FILE OF COUNT/LOCATIONS            
+      *      COMBINATIONS TO BE EXPLODED IN A LATER PROGRAM.                    
+      *****************************************************************         
+C88463* 03/21/14 - JIM HUNTER       -  CHG NO. CHG0088463                       
+C88463*    - CHANGE THE 3 CURSORS THAT READ THE ICT_CNT_STUP TABLE              
+C88463*      TO SKIP THE NON-USA COUNTS (CNT_TYP_CDE = 'ICC').                  
+C88463*****************************************************************         
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+       CONFIGURATION SECTION.                                                   
+       SOURCE-COMPUTER. IBM-3090.                                               
+       OBJECT-COMPUTER. IBM-3090.                                               
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+       FILE-CONTROL.                                                            
+           SELECT CARDIN-CURR-DATE-FILE      ASSIGN TO CARDIN.                  
+                                                                                
+           SELECT CNT-STORE-EXP-FILE         ASSIGN TO OUT01.                   
+                                                                                
+      *****************************************************************         
+       DATA DIVISION.                                                           
+      *****************************************************************         
+       FILE SECTION.                                                            
+                                                                                
+       FD  CARDIN-CURR-DATE-FILE                                                
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS                                             
+           RECORD CONTAINS 80 CHARACTERS.                                       
+       01  CC-CURR-DATE-RECORD        PIC X(80).                                
+                                                                                
+       FD  CNT-STORE-EXP-FILE                                                   
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS                                             
+           DATA RECORD IS CNT-STORE-EXP-REC.                                    
+       01  CNT-STORE-EXP-REC          PIC  X(32).                               
+                                                                                
+      *                                                                         
+       WORKING-STORAGE SECTION.                                                 
+      ******************************************************************        
+      * PC PROGRAM CONSTANTS                                           *        
+      ******************************************************************        
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-PROGRAM-NAME                PIC X(08)    VALUE                
+                                                 'ICKUT085'.                    
+           05  PC-MAXIMUM-RETRY-COUNT         PIC S9(04)   VALUE +2             
+                                                           COMP SYNC.           
+           05  PC-DEFAULT-TMST                PIC X(26)    VALUE                
+               '2007-01-01-00.00.00.000000'.                                    
+                                                                                
+      ******************************************************************        
+      * PV PROGRAM VARIABLES                                           *        
+      ******************************************************************        
+       01  PV-WORK-VARIABLES.                                                   
+           05  PV-RETRIES                     PIC S9(04)   VALUE +0             
+                                                           COMP.                
+           05  PV-PARAGRAPH-NAME              PIC  X(30)   VALUE SPACES.        
+           05  PV-DB2-OPERATION-ATTEMPTED     PIC  X(30)   VALUE SPACES.        
+           05  PV-FISCAL-DAY-NBR              PIC  9       VALUE ZERO.          
+           05  PV-FISCAL-MONTH-NBR            PIC  99      VALUE ZERO.          
+           05  PV-SAVE-DAYS-AHEAD             PIC X(05) VALUE SPACES.           
+           05  PV-FISCAL-YEAR-NBR             PIC  X(04)   VALUE SPACES.        
+           05  PV-FISCAL-YEAR-NBR-X REDEFINES PV-FISCAL-YEAR-NBR                
+                                              PIC 9(4).                         
+           05  PV-SQLCODE-DISPLAY             PIC +(8)9    VALUE ZEROES.00830000
+           05  PV-EXTR-PRC-TMST-NI         PIC S9(04)  COMP                CL*15
+                                                         VALUE ZERO.       CL*15
+               88 PV-EXTR-PRC-TMST-IS-NULL VALUE -1.                            
+           05  PV-SUGG-EXEC-DTE-NI         PIC S9(04)  COMP                CL*15
+                                                         VALUE ZERO.       CL*15
+               88 PV-SUGG-EXEC-DTE-IS-NULL VALUE -1.                            
+               88 PV-SUGG-EXEC-DTE-NOT-NULL VALUE 0.                            
+           05  PV-EXEC-WND-STRT-DTE-NI     PIC S9(04)  COMP                CL*15
+                                                         VALUE ZERO.       CL*15
+               88 PV-EXEC-WND-STRT-DTE-IS-NULL VALUE -1.                        
+               88 PV-EXEC-WND-STRT-DTE-NOT-NULL VALUE 0.                        
+           05  PV-EXEC-WND-END-DTE-NI     PIC S9(04)  COMP                 CL*15
+                                                         VALUE ZERO.       CL*15
+               88 PV-EXEC-WND-END-DTE-IS-NULL VALUE -1.                         
+               88 PV-EXEC-WND-END-DTE-NOT-NULL VALUE 0.                         
+           05  PV-STD-TM-ZN-CDE-NI        PIC S9(04)  COMP                 CL*15
+                                                         VALUE ZERO.       CL*15
+               88 PV-STD-TM-ZN-CDE-IS-NULL VALUE -1.                            
+               88 PV-STD-TM-ZN-CDE-NOT-NULL VALUE 0.                            
+           05  PV-DST-IND-NI              PIC S9(04)  COMP                 CL*15
+                                                         VALUE ZERO.       CL*15
+               88 PV-DST-IND-IS-NULL VALUE -1.                                  
+               88 PV-DST-IND-NOT-NULL VALUE 0.                                  
+           05  PV-CURRENT-WEEKDAY          PIC 9.                          CL**4
+           05  PV-CURRENT-WEEK-NBR         PIC 9.                          CL**4
+           05  PV-CURRENT-MONTH-NBR        PIC 99.                         CL**4
+           05  PV-CURRENT-YEAR-NBR         PIC 9999.                       CL**4
+           05  PV-DECREMENT-1ST            PIC 9.                          CL**4
+           05  PV-CURRENT-DATE             PIC X(10).                      CL**4
+           05  PV-SCHEDULER-TMST           PIC X(26).                      CL**4
+           05  PV-SCHEDULER-TMST-R REDEFINES PV-SCHEDULER-TMST.            CL**4
+               10  PV-SCHEDULER-DATE       PIC X(10).                      CL**4
+               10  PV-SCHEDULER-TIME       PIC X(16).                      CL**4
+           05  PV-SCHEDULER-TMST-MNS1      PIC X(26).                      CL**4
+           05  PV-SCHEDULER-TMST-MNS1-R REDEFINES                          CL**4
+                                       PV-SCHEDULER-TMST-MNS1.             CL**4
+               10  PV-SCHEDULER-DATE-MNS1  PIC X(10).                      CL**4
+               10  PV-SCHEDULER-TIME-MNS1  PIC X(16).                      CL**4
+           05  PV-COMPUTED-DATE            PIC X(10).                      CL**4
+           05  PV-INV-CHECK-FLG            PIC X.                          CL**4
+               88  PV-INVENTORY-PERIOD     VALUE 'Y'.                           
+               88  PV-NOT-INVENTORY-PERIOD VALUE 'N'.                           
+           05  PV-COMPLETED-COUNT-FLG      PIC X.                          CL**4
+               88  PV-NOT-COMPLETED-COUNT  VALUE 'N'.                           
+               88  PV-COMPLETED-COUNT      VALUE 'Y'.                           
+                                                                                
+      ******************************************************************        
+      * PS PROGRAM SWITCHES                                            *        
+      ******************************************************************        
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-EOF-CARDIN-SWITCH           PIC  X(01)   VALUE 'N'.           
+               88  PS-EOF-CARDIN                           VALUE 'Y'.           
+               88  PS-NOT-EOF-CARDIN                       VALUE 'N'.           
+           05  PS-NO-MORE-RLSE-CNT-SW         PIC  X(01)   VALUE 'N'.           
+               88  PS-NO-MORE-RLSE-CNT                     VALUE 'Y'.           
+               88  PS-MORE-RLSE-CNT                        VALUE 'N'.           
+           05  PS-NO-MORE-WNDW-CNT-SW         PIC  X(01)   VALUE 'N'.           
+               88  PS-NO-MORE-WNDW-CNT                     VALUE 'Y'.           
+               88  PS-MORE-WNDW-CNT                        VALUE 'N'.           
+           05  PS-NO-MORE-OCCR-CNT-SW         PIC  X(01)   VALUE 'N'.           
+               88  PS-NO-MORE-OCCR-CNT                     VALUE 'Y'.           
+               88  PS-MORE-OCCR-CNT                        VALUE 'N'.           
+           05  PS-NO-MORE-TERR-LOC-SW         PIC  X(01)   VALUE 'N'.           
+               88  PS-NO-MORE-TERR-LOC                     VALUE 'Y'.           
+               88  PS-MORE-TERR-LOC                        VALUE 'N'.           
+           05  PS-NO-MORE-REGN-LOC-SW         PIC  X(01)   VALUE 'N'.           
+               88  PS-NO-MORE-REGN-LOC                     VALUE 'Y'.           
+               88  PS-MORE-REGN-LOC                        VALUE 'N'.           
+           05  PS-NO-MORE-DIST-LOC-SW         PIC  X(01)   VALUE 'N'.           
+               88  PS-NO-MORE-DIST-LOC                     VALUE 'Y'.           
+               88  PS-MORE-DIST-LOC                        VALUE 'N'.           
+           05  PS-NO-MORE-DC-LOC-SW           PIC  X(01)   VALUE 'N'.           
+               88  PS-NO-MORE-DC-LOC                       VALUE 'Y'.           
+               88  PS-MORE-DC-LOC                          VALUE 'N'.           
+           05  PS-NO-MORE-CANC-CNT-SW         PIC  X(01)   VALUE 'N'.           
+               88  PS-NO-MORE-CANC-CNT                     VALUE 'Y'.           
+               88  PS-MORE-CANC-CNT                        VALUE 'N'.           
+           05  PS-NO-MORE-RPET-CNT-SW         PIC  X(01)   VALUE 'N'.           
+               88  PS-NO-MORE-RPET-CNT                     VALUE 'Y'.           
+               88  PS-MORE-RPET-CNT                        VALUE 'N'.           
+           05  PS-PROCESS-STOP-SW             PIC  X(01)   VALUE 'N'.           
+               88  PS-PROCESS-STOP                         VALUE 'Y'.           
+           05  PS-LAST-RUN-TMST-FOUND-SW      PIC  X(01)   VALUE 'N'.           
+               88  PS-LAST-RUN-TMST-FOUND                  VALUE 'Y'.           
+           05  PS-RPET-CNT-SW                 PIC  X(01)   VALUE 'N'.           
+               88  PS-RPET-CNT                             VALUE 'Y'.           
+               88  PS-NOT-RPET-CNT                         VALUE 'N'.           
+                                                                                
+       01  ABEND-CODE                         PIC S9(04)   VALUE +0             
+                                                           COMP SYNC.           
+           88  ABEND-4003-CTRL-CARD-ERROR        VALUE +4003.                   
+           88  ABEND-4013-DB2-ERROR              VALUE +4013.                   
+           88  ABEND-4019-CAL-SUB-ERROR          VALUE +4019.                   
+           88  ABEND-4020-MQ-ERROR               VALUE +4020.                   
+           88  ABEND-4444-FORCED-ABEND           VALUE +4444.                   
+                                                                                
+       01  DISPLAY-EDITS.                                                       
+           05  DI-RLSE-CNTS                 PIC  9(09)  VALUE ZEROS.            
+           05  DI-WINDOW-CNTS               PIC  9(09)  VALUE ZEROS.            
+           05  DI-CURR-OCCR-CNTS            PIC  9(09)  VALUE ZEROS.            
+           05  DI-COMPLETED-CNTS            PIC  9(09)  VALUE ZEROS.            
+           05  DI-RPET-CNTS                 PIC  9(09)  VALUE ZEROS.            
+                                                                                
+       01  CC-CARDIN.                                                           
+           05  CC-CURR-DATE                 PIC  X(10)  VALUE SPACES.           
+           05  FILLER                       PIC  X(70)  VALUE SPACES.           
+                                                                                
+      *                                                                         
+      *----------------------------------------------------------------         
+      * DATE ROUTINE COPY MEMBERS                                               
+      *----------------------------------------------------------------         
+           COPY DPWS500.                                                        
+      *****************************************************************         
+      *    OUTPUT COPYBOOKS                                                     
+      *****************************************************************         
+           COPY ICRD052.                                                        
+                                                                                
+           COPY ICRD056.                                                        
+                                                                                
+      *****************************************************************         
+      *    DB2 COMMUNICATION AREA                                               
+      *****************************************************************         
+           COPY DPWS004.                                                        
+                                                                                
+      *****************************************************************         
+      *  XST_LOC TABLE                                                          
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE XST00001                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  XST_DC_LOC_ASGMT  TABLE                                                
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE XST00020                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  XST_DIST_REGN TABLE                                                    
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE XST00004                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  XST_REGN_TERR TABLE                                                    
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE XST00006                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  XST_LOC_DIST TABLE                                                     
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE XST00002                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  TINVPAR TABLE                                                          
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE TINVPAR                                                 
+           END-EXEC.                                                            
+                                                                                
+C88463*****************************************************************         
+C88463*  TINCNTL TABLE                                                          
+C88463*****************************************************************         
+C88463     EXEC SQL                                                             
+C88463          INCLUDE TINCNTL                                                 
+C88463     END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  ICT_CNT_LOC_GP TABLE                                                   
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE ICT00014                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  ICT_LOC_GP_ASSN TABLE                                                  
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE ICT00015                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  ICT_CNT_STUP_STAT TABLE                                                
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE ICT00019                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  ICT_CNT_STUP TABLE                                                     
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE ICT00010                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  ICT_LOC_CNT_STAT TABLE                                                 
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE ICT00020                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  ICT_CNT_RPET_PARM TABLE                                                
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE ICT00013                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  TDTATTR DATE TABLE                                                     
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE TDTATTR                                                 
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+           COPY SQLCA2.                                                         
+                                                                                
+      *----------------------------------------------------------------         
+      *  USA IC COUNTS CURSOR WILL FETCH COUNTS RELEASED THE PREVIOUS           
+      *  DAY.                                                                   
+      *----------------------------------------------------------------         
+           EXEC SQL                                                             
+             DECLARE RLSE-CNT-CSR CURSOR FOR                                    
+             SELECT A.LOC_HIER_CDE                                              
+                   ,A.LOC_HIER_VAL_NBR                                          
+                   ,D.EXCL_MDSE_IND                                             
+                   ,D.CNT_STUP_ID                                               
+                   ,D.SUGG_EXEC_DTE                                             
+                   ,D.EXEC_WND_STRT_DTE                                         
+                   ,D.EXEC_WND_END_DTE                                          
+                   ,D.FS_UPD_IND                                                
+             FROM   ICT_CNT_LOC_GP    A                                         
+                   ,ICT_LOC_GP_ASSN   B                                         
+                   ,ICT_CNT_STUP_STAT C                                         
+                   ,ICT_CNT_STUP      D                                         
+             WHERE A.LOC_GP_ID     = B.LOC_GP_ID                                
+               AND A.LAST_ACTN_CDE = 'A'                                        
+               AND D.LAST_ACTN_CDE = 'A'                                        
+               AND D.FS_UPD_IND    = 'Y'                                        
+C88463         AND D.CNT_TYP_CDE  <> 'ICC'                                      
+               AND C.CNT_STUP_ID   = D.CNT_STUP_ID                              
+               AND B.CNT_STUP_ID   = D.CNT_STUP_ID                              
+               AND C.CNT_STAT_CDE  = 'SCH'                                      
+      *** GET COUNTS THAT WERE RELEASED (IN 'SCH' STATUS) YESTERDAY             
+               AND C.LAST_UPD_TMST >= :PV-SCHEDULER-TMST                        
+               AND C.LAST_UPD_TMST <  :PV-SCHEDULER-TMST-MNS1                   
+               AND C.LAST_UPD_TMST =                                            
+      *** GET LATEST ICT_CNT_STUP_STAT ROW                                      
+             (SELECT MAX(E.LAST_UPD_TMST)                                       
+              FROM ICT_CNT_STUP_STAT  E                                         
+              WHERE E.CNT_STUP_ID  = C.CNT_STUP_ID)                             
+               AND D.LAST_UPD_TMST =                                            
+      *** GET LATEST ICT_CNT_STUP ROW                                           
+             (SELECT MAX(I.LAST_UPD_TMST)                                       
+              FROM ICT_CNT_STUP       I                                         
+              WHERE I.CNT_STUP_ID  = C.CNT_STUP_ID)                             
+      *** EXCLUDE REPEATING COUNTS                                              
+                AND NOT EXISTS                                                  
+                 (SELECT 'Y'                                                    
+                  FROM ICT_CNT_RPET_PARM G                                      
+                  WHERE G.CNT_STUP_ID  = D.CNT_STUP_ID)                         
+               AND A.LAST_UPD_TMST =                                            
+      *** GET LATEST ICT_CNT_LOC_GP ROW                                         
+             (SELECT MAX(H.LAST_UPD_TMST)                                       
+              FROM ICT_CNT_LOC_GP     H                                         
+              WHERE H.LOC_GP_ID        = A.LOC_GP_ID                            
+                AND H.LOC_HIER_CDE     = A.LOC_HIER_CDE                         
+                AND H.LOC_HIER_VAL_NBR = A.LOC_HIER_VAL_NBR)                    
+           END-EXEC.                                                            
+                                                                                
+      *----------------------------------------------------------------         
+      *  USA IC COUNTS CURSOR WILL FETCH CURRENTLY OCCURING COUNTS.             
+      *----------------------------------------------------------------         
+           EXEC SQL                                                             
+             DECLARE OCCR-CNT-CSR CURSOR FOR                                    
+             SELECT A.LOC_HIER_CDE                                              
+                   ,A.LOC_HIER_VAL_NBR                                          
+                   ,D.EXCL_MDSE_IND                                             
+                   ,D.CNT_STUP_ID                                               
+                   ,D.SUGG_EXEC_DTE                                             
+                   ,D.EXEC_WND_STRT_DTE                                         
+                   ,D.EXEC_WND_END_DTE                                          
+                   ,D.FS_UPD_IND                                                
+             FROM   ICT_CNT_LOC_GP    A                                         
+                   ,ICT_LOC_GP_ASSN   B                                         
+                   ,ICT_CNT_STUP_STAT C                                         
+                   ,ICT_CNT_STUP      D                                         
+             WHERE A.LOC_GP_ID     = B.LOC_GP_ID                                
+               AND A.LAST_ACTN_CDE  = 'A'                                       
+               AND C.CNT_STUP_ID   = D.CNT_STUP_ID                              
+               AND B.CNT_STUP_ID   = D.CNT_STUP_ID                              
+      *** THE COUNT MUST BE IN SCHEDULED (RELEASED) STATUS OR HAVE BEEN         
+      *** PREVIOUSLY 'PROCESSED'.                                               
+               AND C.CNT_STAT_CDE  IN ('SCH','PRO')                             
+               AND D.EXEC_WND_STRT_DTE      = DATE(:PV-CURRENT-DATE)            
+               AND D.EXEC_WND_STRT_DTE   IS NOT NULL                            
+               AND D.EXEC_WND_END_DTE    IS NOT NULL                            
+               AND D.FS_UPD_IND     = 'Y'                                       
+C88463         AND D.CNT_TYP_CDE   <> 'ICC'                                     
+               AND C.LAST_UPD_TMST  =                                           
+      *** EXCLUDE REPEATING COUNTS                                              
+              (SELECT MAX(E.LAST_UPD_TMST)                                      
+              FROM ICT_CNT_STUP_STAT  E                                         
+              WHERE E.CNT_STUP_ID  = C.CNT_STUP_ID)                             
+                AND NOT EXISTS                                                  
+                (SELECT 'Y'                                                     
+                 FROM ICT_CNT_RPET_PARM G                                       
+                 WHERE G.CNT_STUP_ID  = D.CNT_STUP_ID)                          
+               AND A.LAST_UPD_TMST =                                            
+      *** GET LATEST ICT_CNT_LOC_GP ROW                                         
+             (SELECT MAX(I.LAST_UPD_TMST)                                       
+              FROM ICT_CNT_LOC_GP     I                                         
+              WHERE I.LOC_GP_ID        = A.LOC_GP_ID                            
+                AND I.LOC_HIER_CDE     = A.LOC_HIER_CDE                         
+                AND I.LOC_HIER_VAL_NBR = A.LOC_HIER_VAL_NBR)                    
+      *** EXCLUDE IF COUNT IS 'CANCELLED'                                       
+               AND NOT EXISTS                                                   
+                (SELECT 'Y'                                                     
+                 FROM ICT_CNT_STUP_STAT  J                                      
+                 WHERE J.CNT_STAT_CDE   = 'CAN'                                 
+                   AND J.CNT_STUP_ID    = C.CNT_STUP_ID)                        
+      *** GET LATEST ICT_CNT_STUP ROW                                           
+              AND D.LAST_UPD_TMST =                                             
+                (SELECT MAX(K.LAST_UPD_TMST)                                    
+                 FROM ICT_CNT_STUP       K                                      
+                 WHERE K.CNT_STUP_ID  = D.CNT_STUP_ID)                          
+           END-EXEC.                                                            
+                                                                                
+      *----------------------------------------------------------------         
+      *  USA IC COUNTS CURSOR WILL FIND ALL LOCATIONS WITHIN A TERRITORY        
+      *----------------------------------------------------------------         
+           EXEC SQL                                                             
+             DECLARE TERR-LOC-CSR CURSOR FOR                                    
+             SELECT   D.LOC_NBR                                                 
+               FROM   XST_REGN_TERR A                                           
+                     ,XST_DIST_REGN B                                           
+                     ,XST_LOC_DIST  C                                           
+                     ,XST_LOC       D                                           
+               WHERE A.TERR_NBR       = :XST00006-TERR-NBR                      
+                 AND A.BEG_DTE       <= DATE(:PV-CURRENT-DATE)                  
+                 AND (A.END_DTE      >= DATE(:PV-CURRENT-DATE)                  
+                  OR  A.END_DTE  IS NULL)                                       
+                 AND B.REGN_NBR         = A.REGN_NBR                            
+                 AND B.BEG_DTE       <= DATE(:PV-CURRENT-DATE)                  
+                 AND (B.END_DTE      >= DATE(:PV-CURRENT-DATE)                  
+                  OR  B.END_DTE  IS NULL)                                       
+                 AND C.DIST_NBR       = B.DIST_NBR                              
+                 AND C.BEG_DTE       <= DATE(:PV-CURRENT-DATE)                  
+                 AND (C.END_DTE       > DATE(:PV-CURRENT-DATE)                  
+                 OR  C.END_DTE  IS NULL)                                        
+                 AND D.LOC_NBR          = C.LOC_NBR                             
+                 AND D.OPN_DTE       <= DATE(:PV-CURRENT-DATE) +                
+                                        21 DAYS                                 
+                 AND (D.CLO_DTE      >= DATE(:PV-CURRENT-DATE)                  
+                 OR  D.CLO_DTE  IS NULL)                                        
+           END-EXEC.                                                            
+      *----------------------------------------------------------------         
+      *  USA IC COUNTS CURSOR WILL FIND ALL LOCATIONS WITHIN A REGION.          
+      *----------------------------------------------------------------         
+           EXEC SQL                                                             
+             DECLARE REGN-LOC-CSR CURSOR FOR                                    
+             SELECT   C.LOC_NBR                                                 
+             FROM   XST_DIST_REGN A                                             
+                   ,XST_LOC_DIST  B                                             
+                   ,XST_LOC       C                                             
+             WHERE A.REGN_NBR       = :XST00004-REGN-NBR                        
+               AND A.BEG_DTE       <= DATE(:PV-CURRENT-DATE)                    
+               AND (A.END_DTE      >= DATE(:PV-CURRENT-DATE)                    
+                OR  A.END_DTE  IS NULL)                                         
+               AND B.BEG_DTE       <= DATE(:PV-CURRENT-DATE)                    
+               AND B.DIST_NBR       = A.DIST_NBR                                
+               AND B.BEG_DTE       <= DATE(:PV-CURRENT-DATE)                    
+               AND (B.END_DTE      >= DATE(:PV-CURRENT-DATE)                    
+               OR  B.END_DTE  IS NULL)                                          
+               AND C.LOC_NBR        = B.LOC_NBR                                 
+               AND C.OPN_DTE       <= DATE(:PV-CURRENT-DATE) +                  
+                                      21 DAYS                                   
+               AND (C.CLO_DTE      >= DATE(:PV-CURRENT-DATE)                    
+                OR  C.CLO_DTE  IS NULL)                                         
+           END-EXEC.                                                            
+      *----------------------------------------------------------------         
+      *  USA IC COUNTS CURSOR WILL FIND ALL LOCATIONS WITHIN A DISTRICT         
+      *----------------------------------------------------------------         
+           EXEC SQL                                                             
+             DECLARE DIST-LOC-CSR CURSOR FOR                                    
+             SELECT   B.LOC_NBR                                                 
+             FROM   XST_LOC_DIST A                                              
+                   ,XST_LOC      B                                              
+             WHERE  A.DIST_NBR       = :XST00004-DIST-NBR                       
+                AND A.BEG_DTE       <= DATE(:PV-CURRENT-DATE)                   
+                AND (A.END_DTE      >= DATE(:PV-CURRENT-DATE)                   
+                OR  A.END_DTE  IS NULL)                                         
+                AND B.LOC_NBR        = A.LOC_NBR                                
+                AND B.OPN_DTE       <= DATE(:PV-CURRENT-DATE) +                 
+                                       21 DAYS                                  
+                AND (B.CLO_DTE      >= DATE(:PV-CURRENT-DATE)                   
+                 OR  B.CLO_DTE  IS NULL)                                        
+           END-EXEC.                                                            
+                                                                                
+      *----------------------------------------------------------------         
+      *  USA IC COUNTS CURSOR WILL FIND ALL LOCATIONS WITHIN A DC               
+      *----------------------------------------------------------------         
+           EXEC SQL                                                             
+             DECLARE DC-LOC-CSR CURSOR FOR                                      
+             SELECT   B.LOC_NBR                                                 
+             FROM   XST_DC_LOC_ASGMT A                                          
+                   ,XST_LOC      B                                              
+             WHERE  A.DC_NBR       = :XST00020-DC-NBR                           
+                AND B.LOC_NBR      = A.LOC_NBR                                  
+                AND A.EFF_BEG_DTE <= DATE(:PV-CURRENT-DATE)                     
+                                                                                
+           END-EXEC.                                                            
+      *----------------------------------------------------------------         
+      *  USA IC COUNTS CURSOR WITH ALL REPEAT COUNTS (CURRENT)                  
+      *----------------------------------------------------------------         
+           EXEC SQL                                                             
+             DECLARE RPET-CNT-CSR CURSOR FOR                                    
+             SELECT  A.LOC_HIER_CDE                                             
+                    ,A.LOC_HIER_VAL_NBR                                         
+                    ,D.EXCL_MDSE_IND                                            
+                    ,D.CNT_STUP_ID                                              
+                    ,E.CNT_FRQ_CDE                                              
+                    ,D.FS_UPD_IND                                               
+             FROM  ICT_CNT_LOC_GP     A                                         
+                  ,ICT_LOC_GP_ASSN    B                                         
+                  ,ICT_CNT_STUP_STAT  C                                         
+                  ,ICT_CNT_STUP       D                                         
+                  ,ICT_CNT_RPET_PARM  E                                         
+             WHERE A.LOC_GP_ID          = B.LOC_GP_ID                           
+               AND E.CNT_STUP_ID        = D.CNT_STUP_ID                         
+               AND C.CNT_STUP_ID        = D.CNT_STUP_ID                         
+               AND B.CNT_STUP_ID        = D.CNT_STUP_ID                         
+               AND D.FS_UPD_IND         = 'Y'                                   
+               AND D.LAST_ACTN_CDE      = 'A'                                   
+C88463         AND D.CNT_TYP_CDE       <> 'ICC'                                 
+               AND A.LAST_ACTN_CDE      = 'A'                                   
+               AND E.RPET_WND_STRT_DTE <= DATE(:PV-CURRENT-DATE)                
+               AND E.RPET_WND_END_DTE  >= DATE(:PV-CURRENT-DATE)                
+      *** THE COUNT MUST BE IN SCHEDULED (RELEASED) STATUS OR HAVE BEEN         
+      *** PREVIOUSLY 'PROCESSED'.                                               
+               AND C.CNT_STAT_CDE     IN ('SCH','PRO')                          
+      *** DAILY COUNT                                                           
+               AND (E.CNT_FRQ_CDE       = 'DAY'                                 
+      *** WEEKLY COUNT                                                          
+                OR (E.CNT_FRQ_CDE       = 'WKL'                                 
+               AND E.DAY_OF_WK_CDE      = :ICT00013-DAY-OF-WK-CDE)              
+      *** MONTHLY COUNT                                                         
+                OR (E.CNT_FRQ_CDE       = 'MTH'                                 
+               AND E.DAY_OF_WK_CDE      = :ICT00013-DAY-OF-WK-CDE               
+               AND E.WK_OF_MN_NBR       = :ICT00013-WK-OF-MN-NBR))              
+      *** GET LATEST ICT_CNT_LOC_GP ROW                                         
+               AND A.LAST_UPD_TMST      =                                       
+             (SELECT MAX(J.LAST_UPD_TMST)                                       
+              FROM ICT_CNT_LOC_GP     J                                         
+              WHERE J.LOC_GP_ID    = A.LOC_GP_ID                                
+                AND J.LOC_HIER_CDE = A.LOC_HIER_CDE                             
+                AND J.LOC_HIER_VAL_NBR = A.LOC_HIER_VAL_NBR)                    
+      *** GET LATEST ICT_CNT_STUP ROW                                           
+               AND D.LAST_UPD_TMST      =                                       
+             (SELECT MAX(I.LAST_UPD_TMST)                                       
+              FROM ICT_CNT_STUP       I                                         
+              WHERE I.CNT_STUP_ID  = D.CNT_STUP_ID)                             
+      *** GET LATEST ICT_CNT_RPET_PARM ROW                                      
+               AND E.LAST_UPD_TMST      =                                       
+             (SELECT MAX(K.LAST_UPD_TMST)                                       
+              FROM ICT_CNT_RPET_PARM  K                                         
+              WHERE K.CNT_STUP_ID  = D.CNT_STUP_ID)                             
+      *** EXCLUDE IF COUNT IS 'CANCELLED'                                       
+               AND NOT EXISTS                                                   
+                (SELECT 'Y'                                                     
+                 FROM ICT_CNT_STUP_STAT  F                                      
+                 WHERE F.CNT_STAT_CDE   = 'CAN'                                 
+                   AND F.CNT_STUP_ID    = D.CNT_STUP_ID)                        
+               AND  C.LAST_UPD_TMST      =                                      
+                 (SELECT MAX(M.LAST_UPD_TMST)                                   
+                  FROM ICT_CNT_STUP_STAT       M                                
+                  WHERE M.CNT_STUP_ID  = D.CNT_STUP_ID)                         
+           END-EXEC.                                                            
+                                                                                
+                                                                                
+       PROCEDURE DIVISION.                                                      
+      ******************************************************************        
+      * 0000-MAIN-MODULE.                                              *        
+      *  ==> PROCESSES:                                                *        
+      *    - CONTROLS HIGHEST LEVEL FLOW OF PROGRAM                    *        
+      ******************************************************************        
+       0000-MAIN-MODULE.                                                        
+           MOVE '0000-MAIN-MODULE' TO PV-PARAGRAPH-NAME.                        
+                                                                                
+           PERFORM 1000-INITIALIZATION.                                         
+                                                                                
+           PERFORM 2000-PROCESS-COUNTS.                                         
+                                                                                
+           PERFORM 3000-EOJ-PROCESSING.                                         
+                                                                                
+           STOP RUN.                                                            
+                                                                                
+      ******************************************************************        
+      * 1000-INITIALIZATION.                                           *        
+      ******************************************************************        
+       1000-INITIALIZATION.                                                     
+           MOVE '1000-INITIALIZATION ' TO PV-PARAGRAPH-NAME.                    
+           OPEN INPUT  CARDIN-CURR-DATE-FILE                                    
+                OUTPUT CNT-STORE-EXP-FILE.                                      
+                                                                                
+           MOVE '-19.00.00.000000' TO PV-SCHEDULER-TIME                         
+                                      PV-SCHEDULER-TIME-MNS1.                   
+           PERFORM 1100-READ-CARDIN.                                            
+           MOVE CC-CURR-DATE    TO PV-SCHEDULER-DATE.                           
+           PERFORM 1200-SELECT-DATE.                                            
+           DISPLAY 'EXECUTION DT -  ' PV-CURRENT-DATE.                          
+           DISPLAY 'CURR RUN WAS -  ' PV-SCHEDULER-TMST.                        
+           DISPLAY 'LAST RUN WAS -  ' PV-SCHEDULER-TMST-MNS1.                   
+                                                                                
+           PERFORM 1300-CALENDAR-DAY-OF-WEEK.                                   
+                                                                                
+      ******************************************************************        
+      * READ CURRENT DATE CONTROL FILE RECORD.                                  
+      ******************************************************************        
+       1100-READ-CARDIN.                                                        
+                                                                                
+           READ CARDIN-CURR-DATE-FILE INTO CC-CARDIN                            
+             AT END                                                             
+                SET PS-EOF-CARDIN TO TRUE                                       
+           END-READ.                                                            
+                                                                                
+           IF PS-EOF-CARDIN                                                     
+               DISPLAY '** ICKUT085 ABEND **'                                   
+               DISPLAY '** CARDIN (CURR DATE) FILE IS EMPTY **'                 
+               MOVE +4003 TO ABEND-CODE                                         
+               CALL 'ILBOABN0' USING ABEND-CODE                                 
+           END-IF.                                                              
+                                                                                
+      *-------------------------------------------------------------            
+      * 1200-SELECT-DATE.                                                       
+      *      GET SCHEDULER DATE - 1                                             
+      *      GET CURRENT DATE - SHCEDULER DATE + 1                              
+      *-------------------------------------------------------------            
+       1200-SELECT-DATE.                                                        
+           INITIALIZE DPG51 DPG52 DPG53 DPG54 DPG55 DPG56                       
+           SET  DPG51-ACTUAL-CALENDAR-ONLY   TO TRUE                            
+           SET  DPG52-LK-DTE-ISO-FMT         TO TRUE                            
+           SET  DPG51-DECREMENT-DATE         TO TRUE                            
+           MOVE 1 TO DPG51-INCR-DECR-DAYS-9                                     
+           MOVE PV-SCHEDULER-DATE      TO DPG52-LK-DATE-INPUT                   
+           PERFORM 1500-FUTURE-OFFSET-DTE                                       
+           MOVE DPG55-DB2-ISO-DATE-FMT TO PV-SCHEDULER-DATE-MNS1                
+                                                                                
+           INITIALIZE DPG51 DPG52 DPG53 DPG54 DPG55 DPG56                       
+           SET  DPG51-ACTUAL-CALENDAR-ONLY   TO TRUE                            
+           SET  DPG52-LK-DTE-ISO-FMT         TO TRUE                            
+           SET  DPG51-INCREMENT-DATE         TO TRUE                            
+           MOVE 1 TO DPG51-INCR-DECR-DAYS-9                                     
+           MOVE PV-SCHEDULER-DATE      TO DPG52-LK-DATE-INPUT                   
+           PERFORM 1500-FUTURE-OFFSET-DTE                                       
+           MOVE DPG55-DB2-ISO-DATE-FMT TO PV-CURRENT-DATE.                      
+                                                                                
+       1300-CALENDAR-DAY-OF-WEEK.                                               
+                                                                                
+           MOVE '1300-CALENDAR-DAY-OF-WEEK' TO PV-PARAGRAPH-NAME.               
+           MOVE PV-CURRENT-DATE TO DTATTR-KY-DTE.                               
+           EXEC SQL                                                             
+               SELECT WK_IN_MN_NBR                                              
+                     ,DAY_OF_WK_NBR                                             
+                     ,FSCL_MN_NBR                                               
+                     ,FSCL_YR_NBR                                               
+               INTO :DTATTR-WK-IN-MN-NBR                                        
+                   ,:DTATTR-DAY-OF-WK-NBR                                       
+                   ,:DTATTR-FSCL-MN-NBR                                         
+                   ,:DTATTR-FSCL-YR-NBR                                         
+               FROM TDTATTR                                                     
+               WHERE KY_DTE   = :DTATTR-KY-DTE                                  
+           END-EXEC.                                                            
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = 0                                                  
+                  CONTINUE                                                      
+              WHEN OTHER                                                        
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 SELECT WEEK DAY/NBR'                        
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-EVALUATE                                                         
+                                                                                
+           MOVE DTATTR-DAY-OF-WK-NBR   TO PV-CURRENT-WEEKDAY.                   
+           MOVE DTATTR-WK-IN-MN-NBR    TO PV-CURRENT-WEEK-NBR.                  
+           MOVE DTATTR-FSCL-MN-NBR     TO PV-CURRENT-MONTH-NBR.                 
+           MOVE DTATTR-FSCL-YR-NBR     TO PV-CURRENT-YEAR-NBR.                  
+           DISPLAY 'WEEK DAY: '  PV-CURRENT-WEEKDAY.                            
+           DISPLAY 'WEEK NBR: '  PV-CURRENT-WEEK-NBR.                           
+                                                                                
+      *----------------------------------------------------------               
+      * 1500-FUTURE-OFFSET-DTE.                                                 
+      *     GETS THE FUTURE DATE.                                               
+      *----------------------------------------------------------               
+       1500-FUTURE-OFFSET-DTE.                                                  
+                                                                                
+           DISPLAY 'INPUT TO DATE OFFSET ' DPG52-LK-DATE-INPUT.                 
+                                                                                
+           CALL DP500-KOHLS-CALENDAR-ROUTINE USING DPG51 DPG52 DPG53            
+                                                   DPG54 DPG55 DPG56.           
+           EVALUATE TRUE                                                        
+               WHEN DPG54-NO-ERROR                                              
+                   DISPLAY 'DAYS AHEAD NEEDED: ' DPG51-INCR-DECR-DAYS-X         
+                   DISPLAY 'RETRIEVING FUTURE OFFSET DATE'                      
+               WHEN DPG54-SEVERE-ERROR                                          
+                   DISPLAY ' '                                                  
+                   DISPLAY '** ABEND ** IN ICKUT085'                            
+                   DISPLAY '** INVALID RETURN FROM CALENDAR ROUTINE'            
+                   DISPLAY '** CALLED BY 1500-FUTURE-OFFSET-DTE'                
+                   DISPLAY '** ERROR MESSAGE = '                                
+                                     DPG54-ERROR-MESSAGE                        
+                   DISPLAY '** DPG51 = ' DPG51                                  
+                   DISPLAY '** DPG52 = ' DPG52                                  
+                   DISPLAY '** DPG53 = ' DPG53                                  
+                   DISPLAY '** DPG54 = ' DPG54                                  
+                   DISPLAY '** DPG55 = ' DPG55                                  
+                   DISPLAY '** DPG56 = ' DPG56                                  
+                   MOVE '1500-FUTURE-OFFSET-DTE'                                
+                                                 TO PV-PARAGRAPH-NAME           
+                   MOVE 'ERROR VALIDATING INPUT DATE'                           
+                                 TO PV-DB2-OPERATION-ATTEMPTED                  
+                   SET ABEND-4019-CAL-SUB-ERROR  TO TRUE                        
+                   DISPLAY DPG54-ERROR-MESSAGE                                  
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      * 2000-PROCESS-COUNTS.                                           *        
+      *  ==> FINDS ALL LOCATION GROUPS FOR EACH COUNT.                 *        
+      ******************************************************************        
+       2000-PROCESS-COUNTS.                                                     
+      ****************************************************************          
+      *** COUNTS THAT WERE RELEASED 1 DAY AGO.                                  
+      ****************************************************************          
+           MOVE 'N'         TO ICRD052-CLRNC-CHK-IND.                           
+           SET  PS-MORE-RLSE-CNT TO TRUE.                                       
+           PERFORM 8100-OPEN-RLSE-CNT.                                          
+           PERFORM 8110-FETCH-RLSE-CNT.                                         
+           PERFORM                                                              
+             UNTIL PS-NO-MORE-RLSE-CNT                                          
+      *** THIS WILL CAUSE THE CHECK FOR COMPLETED COUNT TO BE DONE              
+             SET PS-NOT-RPET-CNT TO TRUE                                        
+             MOVE ICT00010-EXEC-WND-STRT-DTE TO ICRD052-EXEC-DTE                
+             MOVE 'N' TO ICRD052-RPET-CNT-IND                                   
+             PERFORM 2100-PROCESS-RLSD-COUNTS                                   
+             PERFORM 8110-FETCH-RLSE-CNT                                        
+           END-PERFORM.                                                         
+           PERFORM 8120-CLOSE-RLSE-CNT.                                         
+           DISPLAY 'RELEASED COUNT PROCESSING DONE'.                            
+                                                                                
+      ****************************************************************          
+      * COUNTS THAT ARE OCCURRING NOW AND NOT COMPLETED.                        
+      ****************************************************************          
+           MOVE 'Y'         TO ICRD052-CLRNC-CHK-IND.                           
+           PERFORM 8200-OPEN-OCCR-CNT.                                          
+           PERFORM 8210-FETCH-OCCR-CNT.                                         
+           PERFORM                                                              
+             UNTIL PS-NO-MORE-OCCR-CNT                                          
+             MOVE 'N' TO ICRD052-RPET-CNT-IND                                   
+      *** THIS WILL CAUSE THE CHECK FOR COMPLETED COUNT TO BE DONE              
+             SET PS-NOT-RPET-CNT TO TRUE                                        
+             MOVE PV-CURRENT-DATE TO ICRD052-EXEC-DTE                           
+             PERFORM 2100-PROCESS-RLSD-COUNTS                                   
+             PERFORM 8210-FETCH-OCCR-CNT                                        
+           END-PERFORM.                                                         
+           PERFORM 8220-CLOSE-OCCR-CNT.                                         
+           DISPLAY 'OCCURRING COUNT PROCESSING DONE'.                           
+                                                                                
+      ****************************************************************          
+      *** COUNTS THAT REPEAT ON A DAILY,WEEKLY OR MONTHLY  BASIS                
+      *** AND ARE DO TO PROCESS TODAY.                                          
+      ****************************************************************          
+           MOVE 'N'         TO ICRD052-CLRNC-CHK-IND.                           
+           MOVE PV-CURRENT-WEEKDAY  TO ICT00013-DAY-OF-WK-CDE.                  
+           MOVE PV-CURRENT-WEEK-NBR TO ICT00013-WK-OF-MN-NBR.                   
+           SET PS-MORE-RPET-CNT TO TRUE.                                        
+           PERFORM 8300-OPEN-RPET-CNT-CSR.                                      
+           PERFORM 8310-FETCH-RPET-CNT-CSR.                                     
+           PERFORM                                                              
+               UNTIL PS-NO-MORE-RPET-CNT                                        
+      *** VALUE WILL BE 'W' OR 'M' OR 'D'                                       
+               SET ICRD052-RPET-UPD TO TRUE                                     
+               MOVE ICT00013-CNT-FRQ-CDE (1:1) TO ICRD052-RPET-CNT-IND          
+      *** BY SETTING THIS SWITCH THE CHECK FOR COMPLETED WILL BE SKIPPED        
+             SET PS-RPET-CNT TO TRUE                                            
+      *** THERE IS NO SUGGESTED DATE OR BEGIN OR END DATE AS THE                
+      *** CURRENT DATE IS USED ON REPEATING COUNTS.                             
+             MOVE PV-CURRENT-DATE TO ICT00010-SUGG-EXEC-DTE                     
+                                     ICT00010-EXEC-WND-STRT-DTE                 
+                                     ICT00010-EXEC-WND-END-DTE                  
+             SET PV-SUGG-EXEC-DTE-NOT-NULL TO TRUE                              
+             SET PV-EXEC-WND-STRT-DTE-NOT-NULL TO TRUE                          
+             SET PV-EXEC-WND-END-DTE-NOT-NULL TO TRUE                           
+             MOVE PV-CURRENT-DATE TO ICRD052-EXEC-DTE                           
+             MOVE PV-CURRENT-DATE TO PV-COMPUTED-DATE                           
+      ***                                                                       
+             PERFORM 2100-PROCESS-RLSD-COUNTS                                   
+             PERFORM 8310-FETCH-RPET-CNT-CSR                                    
+           END-PERFORM.                                                         
+           PERFORM 8320-CLOSE-RPET-CNT-CSR.                                     
+           DISPLAY 'REPEAT COUNT PROCESSING DONE'.                              
+                                                                                
+      ******************************************************************        
+      * 2100-PROCESS-RLSD-COUNTS.                                      *        
+      *  ==> FINDS ALL LOCATIONS FOR EACH GROUP SPECIFIED FOR A COUNT  *        
+      ******************************************************************        
+       2100-PROCESS-RLSD-COUNTS.                                                
+           IF ICT00014-LOC-HIER-CDE = 'TER'                                     
+             MOVE ICT00014-LOC-HIER-VAL-NBR TO XST00006-TERR-NBR                
+             SET PS-MORE-TERR-LOC TO TRUE                                       
+             PERFORM 8400-OPEN-TERR-LOC-CSR                                     
+             PERFORM 8410-FETCH-TERR-LOC-CSR                                    
+             PERFORM                                                            
+               UNTIL PS-NO-MORE-TERR-LOC                                        
+               PERFORM 2110-EXPLODE-RLSD-COUNTS                                 
+               PERFORM 8410-FETCH-TERR-LOC-CSR                                  
+             END-PERFORM                                                        
+             PERFORM 8420-CLOSE-TERR-LOC-CSR                                    
+           ELSE                                                                 
+           IF ICT00014-LOC-HIER-CDE = 'REG'                                     
+             MOVE ICT00014-LOC-HIER-VAL-NBR TO  XST00004-REGN-NBR               
+             SET PS-MORE-REGN-LOC TO TRUE                                       
+             PERFORM 8500-OPEN-REGN-LOC-CSR                                     
+             PERFORM 8510-FETCH-REGN-LOC-CSR                                    
+             PERFORM                                                            
+               UNTIL PS-NO-MORE-REGN-LOC                                        
+               PERFORM 2110-EXPLODE-RLSD-COUNTS                                 
+               PERFORM 8510-FETCH-REGN-LOC-CSR                                  
+             END-PERFORM                                                        
+             PERFORM 8520-CLOSE-REGN-LOC-CSR                                    
+           ELSE                                                                 
+           IF ICT00014-LOC-HIER-CDE = 'DIS'                                     
+             MOVE ICT00014-LOC-HIER-VAL-NBR TO  XST00004-DIST-NBR               
+             SET PS-MORE-DIST-LOC TO TRUE                                       
+             PERFORM 8600-OPEN-DIST-LOC-CSR                                     
+             PERFORM 8610-FETCH-DIST-LOC-CSR                                    
+             PERFORM                                                            
+               UNTIL PS-NO-MORE-DIST-LOC                                        
+               PERFORM 2110-EXPLODE-RLSD-COUNTS                                 
+               PERFORM 8610-FETCH-DIST-LOC-CSR                                  
+             END-PERFORM                                                        
+             PERFORM 8620-CLOSE-DIST-LOC-CSR                                    
+           ELSE                                                                 
+           IF ICT00014-LOC-HIER-CDE = 'DC '                                     
+             MOVE ICT00014-LOC-HIER-VAL-NBR TO XST00020-DC-NBR                  
+             SET PS-MORE-DC-LOC TO TRUE                                         
+             PERFORM 8700-OPEN-DC-LOC-CSR                                       
+             PERFORM 8710-FETCH-DC-LOC-CSR                                      
+             PERFORM                                                            
+               UNTIL PS-NO-MORE-DC-LOC                                          
+               PERFORM 2110-EXPLODE-RLSD-COUNTS                                 
+               PERFORM 8710-FETCH-DC-LOC-CSR                                    
+             END-PERFORM                                                        
+             PERFORM 8720-CLOSE-DC-LOC-CSR                                      
+           ELSE                                                                 
+           IF ICT00014-LOC-HIER-CDE = 'STR'                                     
+             MOVE ICT00014-LOC-HIER-VAL-NBR TO XST00001-LOC-NBR                 
+             SET PV-INVENTORY-PERIOD TO TRUE                                    
+             IF PV-SUGG-EXEC-DTE-IS-NULL                                        
+               MOVE PV-CURRENT-DATE TO ICT00010-SUGG-EXEC-DTE                   
+               DISPLAY 'SUGGESTED START DATE NULL-  '                           
+                 ICT00010-CNT-STUP-ID                                           
+             END-IF                                                             
+             IF PV-EXEC-WND-STRT-DTE-IS-NULL                                    
+               MOVE ICT00010-SUGG-EXEC-DTE TO ICT00010-EXEC-WND-STRT-DTE        
+             END-IF                                                             
+             IF PV-EXEC-WND-END-DTE-IS-NULL                                     
+               MOVE ICT00010-SUGG-EXEC-DTE TO ICT00010-EXEC-WND-END-DTE         
+             END-IF                                                             
+             PERFORM 2110-EXPLODE-RLSD-COUNTS                                   
+           ELSE                                                                 
+             DISPLAY 'INVALID COUNT HIERARCHY CODE = '                          
+                  ICT00010-CNT-STUP-ID ' - '                                    
+                  ICT00014-LOC-HIER-CDE.                                        
+                                                                                
+      ******************************************************************        
+      * 2110-EXPLODE-RLSD-COUNTS.                                      *        
+      *  ==> CREATES THE EXPLOSION RECORDS OF COUNT/LOCATION FOR EACH  *        
+      *      COUNT.                                                    *        
+      ******************************************************************        
+       2110-EXPLODE-RLSD-COUNTS.                                                
+           MOVE XST00001-LOC-NBR       TO ICT00020-LOC-NBR.                     
+           MOVE ICT00010-CNT-STUP-ID   TO ICT00020-CNT-STUP-ID.                 
+           SET PV-NOT-COMPLETED-COUNT TO TRUE.                                  
+      *** THIS CHECK IS NOT NEEDED ON A REPEATING COUNT                         
+             IF PS-NOT-RPET-CNT                                                 
+               PERFORM 8920-CHECK-CPLTD-COUNT.                                  
+      ***                                                                       
+           IF PV-NOT-COMPLETED-COUNT                                            
+             MOVE XST00001-LOC-NBR       TO INVPAR-LOC-NBR                      
+             SET PV-NOT-INVENTORY-PERIOD TO TRUE                                
+             MOVE SPACE TO INVPAR-PLND-INV-DTE                                  
+                           INVPAR-PLND-UNIT-BK-DTE                              
+             IF PS-NOT-RPET-CNT                                                 
+                PERFORM 8900-CHECK-FOR-INV                                      
+             ELSE                                                               
+                PERFORM 8810-CHECK-FOR-INV-RPET-CNT                             
+             END-IF                                                             
+      *** IF A FULL INVENTORY IS PLANNED, A USA COUNT IS NOT TO BE DONE         
+             IF PV-NOT-INVENTORY-PERIOD                                         
+               MOVE ICT00010-CNT-STUP-ID   TO ICRD052-CNT-STUP-ID               
+               MOVE XST00001-LOC-NBR       TO ICRD052-LOC-NBR                   
+               MOVE ICT00010-EXCL-MDSE-IND TO ICRD052-EXCL-MDSE-IND             
+               PERFORM 7000-WRITE-CNT-STORE-EXP-FL                              
+             END-IF                                                             
+           END-IF.                                                              
+      ******************************************************************        
+      * 3000-EOJ-PROCESSING.                                           *        
+      *  ==> PROCESSES:                                                *        
+      *    - CLOSE FILES                                               *        
+      *    - DISPLAYS PROCESSING TOTALS                                *        
+      *    - TAKES A FINAL COMMIT                                      *        
+      ******************************************************************        
+       3000-EOJ-PROCESSING.                                                     
+           MOVE '3000-EOJ-PROCESSING' TO PV-PARAGRAPH-NAME.                     
+                                                                                
+           CLOSE CARDIN-CURR-DATE-FILE                                          
+                 CNT-STORE-EXP-FILE.                                            
+                                                                                
+                                                                                
+           PERFORM 9990-DISPLAY-CONTROL-INFO.                                   
+                                                                                
+                                                                                
+      *----------------------------------------------------------               
+      * 7000-WRITE-CNT-STORE-EXP-FL.                                            
+      *----------------------------------------------------------               
+       7000-WRITE-CNT-STORE-EXP-FL.                                             
+           WRITE CNT-STORE-EXP-REC                                              
+             FROM ICRD052-IC-COUNTS-FILE.                                       
+                                                                                
+      *----------------------------------------------------------               
+      * 8100-OPEN-RLSE-CNT.                                                     
+      *      OPEN THE CURSOR OF RELEASED COUNTS.                                
+      *----------------------------------------------------------               
+       8100-OPEN-RLSE-CNT.                                                      
+                                                                                
+           MOVE '8100-OPEN-RLSE-CNT'  TO PV-PARAGRAPH-NAME.                     
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    OPEN RLSE-CNT-CSR                                           
+                 END-EXEC                                                       
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 OPEN OF RLSE-CNT CURSOR FOR '               
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8110-FETCH-RLSE-CNT.                                                    
+      *      FETCH A RELEASED COUNTS ROW.                                       
+      *----------------------------------------------------------               
+       8110-FETCH-RLSE-CNT.                                                     
+                                                                                
+           MOVE '8110-FETCH-RLSE-CNT'  TO PV-PARAGRAPH-NAME.                    
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                   OR                      
+                      SQLCODE = 0                       OR                      
+                      SQLCODE = +100)                                           
+                                                                                
+                 EXEC SQL                                                       
+                    FETCH RLSE-CNT-CSR                                          
+                INTO :ICT00014-LOC-HIER-CDE                                     
+                    ,:ICT00014-LOC-HIER-VAL-NBR                                 
+                    ,:ICT00010-EXCL-MDSE-IND                                    
+                    ,:ICT00010-CNT-STUP-ID                                      
+                    ,:ICT00010-SUGG-EXEC-DTE:PV-EXTR-PRC-TMST-NI                
+                    ,:ICT00010-EXEC-WND-STRT-DTE:PV-EXEC-WND-STRT-DTE-NI        
+                    ,:ICT00010-EXEC-WND-END-DTE:PV-EXEC-WND-END-DTE-NI          
+                    ,:ICT00010-FS-UPD-IND                                       
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                    WHEN SQLCODE = -904                                         
+                    WHEN SQLCODE = -911                                         
+                    WHEN SQLCODE = -913                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = ZERO                                         
+                        ADD +1 TO DI-RLSE-CNTS                                  
+                    WHEN SQLCODE = +100                                         
+                        SET PS-NO-MORE-RLSE-CNT    TO TRUE                      
+                    WHEN OTHER                                                  
+                        SET PS-PROCESS-STOP        TO TRUE                      
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 FETCH OF RLSE-CNT CURSOR'                   
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *-------------------------------------------------------------            
+      * 8120-CLOSE-RLSE-CNT.                                                    
+      *      CLOSE THE RELEASED COUNTS CURSOR.                                  
+      *-------------------------------------------------------------            
+       8120-CLOSE-RLSE-CNT.                                                     
+                                                                                
+           MOVE '8120-CLOSE-RLSE-CNT'  TO PV-PARAGRAPH-NAME.                    
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    CLOSE RLSE-CNT-CSR                                          
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 CLOSE OF RLSE-CNT CURSOR'                   
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8200-OPEN-OCCR-CNT.                                                     
+      *      OPEN THE CURSOR OF CURRENTLY OCCURING COUNTS.                      
+      *----------------------------------------------------------               
+       8200-OPEN-OCCR-CNT.                                                      
+                                                                                
+           MOVE '8200-OPEN-OCCR-CNT'  TO PV-PARAGRAPH-NAME.                     
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    OPEN OCCR-CNT-CSR                                           
+                 END-EXEC                                                       
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 OPEN OF OCCR-CNT CURSOR'                    
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8210-FETCH-OCCR-CNT.                                                    
+      *      FETCH AN OCCURING COUNTS ROW.                                      
+      *----------------------------------------------------------               
+       8210-FETCH-OCCR-CNT.                                                     
+                                                                                
+           MOVE '8210-FETCH-OCCR-CNT'  TO PV-PARAGRAPH-NAME.                    
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                   OR                      
+                      SQLCODE = 0                       OR                      
+                      SQLCODE = +100)                                           
+                                                                                
+                 EXEC SQL                                                       
+                    FETCH OCCR-CNT-CSR                                          
+                INTO :ICT00014-LOC-HIER-CDE                                     
+                    ,:ICT00014-LOC-HIER-VAL-NBR                                 
+                    ,:ICT00010-EXCL-MDSE-IND                                    
+                    ,:ICT00010-CNT-STUP-ID                                      
+                    ,:ICT00010-SUGG-EXEC-DTE:PV-EXTR-PRC-TMST-NI                
+                    ,:ICT00010-EXEC-WND-STRT-DTE:PV-EXEC-WND-STRT-DTE-NI        
+                    ,:ICT00010-EXEC-WND-END-DTE:PV-EXEC-WND-END-DTE-NI          
+                    ,:ICT00010-FS-UPD-IND                                       
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                    WHEN SQLCODE = -904                                         
+                    WHEN SQLCODE = -911                                         
+                    WHEN SQLCODE = -913                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = ZERO                                         
+                        ADD +1 TO DI-CURR-OCCR-CNTS                             
+                    WHEN SQLCODE = +100                                         
+                        SET PS-NO-MORE-OCCR-CNT    TO TRUE                      
+                    WHEN OTHER                                                  
+                        SET PS-PROCESS-STOP        TO TRUE                      
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 FETCH OF OCCR-CNT CURSOR'                   
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *-------------------------------------------------------------            
+      * 8220-CLOSE-OCCR-CNT.                                                    
+      *      CLOSE THE OCCURING COUNTS CURSOR.                                  
+      *-------------------------------------------------------------            
+       8220-CLOSE-OCCR-CNT.                                                     
+                                                                                
+           MOVE '8220-CLOSE-OCCR-CNT'  TO PV-PARAGRAPH-NAME.                    
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    CLOSE OCCR-CNT-CSR                                          
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 CLOSE OF OCCR-CNT CURSOR'                   
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8300-OPEN-RPET-CNT-CSR.                                                 
+      *      OPEN THE CURSOR OF REPEAT COUNTS.                                  
+      *----------------------------------------------------------               
+       8300-OPEN-RPET-CNT-CSR.                                                  
+                                                                                
+           MOVE '8300-OPEN-RPET-CNT-CSR'  TO PV-PARAGRAPH-NAME.                 
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    OPEN RPET-CNT-CSR                                           
+                 END-EXEC                                                       
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 OPEN OF RPET-CNT-CSR CURSOR'                
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8310-FETCH-RPET-CNT-CSR.                                                
+      *      FETCH A REPEAT COUNT.                                              
+      *----------------------------------------------------------               
+       8310-FETCH-RPET-CNT-CSR.                                                 
+                                                                                
+           MOVE '8310-FETCH-RPET-CNT-CSR'  TO PV-PARAGRAPH-NAME.                
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                   OR                      
+                      SQLCODE = 0                       OR                      
+                      SQLCODE = +100)                                           
+                                                                                
+                 EXEC SQL                                                       
+                    FETCH RPET-CNT-CSR                                          
+                    INTO  :ICT00014-LOC-HIER-CDE                                
+                         ,:ICT00014-LOC-HIER-VAL-NBR                            
+                         ,:ICT00010-EXCL-MDSE-IND                               
+                         ,:ICT00010-CNT-STUP-ID                                 
+                         ,:ICT00013-CNT-FRQ-CDE                                 
+                         ,:ICT00010-FS-UPD-IND                                  
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                    WHEN SQLCODE = -904                                         
+                    WHEN SQLCODE = -911                                         
+                    WHEN SQLCODE = -913                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = ZERO                                         
+                        ADD +1 TO DI-RPET-CNTS                                  
+                    WHEN SQLCODE = +100                                         
+                        SET PS-NO-MORE-RPET-CNT  TO TRUE                        
+                    WHEN OTHER                                                  
+                        SET PS-PROCESS-STOP        TO TRUE                      
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 FETCH OF RPET-CNT-CSR CURSOR'               
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *-------------------------------------------------------------            
+      * 8320-CLOSE-RPET-CNT-CSR.                                                
+      *      CLOSE THE REPEAT COUNT CURSOR.                                     
+      *-------------------------------------------------------------            
+       8320-CLOSE-RPET-CNT-CSR.                                                 
+                                                                                
+           MOVE '8320-CLOSE-RPET-CNT-CSR'  TO PV-PARAGRAPH-NAME.                
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    CLOSE RPET-CNT-CSR                                          
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 CLOSE OF RPET-CNT-CSR CURSOR'               
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8400-OPEN-TERR-LOC-CSR.                                                 
+      *      OPEN THE CURSOR OF LOCATIONS WITHIN A TERRITORY.                   
+      *----------------------------------------------------------               
+       8400-OPEN-TERR-LOC-CSR.                                                  
+                                                                                
+           MOVE '8400-OPEN-TERR-LOC-CSR'  TO PV-PARAGRAPH-NAME.                 
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    OPEN TERR-LOC-CSR                                           
+                 END-EXEC                                                       
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 OPEN OF TERR-LOC-CSR CURSOR'                
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8410-FETCH-TERR-LOC-CSR.                                                
+      *      FETCH A LOCATION WITHIN A TERRITORY.                               
+      *----------------------------------------------------------               
+       8410-FETCH-TERR-LOC-CSR.                                                 
+                                                                                
+           MOVE '8410-FETCH-TERR-LOC-CSR'  TO PV-PARAGRAPH-NAME.                
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                   OR                      
+                      SQLCODE = 0                       OR                      
+                      SQLCODE = +100)                                           
+                                                                                
+                 EXEC SQL                                                       
+                    FETCH TERR-LOC-CSR                                          
+                    INTO  :XST00001-LOC-NBR                                     
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                    WHEN SQLCODE = -904                                         
+                    WHEN SQLCODE = -911                                         
+                    WHEN SQLCODE = -913                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = ZERO                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = +100                                         
+                        SET PS-NO-MORE-TERR-LOC    TO TRUE                      
+                    WHEN OTHER                                                  
+                        SET PS-PROCESS-STOP        TO TRUE                      
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 FETCH OF TERR-LOC-CSR CURSOR'               
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *-------------------------------------------------------------            
+      * 8420-CLOSE-TERR-LOC-CSR.                                                
+      *      CLOSE THE TERRITORY LOCATION CURSOR.                               
+      *-------------------------------------------------------------            
+       8420-CLOSE-TERR-LOC-CSR.                                                 
+                                                                                
+           MOVE '8420-CLOSE-TERR-LOC-CSR'  TO PV-PARAGRAPH-NAME.                
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    CLOSE TERR-LOC-CSR                                          
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 CLOSE OF TERR-LOC-CSR CURSOR'               
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8500-OPEN-REGN-LOC-CSR.                                                 
+      *      OPEN THE CURSOR OF LOCATIONS WITHIN A REGION.                      
+      *----------------------------------------------------------               
+       8500-OPEN-REGN-LOC-CSR.                                                  
+                                                                                
+           MOVE '8500-OPEN-REGN-LOC-CSR'  TO PV-PARAGRAPH-NAME.                 
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    OPEN REGN-LOC-CSR                                           
+                 END-EXEC                                                       
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 OPEN OF REGN-LOC-CSR CURSOR'                
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8510-FETCH-REGN-LOC-CSR.                                                
+      *      FETCH A LOCATION WITHIN A REGION.                                  
+      *----------------------------------------------------------               
+       8510-FETCH-REGN-LOC-CSR.                                                 
+                                                                                
+           MOVE '8510-FETCH-REGN-LOC-CSR'  TO PV-PARAGRAPH-NAME.                
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                   OR                      
+                      SQLCODE = 0                       OR                      
+                      SQLCODE = +100)                                           
+                                                                                
+                 EXEC SQL                                                       
+                    FETCH REGN-LOC-CSR                                          
+                    INTO  :XST00001-LOC-NBR                                     
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                    WHEN SQLCODE = -904                                         
+                    WHEN SQLCODE = -911                                         
+                    WHEN SQLCODE = -913                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = ZERO                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = +100                                         
+                        SET PS-NO-MORE-REGN-LOC    TO TRUE                      
+                    WHEN OTHER                                                  
+                        SET PS-PROCESS-STOP        TO TRUE                      
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 FETCH OF REGN-LOC-CSR CURSOR'               
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *-------------------------------------------------------------            
+      * 8520-CLOSE-REGN-LOC-CSR.                                                
+      *      CLOSE THE REGION LOCATION CURSOR.                                  
+      *-------------------------------------------------------------            
+       8520-CLOSE-REGN-LOC-CSR.                                                 
+                                                                                
+           MOVE '8520-CLOSE-REGN-LOC-CSR'  TO PV-PARAGRAPH-NAME.                
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    CLOSE REGN-LOC-CSR                                          
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 CLOSE OF REGN-LOC-CSR CURSOR'               
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8600-OPEN-DIST-LOC-CSR.                                                 
+      *      OPEN THE CURSOR OF LOCATIONS WITHIN A DISTRICT.                    
+      *----------------------------------------------------------               
+       8600-OPEN-DIST-LOC-CSR.                                                  
+                                                                                
+           MOVE '8600-OPEN-DIST-LOC-CSR'  TO PV-PARAGRAPH-NAME.                 
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    OPEN DIST-LOC-CSR                                           
+                 END-EXEC                                                       
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 OPEN OF DIST-LOC-CSR CURSOR'                
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8610-FETCH-DIST-LOC-CSR.                                                
+      *      FETCH A LOCATION WITHIN A DISTRICT.                                
+      *----------------------------------------------------------               
+       8610-FETCH-DIST-LOC-CSR.                                                 
+                                                                                
+           MOVE '8610-FETCH-DIST-LOC-CSR'  TO PV-PARAGRAPH-NAME.                
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                   OR                      
+                      SQLCODE = 0                       OR                      
+                      SQLCODE = +100)                                           
+                                                                                
+                 EXEC SQL                                                       
+                    FETCH DIST-LOC-CSR                                          
+                    INTO  :XST00001-LOC-NBR                                     
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                    WHEN SQLCODE = -904                                         
+                    WHEN SQLCODE = -911                                         
+                    WHEN SQLCODE = -913                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = ZERO                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = +100                                         
+                        SET PS-NO-MORE-DIST-LOC    TO TRUE                      
+                    WHEN OTHER                                                  
+                        SET PS-PROCESS-STOP        TO TRUE                      
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 FETCH OF DIST-LOC-CSR CURSOR'               
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *-------------------------------------------------------------            
+      * 8620-CLOSE-DIST-LOC-CSR.                                                
+      *      CLOSE THE DISTRICT LOCATION CURSOR.                                
+      *-------------------------------------------------------------            
+       8620-CLOSE-DIST-LOC-CSR.                                                 
+                                                                                
+           MOVE '8620-CLOSE-DIST-LOC-CSR'  TO PV-PARAGRAPH-NAME.                
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    CLOSE DIST-LOC-CSR                                          
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 CLOSE OF DIST-LOC-CSR CURSOR'               
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8700-OPEN-DC-LOC-CSR.                                                   
+      *      OPEN THE CURSOR OF LOCATIONS WITHIN A DC.                          
+      *----------------------------------------------------------               
+       8700-OPEN-DC-LOC-CSR.                                                    
+                                                                                
+           MOVE '8700-OPEN-DC-LOC-CSR'  TO PV-PARAGRAPH-NAME.                   
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    OPEN DC-LOC-CSR                                             
+                 END-EXEC                                                       
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 OPEN OF DC-LOC-CSR CURSOR'                  
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8710-FETCH-DC-LOC-CSR.                                                  
+      *      FETCH A LOCATION WITHIN A DC.                                      
+      *----------------------------------------------------------               
+       8710-FETCH-DC-LOC-CSR.                                                   
+                                                                                
+           MOVE '8710-FETCH-DC-LOC-CSR'  TO PV-PARAGRAPH-NAME.                  
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                   OR                      
+                      SQLCODE = 0                       OR                      
+                      SQLCODE = +100)                                           
+                                                                                
+                 EXEC SQL                                                       
+                    FETCH DC-LOC-CSR                                            
+                    INTO  :XST00001-LOC-NBR                                     
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                    WHEN SQLCODE = -904                                         
+                    WHEN SQLCODE = -911                                         
+                    WHEN SQLCODE = -913                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = ZERO                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = +100                                         
+                        SET PS-NO-MORE-DC-LOC    TO TRUE                        
+                    WHEN OTHER                                                  
+                        SET PS-PROCESS-STOP        TO TRUE                      
+                        DISPLAY 'DC-LOC-CSR ABEND - ' XST00020-DC-NBR           
+                                ' - '   ICT00010-CNT-STUP-ID                    
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 FETCH OF DC-LOC-CSR CURSOR'                 
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *-------------------------------------------------------------            
+      * 8720-CLOSE-DC-LOC-CSR.                                                  
+      *      CLOSE THE DC LOCATION CURSOR.                                      
+      *-------------------------------------------------------------            
+       8720-CLOSE-DC-LOC-CSR.                                                   
+                                                                                
+           MOVE '8720-CLOSE-DC-LOC-CSR'  TO PV-PARAGRAPH-NAME.                  
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    CLOSE DC-LOC-CSR                                            
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 CLOSE OF DC-LOC-CSR CURSOR'                 
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *-------------------------------------------------------------            
+      * 8900-CHECK-FOR-INV.                                                     
+      *      CHECK TO SEE IF A STORE IS CONDUCTING A FULL INVENTORY             
+      *-------------------------------------------------------------            
+       8900-CHECK-FOR-INV.                                                      
+           MOVE '8900-CHECK-FOR-INV' TO PV-PARAGRAPH-NAME.                      
+           EXEC SQL                                                             
+               SELECT 'Y'                                                       
+                    ,PLND_INV_DTE                                               
+                    ,PLND_UNIT_BK_DTE                                           
+               INTO :PV-INV-CHECK-FLG                                           
+                   ,:INVPAR-PLND-INV-DTE                                        
+                   ,:INVPAR-PLND-UNIT-BK-DTE                                    
+               FROM TINVPAR A                                                   
+                   ,TINCNTL B                                                   
+               WHERE A.LOC_NBR = :INVPAR-LOC-NBR                                
+                 AND ((:ICT00010-EXEC-WND-STRT-DTE BETWEEN                      
+                      A.PLND_INV_DTE AND A.PLND_FIN_BK_DTE)                     
+                  OR  (:ICT00010-EXEC-WND-END-DTE BETWEEN                       
+                      A.PLND_INV_DTE AND A.PLND_FIN_BK_DTE))                    
+                 AND A.INV_ID = B.INV_ID                                        
+                 AND B.ACTV_IND = 'Y'                                           
+                 AND A.ACTL_FIN_BK_DTE = '9999-09-09'                           
+                 AND A.LOC_INV_STAT_CDE = 'IN'                                  
+                 AND NOT (A.SCAN_INV_IND  = 'Y'                                 
+                      AND A.SCHD_PHY_CNT_CDE = 'EI')                            
+               FETCH FIRST ROW ONLY                                             
+           END-EXEC.                                                            
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = 0                                                  
+               MOVE 'Y' TO PV-INV-CHECK-FLG                                     
+              WHEN SQLCODE = +100                                               
+               MOVE 'N' TO PV-INV-CHECK-FLG                                     
+              WHEN OTHER                                                        
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 CHECK FOR INV SELECT'                       
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-EVALUATE.                                                        
+                                                                                
+      *-------------------------------------------------------------            
+      * 8810-CHECK-FOR-INV-RPET-CNT.                                            
+      *      CHECK TO SEE IF A STORE IS CONDUCTING A FULL INVENTORY             
+      *-------------------------------------------------------------            
+       8810-CHECK-FOR-INV-RPET-CNT.                                             
+           MOVE '8810-CHECK-FOR-INV-RPET-CNT' TO PV-PARAGRAPH-NAME.             
+           EXEC SQL                                                             
+               SELECT 'Y'                                                       
+                    ,PLND_INV_DTE                                               
+                    ,PLND_FIN_BK_DTE                                            
+               INTO :PV-INV-CHECK-FLG                                           
+                   ,:INVPAR-PLND-INV-DTE                                        
+                   ,:INVPAR-PLND-UNIT-BK-DTE                                    
+               FROM TINVPAR A                                                   
+                   ,TINCNTL B                                                   
+               WHERE A.LOC_NBR = :INVPAR-LOC-NBR                                
+                AND :PV-COMPUTED-DATE BETWEEN                                   
+                      A.PLND_INV_DTE AND A.PLND_FIN_BK_DTE                      
+                 AND A.INV_ID = B.INV_ID                                        
+                 AND B.ACTV_IND = 'Y'                                           
+                 AND A.ACTL_FIN_BK_DTE = '9999-09-09'                           
+                 AND A.LOC_INV_STAT_CDE = 'IN'                                  
+                 AND NOT (A.SCAN_INV_IND  = 'Y'                                 
+                      AND A.SCHD_PHY_CNT_CDE = 'EI')                            
+               FETCH FIRST ROW ONLY                                             
+           END-EXEC.                                                            
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = 0                                                  
+               MOVE 'Y' TO PV-INV-CHECK-FLG                                     
+              WHEN SQLCODE = +100                                               
+               MOVE 'N' TO PV-INV-CHECK-FLG                                     
+              WHEN OTHER                                                        
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 CHECK FOR INV SELECT'                       
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-EVALUATE.                                                        
+                                                                                
+      *-------------------------------------------------------------            
+      * 8920-CHECK-CPLTD-COUNT.                                                 
+      *      CHECK TO SEE IF A COUNT HAS BEEN COMPLETED                         
+      *-------------------------------------------------------------            
+       8920-CHECK-CPLTD-COUNT.                                                  
+           MOVE '8920-CHECK-CPLTD-COUNT' TO PV-PARAGRAPH-NAME.                  
+           EXEC SQL                                                             
+             SELECT  'Y'                                                        
+             INTO :PV-COMPLETED-COUNT-FLG                                       
+             FROM   ICT_LOC_CNT_STAT  A                                         
+             WHERE A.CNT_STAT_CDE IN                                            
+           ('COM','CAN','APP','APP','AUT','INP','REV','REQ','REW','PRC')        
+               AND A.LOC_NBR     = :ICT00020-LOC-NBR                            
+               AND A.CNT_STUP_ID = :ICT00020-CNT-STUP-ID                        
+               AND A.LAST_UPD_TMST =                                            
+      *** GET LATEST ICT_LOC_CNT_STAT ROW                                       
+             (SELECT MAX(E.LAST_UPD_TMST)                                       
+              FROM ICT_LOC_CNT_STAT   E                                         
+              WHERE E.CNT_STUP_ID  = A.CNT_STUP_ID                              
+                AND E.LOC_NBR     = A.LOC_NBR                                   
+                AND E.CNT_STUP_ID = A.CNT_STUP_ID)                              
+             FETCH FIRST ROW ONLY                                               
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = 0                                                  
+                  ADD +1 TO DI-COMPLETED-CNTS                                   
+              WHEN SQLCODE = +100                                               
+                  CONTINUE                                                      
+              WHEN OTHER                                                        
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT085 CHECK FOR CPLTD COUNT SELECT'               
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      * 9990-DISPLAY-CONTROL-INFO.                                     *        
+      *  ==> PROCESSES:                                                *        
+      *    - DISPLAYS CONTROL INFORMATION AT END OF JOB                *        
+      ******************************************************************        
+       9990-DISPLAY-CONTROL-INFO.                                               
+                                                                                
+           DISPLAY '********************************************'.              
+           DISPLAY '**** RUN STATISTICS FOR PROGRAM ICKUT085 ***'.              
+           DISPLAY '****'.                                                      
+           DISPLAY '1 DAY RELEASED COUNTS      :' DI-RLSE-CNTS                  
+           DISPLAY 'CURR OCCURING COUNTS       :' DI-CURR-OCCR-CNTS             
+           DISPLAY 'REPEAT COUNTS              :' DI-RPET-CNTS                  
+           DISPLAY 'COMPLETED COUNTS           :' DI-COMPLETED-CNTS             
+           DISPLAY '****'.                                                      
+           DISPLAY '**** RUN STATS END FOR PROGRAM ICKUT085  ***'.              
+           DISPLAY '********************************************'.              
+                                                                                
+      ******************************************************************        
+      * 9999-SQL-ABEND.                                                *        
+      *  ==> PROCESSES:                                                *        
+      *    - PERFORMS ABENDS AFTER UNEXPECTED SQLCODE                  *        
+      ******************************************************************        
+       9999-SQL-ABEND.                                                          
+                                                                                
+           MOVE SQLCODE TO PV-SQLCODE-DISPLAY.                                  
+                                                                                
+           DISPLAY '** ABEND **'.                                               
+           DISPLAY 'ICKUT085 - ABEND'.                                          
+           DISPLAY 'PARAGRAPH = ' PV-PARAGRAPH-NAME.                            
+           DISPLAY 'OPERATION = ' PV-DB2-OPERATION-ATTEMPTED.                   
+           DISPLAY 'SQL CODE  = ' PV-SQLCODE-DISPLAY.                           
+           PERFORM 9990-DISPLAY-CONTROL-INFO.                                   
+                                                                                
+           COPY DPPD004.                                                        
+           IF ABEND-CODE = 0                                                    
+             MOVE +4013 TO ABEND-CODE.                                          
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    

@@ -1,0 +1,1298 @@
+       ID  DIVISION.                                                            
+       PROGRAM-ID.         POKUT116.                                            
+       AUTHOR.             JACK KRAMER.                                         
+       INSTALLATION.       KOHLS DEPARTMENT STORES.                             
+       DATE-WRITTEN.       02/2008.                                             
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *     WEEKLY PURCHASE ORDER RECEIPTS EXTRACT - SEASONAL FOR AIM           
+      ******************************************************************        
+      *     CHANGE LOG                                                          
+      ******************************************************************        
+      *                                                                         
+P41820* 07/26/13 MADE BY: COGNIZANT               WR/IR #:                      
+P41820* CHANGES:ADDED A NEW FIELD PO054-CRE-BY-UID TO THE WEEKLY                
+P41820* RECEIPTS OUTPUT FILE WHICH IS NEEDED IN BPKUT573 FOR GROSS              
+P41820* RECEIPTS CALCULATION.REPLACED POWS004 COPYBOOK BY POWS054.              
+      *                                                                         
+RECLSS* 05/16/14 MADE BY: COGNIZANT               WR/IR #: PRB 46230            
+RECLSS* CHANGES: MODIFIED THE DRIVING CURSOR AND RECLASS RECEIPT CURSOR         
+RECLSS* TO USE THE PO CREATION DATE INSTEAD OF MONTH START DATE WHILE           
+RECLSS* CHECKING FOR RECLASS CONDITION.                                         
+RECLSS* MODIFIED THE RECLASS CURSOR TO GET THE NEW DEPT NUMBER WHEN THE         
+RECLSS* SKU UNDER THE PO WAS RECLASSIFIED BEFORE IT IS VERIFIED.                
+      ******************************************************************        
+C98147* 11/04/14 MADE BY: LINDA FRIESS            CHG0098147                    
+C98147* CHANGES: RECOMPILED TO BRING IN POWS054 COPYBOOK WITH                   
+C98147*          EXPANDED PO NUMBER                                             
+C98147******************************************************************        
+      * 10/23/15 MADE BY: COGNIZANT               WR/IR #:CHG0126740            
+      * CHANGES: MODIFIED THE RECLASS RECEIPT CURSOR TO GET THE NEW             
+      * DEPT NUMBER FROM VENDOR STYLE TABLE WHEN THE SKU UNDER THE PO           
+      * WAS RECLASSIFIED BEFORE IT WAS VERIFIED.                                
+      ******************************************************************        
+217030* 01/31/19 MADE BY: JIM HUNTER              CHG0217030                    
+217030*     MAINFRAME REFACTORING - DB2 LUW HANDLES CALLS WITH                  
+217030*     CHAR FORMATTING DIFFERENTLY THAN THE MAINFRAME VERSION              
+217030*     OF DB2.  REPLACING THE CHAR FORMATTING WITH DIGITS.                 
+217030*     SINCE CHAR RETURNS A LEADING SPACE AND TRAILING DECIMAL             
+217030*     POINT AND DIGITS DOESN'T THE POSITIONAL PARMS IN THE CALL           
+217030*     MUST BE SHIFTED ONE TO THE LEFT.                                    
+217030*     SEE RCL_RECEIPT_CURSOR.                                             
+217030******************************************************************        
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+      *                                                                         
+       CONFIGURATION SECTION.                                                   
+      *                                                                         
+       SOURCE-COMPUTER.        IBM-3090.                                        
+       OBJECT-COMPUTER.        IBM-3090.                                        
+      *                                                                         
+       INPUT-OUTPUT SECTION.                                                    
+       FILE-CONTROL.                                                            
+           SELECT  RECEIPTS-FILE                                                
+               ASSIGN TO OUT01.                                                 
+           SELECT  CNTL-DEF-RCPTS-FILE                                          
+               ASSIGN TO INP01.                                                 
+                                                                                
+       DATA DIVISION.                                                           
+       FILE SECTION.                                                            
+      *                                                                         
+       FD  CNTL-DEF-RCPTS-FILE                                                  
+           RECORDING  MODE IS F.                                                
+       01  CNTL-DEF-RCPTS-REC               PIC X(80).                          
+                                                                                
+      *                                                                         
+       FD  RECEIPTS-FILE                                                        
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+P41820 01  RECEIPTS-RECORD               PIC X(108).                            
+      *                                                                         
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+      *                                                                         
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-MAX-RETRIES            PIC S9(03)   VALUE +03                 
+                                                      COMP-3.                   
+           05  FETCH-COUNT               PIC 9(09)    VALUE 0.                  
+           05  FETCH-COUNT-RCLS          PIC 9(09)    VALUE 0.                  
+      *                                                                         
+       01  ST-SYSTEM-TIME                PIC X(26)    VALUE SPACE.              
+      *                                                                         
+       01  CC-CONTROL-CARD.                                                     
+           05  CC-CALENDAR-TYPE          PIC X(02)    VALUE SPACES.             
+           05  FILLER                    PIC X(01)    VALUE SPACES.             
+           05  CC-DATE.                                                         
+               10  CC-MM                 PIC 9(02)    VALUE ZEROES.             
+               10  CC-DD                 PIC 9(02)    VALUE ZEROES.             
+               10  CC-CC                 PIC 9(02)    VALUE ZEROES.             
+               10  CC-YY                 PIC 9(02)    VALUE ZEROES.             
+           05  FILLER                    PIC X(71)    VALUE SPACES.             
+      *                                                                         
+       01  PV-PROGRAM-VARIABLES.                                                
+           05  PV-START-DATE             PIC X(10)   VALUE SPACE.               
+           05  PV-END-DATE               PIC X(10).                             
+           05  PV-PARAGRAPH-NAME         PIC X(30)   VALUE SPACE.               
+           05  PV-DB2-OPER-ATTEMPTED     PIC X(30)   VALUE SPACE.               
+           05  PV-SQL-SUB                PIC S9(4)   VALUE ZERO  COMP.          
+           05  PV-UNIT-RTL               PIC S9(9)V99                           
+                                                     VALUE ZERO COMP-3.         
+           05  PV-VERIFIED-YY-WK.                                               
+               10  PV-VERIFIED-YY        PIC X(02)   VALUE SPACES.              
+               10  PV-VERIFIED-WK        PIC X(02)   VALUE SPACES.              
+      *                                                                         
+           05  PV-MAJ-CLASS              PIC 9(02)   VALUE ZEROS.               
+      *                                                                         
+           05  PV-NULL-IND.                                                     
+               10  PV-MAJ-CL-NBR-IND     PIC S9(4) COMP VALUE +0.               
+               10  PV-SUB-CL-NBR-IND     PIC S9(4) COMP VALUE +0.               
+      *                                                                         
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-MORE-PO-RCPT-ROWS-SW PIC X         VALUE 'Y'.                 
+               88  PS-MORE-PO-RCPT-ROWS              VALUE 'Y'.                 
+               88  PS-NO-MORE-PO-RCPT-ROWS           VALUE 'N'.                 
+           05  PS-MORE-ROWS-SW         PIC X         VALUE 'Y'.                 
+               88  PS-MORE-ROWS                      VALUE 'Y'.                 
+               88  PS-NO-MORE-ROWS                   VALUE 'N'.                 
+           05  PS-DC-MORE-ROWS-SW      PIC X         VALUE 'Y'.                 
+               88  PS-DC-MORE-ROWS                   VALUE 'Y'.                 
+               88  PS-DC-NO-MORE-ROWS                VALUE 'N'.                 
+           05  PS-RECLASS-IND          PIC X(01)     VALUE 'N'.                 
+               88  PS-RECLASS-EXISTS                 VALUE 'Y'.                 
+               88  PS-RECLASS-DOES-NOT-EXIST         VALUE 'N'.                 
+      *                                                                         
+      ******************************************************************        
+      *    CALENDAR ROUTINE                                                     
+      ******************************************************************        
+           COPY DPWS500.                                                        
+      *                                                                         
+      ******************************************************************        
+      *  RECEIPTS EXTRACT RECORD LAYOUT.                                        
+      ******************************************************************        
+P41820     COPY POWS054.                                                        
+      *                                                                         
+      *****  OTB PERIOD ROUTINE FIELDS                                          
+                                                                                
+           COPY POWS055.                                                        
+                                                                                
+      *****  SQL ABEND ROUTINE WORKING STORAGE                                  
+      *                                                                         
+           COPY DPWS004.                                                        
+      *                                                                         
+      *****  DB2 RECEIVER ITEM TABLE                                            
+      *                                                                         
+           EXEC SQL                                                             
+               INCLUDE TRECITM                                                  
+           END-EXEC.                                                            
+      *                                                                         
+      *****  DB2 RECIEVER DISTRIBUTION TABLE                                    
+      *                                                                         
+           EXEC SQL                                                             
+               INCLUDE TRECDIS                                                  
+           END-EXEC.                                                            
+      *                                                                         
+      *****  DB2 PURCHASE ORDER ITEM TABLE                                      
+      *                                                                         
+           EXEC SQL                                                             
+               INCLUDE TPURITM                                                  
+           END-EXEC.                                                            
+      *                                                                         
+      *****  DB2 RECEIVER                                                       
+      *                                                                         
+           EXEC SQL                                                             
+               INCLUDE TRECEIV                                                  
+           END-EXEC.                                                            
+      *                                                                         
+      *****  DB2 PURCASE ORDER TABLE                                            
+      *                                                                         
+           EXEC SQL                                                             
+               INCLUDE TPURCHS                                                  
+           END-EXEC.                                                            
+      *                                                                         
+      *****  DB2 VENDOR NAME TABLE                                              
+      *                                                                         
+           EXEC SQL                                                             
+               INCLUDE TENTNME                                                  
+           END-EXEC.                                                            
+      *                                                                         
+      *                                                                         
+      *****  DB2   SKU    TABLE                                                 
+      *                                                                         
+           EXEC SQL                                                             
+               INCLUDE XLT00003                                                 
+           END-EXEC.                                                            
+      *****  DB2   VENDOR STYLE TABLE                                           
+      *                                                                         
+           EXEC SQL                                                             
+               INCLUDE XLT00004                                                 
+           END-EXEC.                                                            
+      *****  DB2   XL LOCATION TABLE                                            
+      *                                                                         
+           EXEC SQL                                                             
+               INCLUDE XLT00010                                                 
+           END-EXEC.                                                            
+      *****  DB2   ITEM RECLASS TABLE                                           
+      *                                                                         
+           EXEC SQL                                                             
+               INCLUDE IMT00015                                                 
+           END-EXEC.                                                            
+      *****************************************************************         
+      *                                                                         
+      *****************************************************************         
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+           COPY SQLCA2.                                                         
+      *                                                                         
+      *****************************************************************         
+      * THIS IS THE DRIVING CURSOR OF THE RECEIPT_CURSOR.  THIS                 
+      * CURSOR WAS INSERTED TO MAKE THE RECEIPT_CURSOR MORE EFFICIENT.          
+      *****************************************************************         
+                                                                                
+           EXEC SQL                                                             
+              DECLARE DRIVING_CURSOR CURSOR FOR                                 
+      * SELECT FOR RECEIVERS THAT HAD A RECLASS FOR AT LEAST 1 SKU              
+                  SELECT 'Y',ORD_NBR,REC_SEQ_NBR                                
+                    FROM TRECEIV E                                              
+                   WHERE  (DATE (E.VERFYD_TMST) BETWEEN :PV-START-DATE          
+                           AND    :PV-END-DATE)                                 
+                     AND (E.VER_STATUS_CDE = 'A')                               
+                     AND EXISTS (SELECT 1                                       
+                         FROM TRECITM B                                         
+                             ,XLT_SKU S                                         
+                             ,IMT_RECLS R                                       
+RECLSS                       ,TPURCHS P                                         
+                        WHERE  E.ORD_NBR = B.ORD_NBR                            
+RECLSS                    AND  E.ORD_NBR = P.PO_NBR                             
+RECLSS                    AND  P.VER_STATUS_CDE = 'A'                           
+                          AND  E.REC_SEQ_NBR = B.REC_SEQ_NBR                    
+                          AND  (B.VER_STATUS_CDE = 'A')                         
+                          AND  B.ITM_NBR = S.ITM_NBR                            
+                          AND  R.SKU_NBR = S.SKU_NBR                            
+                          AND  (DATE (RECLS_TMST)                               
+RECLSS                         BETWEEN  DATE (P.CRE_TMST)                       
+                                   AND  :PV-END-DATE)                           
+                          AND (OLD_DEPT_NBR <> NW_DEPT_NBR                      
+                           OR OLD_MAJ_CL_NBR <> NW_MAJ_CL_NBR))                 
+           UNION                                                                
+      * SELECT FOR RECEIVERS THAT HAD NO RECLASS FOR ANY SKUS                   
+                  SELECT 'N',ORD_NBR,REC_SEQ_NBR                                
+                    FROM TRECEIV E                                              
+                   WHERE  (DATE (E.VERFYD_TMST) BETWEEN :PV-START-DATE          
+                           AND    :PV-END-DATE)                                 
+                     AND (E.VER_STATUS_CDE = 'A')                               
+                     AND NOT EXISTS (SELECT 1                                   
+                         FROM TRECITM B                                         
+                             ,XLT_SKU S                                         
+                             ,IMT_RECLS R                                       
+RECLSS                       ,TPURCHS P                                         
+                        WHERE  B.ORD_NBR = E.ORD_NBR                            
+RECLSS                    AND  E.ORD_NBR = P.PO_NBR                             
+RECLSS                    AND  P.VER_STATUS_CDE = 'A'                           
+                          AND  B.REC_SEQ_NBR = E.REC_SEQ_NBR                    
+                          AND  (B.VER_STATUS_CDE = 'A')                         
+                          AND  B.ITM_NBR = S.ITM_NBR                            
+                          AND  R.SKU_NBR = S.SKU_NBR                            
+                          AND  (DATE (RECLS_TMST)                               
+RECLSS                         BETWEEN  DATE (P.CRE_TMST)                       
+                                   AND  :PV-END-DATE)                           
+                          AND (OLD_DEPT_NBR <> NW_DEPT_NBR                      
+                           OR OLD_MAJ_CL_NBR <> NW_MAJ_CL_NBR))                 
+                  ORDER BY 1, 2, 3                                              
+                  WITH UR                                                       
+           END-EXEC.                                                            
+      *                                                                         
+      *****************************************************************         
+      *  RECEIPT CURSOR - FOR RECEIVERS WHERE THERE IS NO RECLASS               
+      *****************************************************************         
+           EXEC SQL                                                             
+              DECLARE RECEIPT_CURSOR CURSOR FOR                                 
+                  SELECT                                                        
+                         SUM(B.AP_VERIFY_ITM_QTY),                              
+                         C.GP_QTY,                                              
+                         C.GP_RTL_AMT,                                          
+                         C.UNT_RTL_PR_AMT,                                      
+                         C.UNT_COST_AMT,                                        
+                         V.MAJ_CL_NBR,                                          
+                         V.SUB_CL_NBR,                                          
+                         C.CL_NBR,                                              
+                         D.DEPT_NBR,                                            
+                         D.PO_NBR,                                              
+                         D.PO_TYP_CDE,                                          
+P41820                   D.CRE_BY_UID,                                          
+                         G.ENT_NAME_DESC,                                       
+                         D.PO_SHRT_CYC_IND,                                     
+                         X.E_BUS_IND                                            
+                  FROM TRECITM A,                                               
+                       TRECDIS B,                                               
+                       TPURCHS D,                                               
+                       TENTNME G,                                               
+                       XLT_LOC X,                                               
+                       TPURITM C LEFT OUTER JOIN                                
+                       XLT_SKU S ON C.ITM_NBR=S.ITM_NBR                         
+                       LEFT OUTER JOIN XLT_VND_STYL V                           
+                       ON S.STYL_ID=V.STYL_ID                                   
+               WHERE     (A.VER_STATUS_CDE = 'A')                AND            
+                         (B.VER_STATUS_CDE = 'A')                AND            
+                         (D.VER_STATUS_CDE = 'A')                AND            
+                         (A.ORD_NBR = B.ORD_NBR)                 AND            
+                         (A.ORD_LNE_NBR = B.ORD_LNE_NBR)         AND            
+                         (A.REC_SEQ_NBR = B.REC_SEQ_NBR)         AND            
+                         (A.ORD_NBR = :RECEIV-ORD-NBR)           AND            
+                         (A.REC_SEQ_NBR = :RECEIV-REC-SEQ-NBR)   AND            
+                         (A.ORD_NBR = C.PO_NBR)                  AND            
+                         (A.ORD_LNE_NBR = C.APP_PO_LNE_NBR)      AND            
+                         (A.PO_VER_NBR = C.VER_NBR)              AND            
+                         (C.PO_NBR = D.PO_NBR)                   AND            
+                         (D.VER_STATUS_CDE = 'A')              AND              
+                         (G.ENT_ID = D.ENT_ID)                 AND              
+                         (G.TYPE_CDE = '01')                   AND              
+                         (B.STR_NBR = X.LOC_NBR)                                
+                  GROUP BY                                                      
+                         D.DEPT_NBR,                                            
+                         V.MAJ_CL_NBR,                                          
+                         V.SUB_CL_NBR,                                          
+                         C.CL_NBR,                                              
+                         C.GP_QTY,                                              
+                         C.GP_RTL_AMT,                                          
+                         C.UNT_RTL_PR_AMT,                                      
+                         C.UNT_COST_AMT,                                        
+                         D.PO_NBR,                                              
+                         D.PO_TYP_CDE,                                          
+P41820                   D.CRE_BY_UID,                                          
+                         G.ENT_NAME_DESC,                                       
+                         D.PO_SHRT_CYC_IND,                                     
+                         X.E_BUS_IND                                            
+                  WITH UR                                                       
+           END-EXEC.                                                            
+      *****************************************************************         
+      *  RECEIPT CURSOR - FOR RECEIVERS WHERE THERE HAS BEEN A RECLASS          
+      *****************************************************************         
+      * NOTES REGARDING THIS RECLASS CURSOR:                                    
+      *  - WE ONLY PROCESS DEPT OR MAJOR CLASS RECLASSES - NO SUB CLASS         
+      *  - THERE ARE MULTIPLE UNIONS TO ACCOUNT FOR SEVERAL CONDITIONS          
+      *   1) MULTIPLE RECLASSES FOR THE SAME SKUS IN THIS TIMEFRAME -           
+      *      SOME WITH A DEPT RECLASS AND A SEPERATE MAJOR CLASS CHANGE         
+      *   2) SOME SKUS IN THE RECEIVER DO NOT HAVE A RECLASS, OTHERS DO         
+      *   3) SOME OF THE RECLASSES ARE BEFORE THE VERIFY, OTHERS AFTER          
+      *  - IF THERE IS ONE OR MORE DEPARTMENT RECLASS, WE WILL USE THE          
+      *    EARLIEST DEPARTMENT RECLASS                                          
+      *  - IF THERE IS NO DEPARTMENT RECLASS, USE THE EARLIEST                  
+      *    MAJOR CLASS RECLASS.                                                 
+      *****************************************************************         
+           EXEC SQL                                                             
+              DECLARE RCL_RECEIPT_CURSOR CURSOR FOR                             
+      * THIS SELECTS RECEIPTS WHERE A DEPT RECLASS EXISTS FOR THE MONTH         
+      * AND THE VERIFY DATE WAS BEFORE THE RECLASS DATE.                        
+      * FIRST DEPT RECLASS IS USED IF THERE IS MORE THAN 1 DEPT RECLASS.        
+      * OLD DEPT & CLASS ARE USED (FROM IMT_RECLS).                             
+                  SELECT                                                        
+                         SUM(B.AP_VERIFY_ITM_QTY),                              
+                         C.GP_QTY,                                              
+                         C.GP_RTL_AMT,                                          
+                         C.UNT_RTL_PR_AMT,                                      
+                         C.UNT_COST_AMT,                                        
+                         R.OLD_MAJ_CL_NBR,                                      
+                         R.OLD_SUB_CL_NBR,                                      
+                         C.CL_NBR,                                              
+217030                   SUBSTR(DIGITS(R.OLD_DEPT_NBR),2,3),                    
+                         D.PO_NBR,                                              
+                         D.PO_TYP_CDE,                                          
+P41820                   D.CRE_BY_UID,                                          
+                         G.ENT_NAME_DESC,                                       
+                         D.PO_SHRT_CYC_IND,                                     
+                         X.E_BUS_IND                                            
+                  FROM TRECITM A,                                               
+                       TRECDIS B,                                               
+                       TPURCHS D,                                               
+                       TRECEIV E,                                               
+                       TENTNME G,                                               
+                       XLT_LOC X,                                               
+                       TPURITM C LEFT OUTER JOIN                                
+                       XLT_SKU S ON C.ITM_NBR=S.ITM_NBR                         
+                       LEFT OUTER JOIN XLT_VND_STYL V                           
+                       ON S.STYL_ID=V.STYL_ID                                   
+                       LEFT OUTER JOIN IMT_RECLS R                              
+                       ON S.SKU_NBR=R.SKU_NBR                                   
+               WHERE     (A.VER_STATUS_CDE = 'A')                AND            
+                         (B.VER_STATUS_CDE = 'A')                AND            
+                         (D.VER_STATUS_CDE = 'A')                AND            
+                         (A.ORD_NBR = B.ORD_NBR)                 AND            
+                         (G.ENT_ID = D.ENT_ID)                   AND            
+                         (A.ORD_NBR = E.ORD_NBR)                 AND            
+                         (A.ORD_LNE_NBR = B.ORD_LNE_NBR)         AND            
+                         (A.REC_SEQ_NBR = B.REC_SEQ_NBR)         AND            
+                         (A.REC_SEQ_NBR = E.REC_SEQ_NBR)         AND            
+                         (A.ORD_NBR = :RECEIV-ORD-NBR)           AND            
+                         (A.REC_SEQ_NBR = :RECEIV-REC-SEQ-NBR)   AND            
+                         (A.ORD_NBR = C.PO_NBR)                  AND            
+                         (A.ORD_LNE_NBR = C.APP_PO_LNE_NBR)      AND            
+                         (A.PO_VER_NBR = C.VER_NBR)              AND            
+                         (C.PO_NBR = D.PO_NBR)                   AND            
+                         (D.VER_STATUS_CDE = 'A')                AND            
+                         (G.TYPE_CDE = '01')                     AND            
+                         (B.STR_NBR = X.LOC_NBR)                 AND            
+                         (DATE(E.VERFYD_TMST) >= :PV-START-DATE  AND            
+                          DATE(E.VERFYD_TMST) < DATE(RECLS_TMST) AND            
+                         (DATE (RECLS_TMST) BETWEEN                             
+RECLSS                     DATE(D.CRE_TMST)   AND :PV-END-DATE)) AND            
+                          OLD_DEPT_NBR <> NW_DEPT_NBR            AND            
+                          NOT EXISTS(                                           
+                             SELECT 1                                           
+                                 FROM XLT_SKU S2,                               
+                                      IMT_RECLS R2                              
+                                WHERE S2.SKU_NBR=R2.SKU_NBR                     
+                                  AND S2.SKU_NBR=S.SKU_NBR                      
+                                  AND (DATE (RECLS_TMST)                        
+RECLSS                               BETWEEN  DATE(D.CRE_TMST)                  
+                                          AND  :PV-END-DATE)                    
+                                  AND  OLD_DEPT_NBR <> NW_DEPT_NBR              
+                                  AND RECLS_TMST < R.RECLS_TMST)                
+                  GROUP BY                                                      
+                         R.OLD_DEPT_NBR,                                        
+                         R.OLD_MAJ_CL_NBR,                                      
+                         R.OLD_SUB_CL_NBR,                                      
+                         C.CL_NBR,                                              
+                         C.GP_QTY,                                              
+                         C.GP_RTL_AMT,                                          
+                         C.UNT_RTL_PR_AMT,                                      
+                         C.UNT_COST_AMT,                                        
+                         D.PO_NBR,                                              
+                         D.PO_TYP_CDE,                                          
+P41820                   D.CRE_BY_UID,                                          
+                         G.ENT_NAME_DESC,                                       
+                         D.PO_SHRT_CYC_IND,                                     
+                         X.E_BUS_IND                                            
+              UNION                                                             
+      * THIS SELECTS RECEIPTS WHERE A MAJOR CLASS RECLASS EXISTS FOR            
+      * THE MONTH BUT THERE IS NO DEPT RECLASS FOR THE MONTH.                   
+      * THE VERIFY DATE WAS BEFORE THE RECLASS DATE.                            
+      * FIRST MAJOR CLASS RECLASS IS USED IF THERE IS MORE THAN 1               
+      * MAJOR CLASS RECLASS.                                                    
+      * OLD DEPT & CLASS ARE USED (FROM IMT_RECLS).                             
+                  SELECT                                                        
+                         SUM(B.AP_VERIFY_ITM_QTY),                              
+                         C.GP_QTY,                                              
+                         C.GP_RTL_AMT,                                          
+                         C.UNT_RTL_PR_AMT,                                      
+                         C.UNT_COST_AMT,                                        
+                         R.OLD_MAJ_CL_NBR,                                      
+                         R.OLD_SUB_CL_NBR,                                      
+                         C.CL_NBR,                                              
+217030                   SUBSTR(DIGITS(R.OLD_DEPT_NBR),2,3),                    
+                         D.PO_NBR,                                              
+                         D.PO_TYP_CDE,                                          
+P41820                   D.CRE_BY_UID,                                          
+                         G.ENT_NAME_DESC,                                       
+                         D.PO_SHRT_CYC_IND,                                     
+                         X.E_BUS_IND                                            
+                  FROM TRECITM A,                                               
+                       TRECDIS B,                                               
+                       TPURCHS D,                                               
+                       TRECEIV E,                                               
+                       TENTNME G,                                               
+                       XLT_LOC X,                                               
+                       TPURITM C LEFT OUTER JOIN                                
+                       XLT_SKU S ON C.ITM_NBR=S.ITM_NBR                         
+                       LEFT OUTER JOIN XLT_VND_STYL V                           
+                       ON S.STYL_ID=V.STYL_ID                                   
+                       LEFT OUTER JOIN IMT_RECLS R                              
+                       ON S.SKU_NBR=R.SKU_NBR                                   
+               WHERE     (A.VER_STATUS_CDE = 'A')                AND            
+                         (B.VER_STATUS_CDE = 'A')                AND            
+                         (D.VER_STATUS_CDE = 'A')                AND            
+                         (A.ORD_NBR = B.ORD_NBR)                 AND            
+                         (A.ORD_NBR = E.ORD_NBR)                 AND            
+                         (A.ORD_LNE_NBR = B.ORD_LNE_NBR)         AND            
+                         (A.REC_SEQ_NBR = B.REC_SEQ_NBR)         AND            
+                         (A.REC_SEQ_NBR = E.REC_SEQ_NBR)         AND            
+                         (A.ORD_NBR = :RECEIV-ORD-NBR)           AND            
+                         (A.REC_SEQ_NBR = :RECEIV-REC-SEQ-NBR)   AND            
+                         (A.ORD_NBR = C.PO_NBR)                  AND            
+                         (A.ORD_LNE_NBR = C.APP_PO_LNE_NBR)      AND            
+                         (A.PO_VER_NBR = C.VER_NBR)              AND            
+                         (C.PO_NBR = D.PO_NBR)                   AND            
+                         (D.VER_STATUS_CDE = 'A')                AND            
+                         (G.ENT_ID = D.ENT_ID)                   AND            
+                         (G.TYPE_CDE = '01')                     AND            
+                         (B.STR_NBR = X.LOC_NBR)                 AND            
+                         (DATE(E.VERFYD_TMST) >= :PV-START-DATE  AND            
+                          DATE(E.VERFYD_TMST) < DATE(RECLS_TMST) AND            
+                         (DATE (RECLS_TMST) BETWEEN                             
+RECLSS                     DATE(D.CRE_TMST)   AND :PV-END-DATE)) AND            
+                          OLD_MAJ_CL_NBR <> NW_MAJ_CL_NBR        AND            
+                          NOT EXISTS(                                           
+                             SELECT 1                                           
+                                 FROM XLT_SKU S2,                               
+                                      IMT_RECLS R2                              
+                                WHERE S2.SKU_NBR=R2.SKU_NBR                     
+                                  AND S2.SKU_NBR=S.SKU_NBR                      
+                                  AND (DATE (RECLS_TMST)                        
+RECLSS                                BETWEEN  DATE(D.CRE_TMST)                 
+                                          AND  :PV-END-DATE)                    
+                                  AND  OLD_DEPT_NBR <> NW_DEPT_NBR) AND         
+                          NOT EXISTS(                                           
+                             SELECT 1                                           
+                                 FROM XLT_SKU S2,                               
+                                      IMT_RECLS R2                              
+                                WHERE S2.SKU_NBR=R2.SKU_NBR                     
+                                  AND S2.SKU_NBR=S.SKU_NBR                      
+                                  AND (DATE (RECLS_TMST)                        
+RECLSS                                BETWEEN  DATE(D.CRE_TMST)                 
+                                          AND  :PV-END-DATE)                    
+                                  AND  OLD_MAJ_CL_NBR <> NW_MAJ_CL_NBR          
+                                  AND RECLS_TMST < R.RECLS_TMST)                
+                  GROUP BY                                                      
+                         R.OLD_DEPT_NBR,                                        
+                         R.OLD_MAJ_CL_NBR,                                      
+                         R.OLD_SUB_CL_NBR,                                      
+                         C.CL_NBR,                                              
+                         C.GP_QTY,                                              
+                         C.GP_RTL_AMT,                                          
+                         C.UNT_RTL_PR_AMT,                                      
+                         C.UNT_COST_AMT,                                        
+                         D.PO_NBR,                                              
+                         D.PO_TYP_CDE,                                          
+P41820                   D.CRE_BY_UID,                                          
+                         G.ENT_NAME_DESC,                                       
+                         D.PO_SHRT_CYC_IND,                                     
+                         X.E_BUS_IND                                            
+              UNION                                                             
+      * THIS SELECTS RECEIPTS WHERE A DEPT RECLASS EXISTS FOR THE MONTH         
+      * AND THE VERIFY DATE WAS ON OR AFTER THE MIN(RECLASS DATE).              
+      * FIRST DEPT RECLASS IS USED IF THERE IS MORE THAN 1 DEPT RECLASS.        
+      * NEW DEPT & CLASS ARE USED (FROM XLT_VND_STYL).                          
+                  SELECT                                                        
+                         SUM(B.AP_VERIFY_ITM_QTY),                              
+                         C.GP_QTY,                                              
+                         C.GP_RTL_AMT,                                          
+                         C.UNT_RTL_PR_AMT,                                      
+                         C.UNT_COST_AMT,                                        
+                         V.MAJ_CL_NBR,                                          
+                         V.SUB_CL_NBR,                                          
+                         C.CL_NBR,                                              
+RECLSS*                  D.DEPT_NBR,                                            
+217030                   SUBSTR(DIGITS(V.DEPT_NBR),2,3),                        
+                         D.PO_NBR,                                              
+                         D.PO_TYP_CDE,                                          
+P41820                   D.CRE_BY_UID,                                          
+                         G.ENT_NAME_DESC,                                       
+                         D.PO_SHRT_CYC_IND,                                     
+                         X.E_BUS_IND                                            
+                  FROM TRECITM A,                                               
+                       TRECDIS B,                                               
+                       TPURCHS D,                                               
+                       TRECEIV E,                                               
+                       TENTNME G,                                               
+                       XLT_LOC X,                                               
+                       TPURITM C LEFT OUTER JOIN                                
+                       XLT_SKU S ON C.ITM_NBR=S.ITM_NBR                         
+                       LEFT OUTER JOIN XLT_VND_STYL V                           
+                       ON S.STYL_ID=V.STYL_ID                                   
+                       LEFT OUTER JOIN IMT_RECLS R                              
+                       ON S.SKU_NBR=R.SKU_NBR                                   
+               WHERE     (A.VER_STATUS_CDE = 'A')                AND            
+                         (B.VER_STATUS_CDE = 'A')                AND            
+                         (D.VER_STATUS_CDE = 'A')                AND            
+                         (A.ORD_NBR = B.ORD_NBR)                 AND            
+                         (A.ORD_NBR = E.ORD_NBR)                 AND            
+                         (A.ORD_LNE_NBR = B.ORD_LNE_NBR)         AND            
+                         (A.REC_SEQ_NBR = B.REC_SEQ_NBR)         AND            
+                         (A.REC_SEQ_NBR = E.REC_SEQ_NBR)         AND            
+                         (A.ORD_NBR = :RECEIV-ORD-NBR)           AND            
+                         (A.REC_SEQ_NBR = :RECEIV-REC-SEQ-NBR)   AND            
+                         (A.ORD_NBR = C.PO_NBR)                  AND            
+                         (A.ORD_LNE_NBR = C.APP_PO_LNE_NBR)      AND            
+                         (A.PO_VER_NBR = C.VER_NBR)              AND            
+                         (C.PO_NBR = D.PO_NBR)                   AND            
+                         (D.VER_STATUS_CDE = 'A')                AND            
+                         (G.ENT_ID = D.ENT_ID)                   AND            
+                         (G.TYPE_CDE = '01')                     AND            
+                         (B.STR_NBR = X.LOC_NBR)                 AND            
+                         (DATE(E.VERFYD_TMST) BETWEEN                           
+                             DATE(RECLS_TMST) AND :PV-END-DATE   AND            
+                         (DATE (RECLS_TMST)   BETWEEN                           
+RECLSS                    DATE(D.CRE_TMST)    AND :PV-END-DATE)) AND            
+                          OLD_DEPT_NBR <> NW_DEPT_NBR            AND            
+                          NOT EXISTS(                                           
+                             SELECT 1                                           
+                                 FROM XLT_SKU S2,                               
+                                      IMT_RECLS R2                              
+                                WHERE S2.SKU_NBR=R2.SKU_NBR                     
+                                  AND S2.SKU_NBR=S.SKU_NBR                      
+                                  AND (DATE (RECLS_TMST)                        
+RECLSS                                BETWEEN  DATE(D.CRE_TMST)                 
+                                          AND  :PV-END-DATE)                    
+                                  AND  OLD_DEPT_NBR <> NW_DEPT_NBR              
+                                  AND RECLS_TMST < R.RECLS_TMST)                
+                  GROUP BY                                                      
+RECLSS*                  D.DEPT_NBR,                                            
+RECLSS                   V.DEPT_NBR,                                            
+                         V.MAJ_CL_NBR,                                          
+                         V.SUB_CL_NBR,                                          
+                         C.CL_NBR,                                              
+                         C.GP_QTY,                                              
+                         C.GP_RTL_AMT,                                          
+                         C.UNT_RTL_PR_AMT,                                      
+                         C.UNT_COST_AMT,                                        
+                         D.PO_NBR,                                              
+                         D.PO_TYP_CDE,                                          
+P41820                   D.CRE_BY_UID,                                          
+                         G.ENT_NAME_DESC,                                       
+                         D.PO_SHRT_CYC_IND,                                     
+                         X.E_BUS_IND                                            
+              UNION                                                             
+      * THIS SELECTS RECEIPTS WHERE A MAJOR CLASS RECLASS EXISTS FOR            
+      * THE MONTH BUT THERE IS NO DEPT RECLASS FOR THE MONTH.                   
+      * THE VERIFY DATE WAS ON OR AFTER THE RECLASS DATE.                       
+      * FIRST MAJOR CLASS RECLASS IS USED IF THERE IS MORE THAN 1               
+      * MAJOR CLASS RECLASS.                                                    
+      * NEW DEPT & CLASS ARE USED (FROM XLT_VND_STYL).                          
+                  SELECT                                                        
+                         SUM(B.AP_VERIFY_ITM_QTY),                              
+                         C.GP_QTY,                                              
+                         C.GP_RTL_AMT,                                          
+                         C.UNT_RTL_PR_AMT,                                      
+                         C.UNT_COST_AMT,                                        
+                         V.MAJ_CL_NBR,                                          
+                         V.SUB_CL_NBR,                                          
+                         C.CL_NBR,                                              
+                         D.DEPT_NBR,                                            
+                         D.PO_NBR,                                              
+                         D.PO_TYP_CDE,                                          
+P41820                   D.CRE_BY_UID,                                          
+                         G.ENT_NAME_DESC,                                       
+                         D.PO_SHRT_CYC_IND,                                     
+                         X.E_BUS_IND                                            
+                  FROM TRECITM A,                                               
+                       TRECDIS B,                                               
+                       TPURCHS D,                                               
+                       TRECEIV E,                                               
+                       TENTNME G,                                               
+                       XLT_LOC X,                                               
+                       TPURITM C LEFT OUTER JOIN                                
+                       XLT_SKU S ON C.ITM_NBR=S.ITM_NBR                         
+                       LEFT OUTER JOIN XLT_VND_STYL V                           
+                       ON S.STYL_ID=V.STYL_ID                                   
+                       LEFT OUTER JOIN IMT_RECLS R                              
+                       ON S.SKU_NBR=R.SKU_NBR                                   
+               WHERE     (A.VER_STATUS_CDE = 'A')                AND            
+                         (B.VER_STATUS_CDE = 'A')                AND            
+                         (D.VER_STATUS_CDE = 'A')                AND            
+                         (A.ORD_NBR = B.ORD_NBR)                 AND            
+                         (A.ORD_NBR = E.ORD_NBR)                 AND            
+                         (A.ORD_LNE_NBR = B.ORD_LNE_NBR)         AND            
+                         (A.REC_SEQ_NBR = B.REC_SEQ_NBR)         AND            
+                         (A.REC_SEQ_NBR = E.REC_SEQ_NBR)         AND            
+                         (A.ORD_NBR = :RECEIV-ORD-NBR)           AND            
+                         (A.REC_SEQ_NBR = :RECEIV-REC-SEQ-NBR)   AND            
+                         (A.ORD_NBR = C.PO_NBR)                  AND            
+                         (A.ORD_LNE_NBR = C.APP_PO_LNE_NBR)      AND            
+                         (A.PO_VER_NBR = C.VER_NBR)              AND            
+                         (C.PO_NBR = D.PO_NBR)                   AND            
+                         (D.VER_STATUS_CDE = 'A')                AND            
+                         (G.ENT_ID = D.ENT_ID)                   AND            
+                         (G.TYPE_CDE = '01')                     AND            
+                         (B.STR_NBR = X.LOC_NBR)                 AND            
+                         (DATE(E.VERFYD_TMST) BETWEEN                           
+                             DATE(RECLS_TMST) AND :PV-END-DATE   AND            
+                         (DATE (RECLS_TMST)   BETWEEN                           
+RECLSS                    DATE(D.CRE_TMST)    AND :PV-END-DATE)) AND            
+                          OLD_MAJ_CL_NBR <> NW_MAJ_CL_NBR        AND            
+      * THERE IS NO DEPT RECLASS FOR THE MONTH.                                 
+                          NOT EXISTS(                                           
+                             SELECT 1                                           
+                                 FROM XLT_SKU S2,                               
+                                      IMT_RECLS R2                              
+                                WHERE S2.SKU_NBR=R2.SKU_NBR                     
+                                  AND S2.SKU_NBR=S.SKU_NBR                      
+                                  AND (DATE (RECLS_TMST)                        
+RECLSS                                BETWEEN  DATE(D.CRE_TMST)                 
+                                          AND  :PV-END-DATE)                    
+                                  AND  OLD_DEPT_NBR <> NW_DEPT_NBR) AND         
+      * THERE IS NO EARLIER MAJOR CLASS RECLASS FOR THE MONTH.                  
+                          NOT EXISTS(                                           
+                             SELECT 1                                           
+                                 FROM XLT_SKU S2,                               
+                                      IMT_RECLS R2                              
+                                WHERE S2.SKU_NBR=R2.SKU_NBR                     
+                                  AND S2.SKU_NBR=S.SKU_NBR                      
+                                  AND (DATE (RECLS_TMST)                        
+RECLSS                                BETWEEN  DATE(D.CRE_TMST)                 
+                                          AND  :PV-END-DATE)                    
+                                  AND  OLD_MAJ_CL_NBR <> NW_MAJ_CL_NBR          
+                                  AND RECLS_TMST < R.RECLS_TMST)                
+                  GROUP BY                                                      
+                         D.DEPT_NBR,                                            
+                         V.MAJ_CL_NBR,                                          
+                         V.SUB_CL_NBR,                                          
+                         C.CL_NBR,                                              
+                         C.GP_QTY,                                              
+                         C.GP_RTL_AMT,                                          
+                         C.UNT_RTL_PR_AMT,                                      
+                         C.UNT_COST_AMT,                                        
+                         D.PO_NBR,                                              
+                         D.PO_TYP_CDE,                                          
+P41820                   D.CRE_BY_UID,                                          
+                         G.ENT_NAME_DESC,                                       
+                         D.PO_SHRT_CYC_IND,                                     
+                         X.E_BUS_IND                                            
+              UNION                                                             
+      * THIS SELECT FOR RECEIPTS WHERE THE SKU DID NOT HAVE A RECLASS           
+      * DURING THE EXTRACT TIMEFRAME, BUT OTHER SKUS IN THE RECEIVER            
+      * DID HAVE A RECLASS. DEPT & CLASS FROM XLT_VND_STYL ARE USED             
+                  SELECT                                                        
+                         SUM(B.AP_VERIFY_ITM_QTY),                              
+                         C.GP_QTY,                                              
+                         C.GP_RTL_AMT,                                          
+                         C.UNT_RTL_PR_AMT,                                      
+                         C.UNT_COST_AMT,                                        
+                         V.MAJ_CL_NBR,                                          
+                         V.SUB_CL_NBR,                                          
+                         C.CL_NBR,                                              
+217030                   SUBSTR(DIGITS(V.DEPT_NBR),2,3),                        
+                         D.PO_NBR,                                              
+                         D.PO_TYP_CDE,                                          
+P41820                   D.CRE_BY_UID,                                          
+                         G.ENT_NAME_DESC,                                       
+                         D.PO_SHRT_CYC_IND,                                     
+                         X.E_BUS_IND                                            
+                  FROM TRECITM A,                                               
+                       TRECDIS B,                                               
+                       TPURCHS D,                                               
+                       TRECEIV E,                                               
+                       TENTNME G,                                               
+                       XLT_LOC X,                                               
+                       TPURITM C LEFT OUTER JOIN                                
+                       XLT_SKU S ON C.ITM_NBR=S.ITM_NBR                         
+                       LEFT OUTER JOIN XLT_VND_STYL V                           
+                       ON S.STYL_ID=V.STYL_ID                                   
+               WHERE     (A.VER_STATUS_CDE = 'A')                AND            
+                         (B.VER_STATUS_CDE = 'A')                AND            
+                         (D.VER_STATUS_CDE = 'A')                AND            
+                         (A.ORD_NBR = B.ORD_NBR)                 AND            
+                         (A.ORD_NBR = E.ORD_NBR)                 AND            
+                         (A.ORD_LNE_NBR = B.ORD_LNE_NBR)         AND            
+                         (A.REC_SEQ_NBR = B.REC_SEQ_NBR)         AND            
+                         (A.REC_SEQ_NBR = E.REC_SEQ_NBR)         AND            
+                         (A.ORD_NBR = :RECEIV-ORD-NBR)           AND            
+                         (A.REC_SEQ_NBR = :RECEIV-REC-SEQ-NBR)   AND            
+                         (A.ORD_NBR = C.PO_NBR)                  AND            
+                         (A.ORD_LNE_NBR = C.APP_PO_LNE_NBR)      AND            
+                         (A.PO_VER_NBR = C.VER_NBR)              AND            
+                         (C.PO_NBR = D.PO_NBR)                   AND            
+                         (D.VER_STATUS_CDE = 'A')                AND            
+                         (G.ENT_ID = D.ENT_ID)                   AND            
+                         (G.TYPE_CDE = '01')                     AND            
+                         (B.STR_NBR = X.LOC_NBR)                 AND            
+                          NOT EXISTS (SELECT 1                                  
+                            FROM  IMT_RECLS R                                   
+                           WHERE  R.SKU_NBR = S.SKU_NBR                         
+                             AND  (DATE (RECLS_TMST) BETWEEN                    
+RECLSS                       DATE(D.CRE_TMST) AND :PV-END-DATE)                 
+                             AND (OLD_DEPT_NBR <> NW_DEPT_NBR                   
+                               OR OLD_MAJ_CL_NBR <> NW_MAJ_CL_NBR))             
+                  GROUP BY                                                      
+                         V.DEPT_NBR,                                            
+                         V.MAJ_CL_NBR,                                          
+                         V.SUB_CL_NBR,                                          
+                         C.CL_NBR,                                              
+                         C.GP_QTY,                                              
+                         C.GP_RTL_AMT,                                          
+                         C.UNT_RTL_PR_AMT,                                      
+                         C.UNT_COST_AMT,                                        
+                         D.PO_NBR,                                              
+                         D.PO_TYP_CDE,                                          
+P41820                   D.CRE_BY_UID,                                          
+                         G.ENT_NAME_DESC,                                       
+                         D.PO_SHRT_CYC_IND,                                     
+                         X.E_BUS_IND                                            
+                 WITH UR                                                        
+           END-EXEC.                                                            
+                                                                                
+       01  ABEND-CODE               PIC S9(04)  VALUE ZERO                      
+                                                COMP SYNC.                      
+       LINKAGE SECTION.                                                         
+      *                                                                         
+       PROCEDURE DIVISION.                                                      
+      *                                                                         
+      ******************************************************************        
+      *                                                                         
+      ******************************************************************        
+       A100-MAIN-MODULE.                                                        
+                                                                                
+           ACCEPT ST-SYSTEM-TIME FROM TIME.                                     
+           DISPLAY 'PROGRAM START      : ' ST-SYSTEM-TIME.                      
+           PERFORM B100-OPEN-FILES.                                             
+           PERFORM B210-EDIT-CONTROL-CARD.                                      
+                                                                                
+           PERFORM B400-EXTRACT-RECEIPTS.                                       
+                                                                                
+           DISPLAY 'FETCH COUNT      = ' FETCH-COUNT.                           
+           DISPLAY 'FETCH COUNT-RCLS = ' FETCH-COUNT-RCLS.                      
+                                                                                
+           PERFORM B500-CLOSE-FILES.                                            
+                                                                                
+           STOP RUN.                                                            
+      ******************************************************************        
+      *                                                                         
+      ******************************************************************        
+       B100-OPEN-FILES.                                                         
+      *                                                                         
+           OPEN OUTPUT RECEIPTS-FILE.                                           
+           OPEN INPUT  CNTL-DEF-RCPTS-FILE.                                     
+      *                                                                         
+      ******************************************************************        
+      *                                                                         
+      ******************************************************************        
+       B210-EDIT-CONTROL-CARD.                                                  
+      *                                                                         
+           ACCEPT CC-CONTROL-CARD FROM SYSIN.                                   
+           ACCEPT DPG51-SYSTEM-DATE FROM DATE.                                  
+                                                                                
+           DISPLAY 'CONTROL CARD : ' CC-CONTROL-CARD.                           
+                                                                                
+           MOVE CC-DATE TO DPG52-LK-DATE-INPUT                                  
+           MOVE CC-CALENDAR-TYPE TO DPG51-CALENDAR-TYPE.                        
+           SET  DPG52-LK-DTE-GREG-CC TO TRUE.                                   
+                                                                                
+           CALL DP500-KOHLS-CALENDAR-ROUTINE USING                              
+                                      DPG51 DPG52                               
+                                      DPG53 DPG54                               
+                                      DPG55 DPG56.                              
+                                                                                
+           IF DPG54-NO-ERROR                                                    
+               MOVE DPG55-1ST-WKDY-DB2ISO-FMT  TO PV-START-DATE                 
+               MOVE DPG55-DB2-ISO-DATE-FMT     TO PV-END-DATE                   
+               DISPLAY 'PICKING UP RECEIPTS BETWEEN ' PV-START-DATE             
+                ' AND ' PV-END-DATE                                             
+               MOVE DPG56-FISCAL-YEAR-NBR      TO PV-VERIFIED-YY                
+               MOVE DPG56-FISCAL-WEEK-NBR      TO PV-VERIFIED-WK                
+           ELSE                                                                 
+               DISPLAY '** ABEND ** IN POKUT116'                                
+               DISPLAY 'DATE ERROR : ' DPG54-ERROR-MESSAGE                      
+               MOVE +4003 TO ABEND-CODE                                         
+               CALL 'ILBOABN0' USING ABEND-CODE                                 
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      *                                                                         
+      ******************************************************************        
+       B400-EXTRACT-RECEIPTS.                                                   
+      *                                                                         
+           SET PS-DC-MORE-ROWS TO TRUE.                                         
+           PERFORM Z500-OPEN-DRIVING-CURSOR.                                    
+           ACCEPT ST-SYSTEM-TIME FROM TIME.                                     
+           DISPLAY 'DRIVING CURSOR DONE: ' ST-SYSTEM-TIME.                      
+           PERFORM Z600-FETCH-DRIVING-ROW.                                      
+                                                                                
+           PERFORM C500-PROCESS-DRIVING-ROWS                                    
+                   UNTIL PS-DC-NO-MORE-ROWS.                                    
+                                                                                
+           PERFORM Z700-CLOSE-DRIVING-CURSOR.                                   
+      *                                                                         
+                                                                                
+       C500-PROCESS-DRIVING-ROWS.                                               
+      *                                                                         
+           SET PS-MORE-ROWS TO TRUE.                                            
+           IF PS-RECLASS-DOES-NOT-EXIST                                         
+               PERFORM Z200-OPEN-RECEIPT-CURSOR                                 
+               PERFORM Z300-FETCH-RECEIPT-ROW                                   
+                                                                                
+               PERFORM C200-PROCESS-RECEIPT-ROWS                                
+                   UNTIL PS-NO-MORE-ROWS                                        
+                                                                                
+               PERFORM Z400-CLOSE-RECEIPT-CURSOR                                
+           ELSE                                                                 
+               PERFORM Z250-OPEN-RCLS-RECEIPT-CURSOR                            
+               PERFORM Z350-FETCH-RCLS-RECEIPT-ROW                              
+                                                                                
+               PERFORM C200-PROCESS-RECEIPT-ROWS                                
+                   UNTIL PS-NO-MORE-ROWS                                        
+                                                                                
+               PERFORM Z450-CLOSE-RCLS-RECEIPT-CURSOR                           
+           END-IF.                                                              
+                                                                                
+           PERFORM Z600-FETCH-DRIVING-ROW.                                      
+      *                                                                         
+      ******************************************************************        
+      *  CLOSE ALL FILES USED BY THIS PROGRAM.                                  
+      ******************************************************************        
+       B500-CLOSE-FILES.                                                        
+      *                                                                         
+           CLOSE       CNTL-DEF-RCPTS-FILE                                      
+                       RECEIPTS-FILE.                                           
+      *                                                                         
+      ******************************************************************        
+      *  PROCESS ALL ROWS RETURNED FROM THE CURSOR.                             
+      ******************************************************************        
+       C200-PROCESS-RECEIPT-ROWS.                                               
+      *                                                                         
+P41820     MOVE RECDIS-AP-VERIFY-ITM-QTY      TO PO054-UNITS.                   
+           IF PURITM-GP-QTY > 1                                                 
+               COMPUTE PV-UNIT-RTL ROUNDED =                                    
+                    PURITM-GP-RTL-AMT / PURITM-GP-QTY                           
+               END-COMPUTE                                                      
+           ELSE                                                                 
+               COMPUTE PV-UNIT-RTL =                                            
+                    PURITM-UNT-RTL-PR-AMT                                       
+               END-COMPUTE                                                      
+           END-IF.                                                              
+P41820     COMPUTE PO054-RETAIL =                                               
+P41820         (PV-UNIT-RTL *  PO054-UNITS).                                    
+P41820     COMPUTE PO054-COST =                                                 
+P41820         (PURITM-UNT-COST-AMT   *  PO054-UNITS).                          
+           IF  PV-MAJ-CL-NBR-IND = 0                                            
+               MOVE XLT00004-MAJ-CL-NBR       TO PV-MAJ-CLASS                   
+P41820         MOVE PV-MAJ-CLASS              TO PO054-CLASS                    
+           ELSE                                                                 
+P41820         MOVE PURITM-CL-NBR             TO PO054-CLASS                    
+P41820         MOVE '0'                       TO PO054-MIN-CL                   
+           END-IF.                                                              
+P41820     MOVE PURCHS-DEPT-NBR               TO PO054-DEPT                     
+P41820                                           PO054-VEND-KEY-DEPT.           
+P41820     MOVE ENTNME-ENT-NAME-DESC          TO PO054-VEND-KEY-NAME.           
+P41820     MOVE PV-VERIFIED-WK                TO PO054-MM.                      
+P41820     MOVE PV-VERIFIED-YY                TO PO054-YY.                      
+P41820     MOVE PURCHS-PO-NBR                 TO PO054-PO-NUMBER.               
+P41820     MOVE PURCHS-PO-TYP-CDE             TO PO054-PO-TYP-CDE.              
+P41820     MOVE PURCHS-CRE-BY-UID             TO PO054-CRE-BY-UID.              
+P41820     MOVE PURCHS-PO-SHRT-CYC-IND        TO PO054-PO-SHRT-CYC-IND.         
+P41820     MOVE XLT00010-E-BUS-IND            TO PO054-E-BUS-IND.               
+           PERFORM Z100-WRITE-RECEIPT-EXT-REC.                                  
+           IF PS-RECLASS-DOES-NOT-EXIST                                         
+               COMPUTE FETCH-COUNT = FETCH-COUNT + 1                            
+               PERFORM Z300-FETCH-RECEIPT-ROW                                   
+           ELSE                                                                 
+               COMPUTE FETCH-COUNT-RCLS = FETCH-COUNT-RCLS + 1                  
+               PERFORM Z350-FETCH-RCLS-RECEIPT-ROW                              
+           END-IF.                                                              
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      *                                                                         
+      ******************************************************************        
+       Z100-WRITE-RECEIPT-EXT-REC.                                              
+      *                                                                         
+P41820     WRITE RECEIPTS-RECORD FROM PO054-RECORD.                             
+      *                                                                         
+      ******************************************************************        
+      *    OPEN THE CURSOR WHICH WILL RETRIEVE RECEIPTS FROM THE                
+      *    RECEIVING/PO TABLES.                                                 
+      ******************************************************************        
+       Z200-OPEN-RECEIPT-CURSOR.                                                
+                                                                                
+           INITIALIZE DCLXLT00003                                               
+                      DCLXLT00004.                                              
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-SQL-SUB                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                               
+                         OR SQLCODE = 0                                         
+                         OR SQLCODE = +100)                                     
+                                                                                
+               EXEC SQL                                                         
+                   OPEN RECEIPT_CURSOR                                          
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN SQLCODE = +100                                          
+                       SET PS-NO-MORE-ROWS TO TRUE                              
+                   WHEN SQLWARN NOT = SPACES                                    
+                   WHEN SQLCODE NOT = ZERO                                      
+                       MOVE 'Z200-OPEN-RECEIPT-CURSOR'                          
+                                     TO  PV-PARAGRAPH-NAME                      
+                       MOVE 'OPEN ON CURSOR'                                    
+                                     TO  PV-DB2-OPER-ATTEMPTED                  
+                       PERFORM Z900-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+      *                                                                         
+           IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                                
+               MOVE 'Z200-OPEN-RECEIPT-CURSOR'                                  
+                                     TO  PV-PARAGRAPH-NAME                      
+               MOVE 'OPEN RETRIES EXCEEDED'                                     
+                                     TO  PV-DB2-OPER-ATTEMPTED                  
+               PERFORM Z900-SQL-ABEND                                           
+           END-IF.                                                              
+      ******************************************************************        
+      *    OPEN THE CURSOR WHICH WILL RETRIEVE RECEIPTS FROM THE                
+      *    RECEIVING/PO TABLES FOR RECLASSED RECEIPTS.                          
+      ******************************************************************        
+       Z250-OPEN-RCLS-RECEIPT-CURSOR.                                           
+                                                                                
+           INITIALIZE DCLXLT00003                                               
+                      DCLXLT00004                                               
+                      DCLIMT00015.                                              
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-SQL-SUB                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                               
+                         OR SQLCODE = 0                                         
+                         OR SQLCODE = +100)                                     
+                                                                                
+               EXEC SQL                                                         
+                   OPEN RCL_RECEIPT_CURSOR                                      
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN SQLCODE = +100                                          
+                       SET PS-NO-MORE-ROWS TO TRUE                              
+                   WHEN SQLWARN NOT = SPACES                                    
+                   WHEN SQLCODE NOT = ZERO                                      
+                       MOVE 'Z250-OPEN-RCLS-RECEIPT-CURSOR'                     
+                                     TO  PV-PARAGRAPH-NAME                      
+                       MOVE 'OPEN ON CURSOR'                                    
+                                     TO  PV-DB2-OPER-ATTEMPTED                  
+                       PERFORM Z900-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+      *                                                                         
+           IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                                
+               MOVE 'Z250-OPEN-RCLS-RECEIPT-CURSOR'                             
+                                     TO  PV-PARAGRAPH-NAME                      
+               MOVE 'OPEN RETRIES EXCEEDED'                                     
+                                     TO  PV-DB2-OPER-ATTEMPTED                  
+               PERFORM Z900-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *                                                                         
+       Z500-OPEN-DRIVING-CURSOR.                                                
+                                                                                
+           INITIALIZE DCLXLT00003                                               
+                      DCLXLT00004.                                              
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-SQL-SUB                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                               
+                         OR SQLCODE = 0                                         
+                         OR SQLCODE = +100)                                     
+                                                                                
+               EXEC SQL                                                         
+                   OPEN DRIVING_CURSOR                                          
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN SQLCODE = +100                                          
+                       SET PS-DC-NO-MORE-ROWS TO TRUE                           
+                   WHEN SQLWARN NOT = SPACES                                    
+                   WHEN SQLCODE NOT = ZERO                                      
+                       MOVE 'Z500-OPEN-DRIVING-CURSOR'                          
+                                     TO  PV-PARAGRAPH-NAME                      
+                       MOVE 'OPEN ON CURSOR'                                    
+                                     TO  PV-DB2-OPER-ATTEMPTED                  
+                       PERFORM Z900-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+      *                                                                         
+           IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                                
+               MOVE 'Z500-OPEN-DRIVING-CURSOR'                                  
+                                     TO  PV-PARAGRAPH-NAME                      
+               MOVE 'OPEN RETRIES EXCEEDED'                                     
+                                     TO  PV-DB2-OPER-ATTEMPTED                  
+               PERFORM Z900-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      *    FETCH THE NEXT ROW OF THE CURSOR.                                    
+      ******************************************************************        
+       Z300-FETCH-RECEIPT-ROW.                                                  
+                                                                                
+           INITIALIZE PV-NULL-IND.                                              
+           EXEC SQL                                                             
+               FETCH RECEIPT_CURSOR                                             
+               INTO  :RECDIS-AP-VERIFY-ITM-QTY,                                 
+                     :PURITM-GP-QTY,                                            
+                     :PURITM-GP-RTL-AMT,                                        
+                     :PURITM-UNT-RTL-PR-AMT,                                    
+                     :PURITM-UNT-COST-AMT,                                      
+                     :XLT00004-MAJ-CL-NBR:PV-MAJ-CL-NBR-IND,                    
+                     :XLT00004-SUB-CL-NBR:PV-SUB-CL-NBR-IND,                    
+                     :PURITM-CL-NBR,                                            
+                     :PURCHS-DEPT-NBR,                                          
+                     :PURCHS-PO-NBR,                                            
+                     :PURCHS-PO-TYP-CDE,                                        
+P41820               :PURCHS-CRE-BY-UID,                                        
+                     :ENTNME-ENT-NAME-DESC,                                     
+                     :PURCHS-PO-SHRT-CYC-IND,                                   
+                     :XLT00010-E-BUS-IND                                        
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = +100                                                    
+               SET PS-NO-MORE-ROWS TO TRUE                                      
+           ELSE                                                                 
+               IF SQLCODE NOT = 0                                               
+                    MOVE 'Z300-FETCH-RECEIPT-ROW'                               
+                                             TO PV-PARAGRAPH-NAME               
+                    MOVE 'FETCH ROW FROM RECEIPT CURSOR'                        
+                                            TO PV-DB2-OPER-ATTEMPTED            
+                   PERFORM Z900-SQL-ABEND                                       
+               END-IF                                                           
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      *    FETCH THE NEXT ROW OF THE RECLASS CURSOR.                            
+      ******************************************************************        
+       Z350-FETCH-RCLS-RECEIPT-ROW.                                             
+                                                                                
+           INITIALIZE PV-NULL-IND.                                              
+           EXEC SQL                                                             
+               FETCH RCL_RECEIPT_CURSOR                                         
+               INTO  :RECDIS-AP-VERIFY-ITM-QTY,                                 
+                     :PURITM-GP-QTY,                                            
+                     :PURITM-GP-RTL-AMT,                                        
+                     :PURITM-UNT-RTL-PR-AMT,                                    
+                     :PURITM-UNT-COST-AMT,                                      
+                     :XLT00004-MAJ-CL-NBR:PV-MAJ-CL-NBR-IND,                    
+                     :XLT00004-SUB-CL-NBR:PV-SUB-CL-NBR-IND,                    
+                     :PURITM-CL-NBR,                                            
+                     :PURCHS-DEPT-NBR,                                          
+                     :PURCHS-PO-NBR,                                            
+                     :PURCHS-PO-TYP-CDE,                                        
+P41820               :PURCHS-CRE-BY-UID,                                        
+                     :ENTNME-ENT-NAME-DESC,                                     
+                     :PURCHS-PO-SHRT-CYC-IND,                                   
+                     :XLT00010-E-BUS-IND                                        
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = +100                                                    
+               SET PS-NO-MORE-ROWS TO TRUE                                      
+           ELSE                                                                 
+               IF SQLCODE NOT = 0                                               
+                    MOVE 'Z350-FETCH-RCLS-RECEIPT-ROW'                          
+                                             TO PV-PARAGRAPH-NAME               
+                    MOVE 'FETCH ROW FROM RECLASS CURSOR'                        
+                                            TO PV-DB2-OPER-ATTEMPTED            
+                   PERFORM Z900-SQL-ABEND                                       
+               END-IF                                                           
+           END-IF.                                                              
+      *                                                                         
+       Z600-FETCH-DRIVING-ROW.                                                  
+                                                                                
+           INITIALIZE PV-NULL-IND.                                              
+           EXEC SQL                                                             
+               FETCH DRIVING_CURSOR                                             
+               INTO  :PS-RECLASS-IND,                                           
+                     :RECEIV-ORD-NBR,                                           
+                     :RECEIV-REC-SEQ-NBR                                        
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = +100                                                    
+               SET PS-DC-NO-MORE-ROWS TO TRUE                                   
+           ELSE                                                                 
+               IF SQLCODE NOT = 0                                               
+                    MOVE 'Z600-FETCH-DRIVING-ROW'                               
+                                             TO PV-PARAGRAPH-NAME               
+                    MOVE 'FETCH ROW FROM RECEIPT CURSOR'                        
+                                            TO PV-DB2-OPER-ATTEMPTED            
+                   PERFORM Z900-SQL-ABEND                                       
+               END-IF                                                           
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      *    CLOSE THE INVENTORY PARAMTERS CURSOR.                                
+      ******************************************************************        
+       Z400-CLOSE-RECEIPT-CURSOR.                                               
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-SQL-SUB                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                               
+                         OR SQLCODE = 0)                                        
+                                                                                
+               EXEC SQL                                                         
+                   CLOSE RECEIPT_CURSOR                                         
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN SQLWARN NOT = SPACES                                    
+                   WHEN SQLCODE NOT = ZERO                                      
+                       MOVE 'Z400-CLOSE-RECEIPT-CURSOR'                         
+                                     TO  PV-PARAGRAPH-NAME                      
+                       MOVE 'CLOSE ON CURSOR'                                   
+                                     TO  PV-DB2-OPER-ATTEMPTED                  
+                       PERFORM Z900-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+      *                                                                         
+           IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                                
+               MOVE 'Z400-CLOSE-RECEIPT-CURSOR'                                 
+                                     TO  PV-PARAGRAPH-NAME                      
+               MOVE 'CLOSE RETRIES EXCEEDED'                                    
+                                     TO  PV-DB2-OPER-ATTEMPTED                  
+               PERFORM Z900-SQL-ABEND                                           
+           END-IF.                                                              
+      ******************************************************************        
+      *    CLOSE THE RECLASS RECEIPT CURSOR.                                    
+      ******************************************************************        
+       Z450-CLOSE-RCLS-RECEIPT-CURSOR.                                          
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-SQL-SUB                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                               
+                         OR SQLCODE = 0)                                        
+                                                                                
+               EXEC SQL                                                         
+                   CLOSE RCL_RECEIPT_CURSOR                                     
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN SQLWARN NOT = SPACES                                    
+                   WHEN SQLCODE NOT = ZERO                                      
+                       MOVE 'Z450-CLOSE-RECLASS-CURSOR'                         
+                                     TO  PV-PARAGRAPH-NAME                      
+                       MOVE 'CLOSE ON CURSOR'                                   
+                                     TO  PV-DB2-OPER-ATTEMPTED                  
+                       PERFORM Z900-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+      *                                                                         
+           IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                                
+               MOVE 'Z450-CLOSE-RECLASS-CURSOR'                                 
+                                     TO  PV-PARAGRAPH-NAME                      
+               MOVE 'CLOSE RETRIES EXCEEDED'                                    
+                                     TO  PV-DB2-OPER-ATTEMPTED                  
+               PERFORM Z900-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+       Z700-CLOSE-DRIVING-CURSOR.                                               
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-SQL-SUB                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                               
+                         OR SQLCODE = 0)                                        
+                                                                                
+               EXEC SQL                                                         
+                   CLOSE DRIVING_CURSOR                                         
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN SQLWARN NOT = SPACES                                    
+                   WHEN SQLCODE NOT = ZERO                                      
+                       MOVE 'Z700-CLOSE-DRIVING-CURSOR'                         
+                                     TO  PV-PARAGRAPH-NAME                      
+                       MOVE 'CLOSE ON CURSOR'                                   
+                                     TO  PV-DB2-OPER-ATTEMPTED                  
+                       PERFORM Z900-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+      *                                                                         
+           IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                                
+               MOVE 'Z700-CLOSE-DRIVING-CURSOR'                                 
+                                     TO  PV-PARAGRAPH-NAME                      
+               MOVE 'CLOSE RETRIES EXCEEDED'                                    
+                                     TO  PV-DB2-OPER-ATTEMPTED                  
+               PERFORM Z900-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  STANDARD DB2 ERROR ABEND ROUTINE                                       
+      *  THIS ROUTINE FORCES AN ABEND DUE TO A DB2 PROBLEM.                     
+      ******************************************************************        
+       Z900-SQL-ABEND.                                                          
+                                                                                
+           MOVE +4013                 TO ABEND-CODE.                            
+           DISPLAY '**  ABEND     **'.                                          
+           DISPLAY '**  PROGRAM   **  =  POKUT116'.                             
+           DISPLAY '**  PARAGRAPH **  = ' PV-PARAGRAPH-NAME.                    
+           DISPLAY '**  OPERATION **  = ' PV-DB2-OPER-ATTEMPTED.                
+                                                                                
+      *    THE FOLLOWING COPYBOOK UTILIZES THE DB2 ABEND MODULE                 
+      *    DSNTIAR TO CONVERT SQLCA INTO UNDERSTANDABLE VERBAGE.                
+           COPY DPPD004.                                                        
+           CALL 'ILBOABN0'  USING ABEND-CODE.                                   

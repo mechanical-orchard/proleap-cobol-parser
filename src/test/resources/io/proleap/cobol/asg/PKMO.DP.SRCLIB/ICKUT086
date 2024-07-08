@@ -1,0 +1,1799 @@
+       IDENTIFICATION DIVISION.                                                 
+       PROGRAM-ID.    ICKUT086.                                                 
+       AUTHOR.        COGNIZANT.                                                
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+       DATE-WRITTEN.  04/25/2009.                                               
+       DATE-COMPILED.                                                           
+                                                                                
+      *****************************************************************         
+      * ICKUT086 - EXPLODE COUNT/STORE TO COUNT/STORE/SKU LEVEL .               
+      *            ANY CHANGES TO ICKUP053 LOGIC MIGHT NEED A CHANGE IN         
+      *            THIS PROGRAM TOO.                                            
+      *****************************************************************         
+      *        THIS PROGRAM WILL READ A FILE OF COUNT/STORE COMBINATIONS        
+      *        CREATED IN PROGRAM ICKUP052 AND EXPLODE THEM TO THE SKU          
+      *        LEVEL BY USING THE GROUPINGS IN ICT_CNT_LOC_GP,                  
+      *        ICT_LOC_GP_ASSN AND ICT_CNT_MDSE_GP TABLES ALONG WITH THE        
+      *        HIERARCHIES IN THE XST_VND_STYL TABLE TO DETERMINE THE           
+      *        SKUS TO BE USED.                                                 
+      *        THE OUTPUT FILE  IN THE FORMAT OF PCRD054 AND THIS WILL          
+      *        BE  PROCESSED BY  LOGISTICS.                                     
+      *                                                                         
+      *****************************************************************         
+      *                                                                         
+      *  FILES READ ARE:                                                        
+      *      NONE                                                               
+      *****************************************************************         
+      * 04/25/09 - RAJAMANI K       -  INC NO. INC000000772351                  
+      *    - NEW PROGRAM.                                                       
+      *      THE PROGRAM EXPLODES COUNT/STORE TO COUNT / STORE / SKU            
+      *      LEVEL.                                                             
+      *      THIS PROGRAM CREATES AN INTERNAL UPC ID WITH STORE TO              
+      *      LOGISTICS FOR CLEANUP.                                             
+      *****************************************************************         
+916792* 08/19/09 - COGNIZANT       -  INC916792                                 
+      *    CHANGES ARE MADE TO THE PROGRAM TO HANDLE CLEARANCE ITEMS            
+      *    WHEN THE CLEARANCE STATUS INDICATOR IS 25 (MIXED CLEARANCE)          
+      *****************************************************************         
+CR9773* 08/18/11 - COGNIZANT       -  CRQ9773                                   
+CR9773*    CHANGES ARE MADE TO THE PROGRAM TO IMPROVE THE CPU                   
+CR9773*    PERFORMANCE (MODIFIED CNT-GRP-CSR AND MAJ-CLS-CSR CURSORS            
+CR9773*    AND INTRODUCED NEW TEMPORARY TABLE SESSION.TESTT).                   
+CR9773*    PRODUCTION BUG FIX - COUNT RECORDS SHOULD NOT WRITTEN TO             
+CR9773*    OUTPUT FILE IF NO ROW FOUND IN 8900- OR 8905- QUERIES.               
+      *****************************************************************         
+C17640* DATE:   JUL 22 2015                                                     
+C17640* WR/IR#: CHG0117640                                                      
+C17640* PROGRAMMER: COGNIZANT                                                   
+C17640* DESCRIPTION: MADE CHANGES TO EXCLUDE CLEARANCE AND DISCONTINUED         
+C17640*              ITEMS IN THE FOLLOWING CURSORS MAJ-CLS-CSR,                
+C17640*              SUB-CLS-CSR, STYLE-CSR AND GP-CDE-CSR                      
+C17640*-----------------------------------------------------------              
+C17705******************************************************************        
+C17705* DATE:   JUL 22 2015                                                     
+C17705* WR/IR#: CHG0117705                                                      
+C17705* PROGRAMMER: COGNIZANT                                                   
+C17705* DESCRIPTION: AS PER KAREN HAAG, EXCLUDING ONLY CLEARANCE ITEMS.         
+C17705* ACTIVE AND DISCONTINUED ITEMS SHOULD BE INCLUDED IN THE                 
+C17705* INVENTORY COUNT PROCESS.                                                
+C17705******************************************************************        
+228316* DATE:   JUL 24 2019                                                     
+228316* WR/IR#: CHG0228316                                                      
+228316* PROGRAMMER: JIM HUNTER                                                  
+228316* DESCRIPTION: MAINFRAME REFACTORING - LUW DOES NOT RECOGNIZE THE         
+228316*    STOGROUP, PRIQTY, SECQTY, BUFFERPOOL OR CLUSTER PARAMETERS           
+228316*    ON THE CREATE INDEX STATEMENT, SO THEY MUST BE REMOVED.              
+228316*    DB2 WILL USE DEFAULT VALUES.                                         
+228316*****************************************************************         
+243397* DATE:   APRIL 28 2020                                                   
+243397* CHANGE: CHG0243397                                                      
+243397* PROGRAMMER: GERMAN BANDA                                                
+243397* DESCRIPTION: IN 1310-CREATE-TEMP-TABLE                                  
+243397*    ADDED NOT LOGGED ON ROLLBACK DELETE ROWS TO REDUCE THE               
+243397*    NUMBER OF LOG RECORDS TO DB2                                         
+243397*****************************************************************         
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+       CONFIGURATION SECTION.                                                   
+       SOURCE-COMPUTER. IBM-3090.                                               
+       OBJECT-COMPUTER. IBM-3090.                                               
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+       FILE-CONTROL.                                                            
+           SELECT CNT-STORE-EXP-FILE         ASSIGN TO INP01.                   
+                                                                                
+           SELECT CARDIN-CURR-DATE-FILE      ASSIGN TO CARDIN.                  
+                                                                                
+           SELECT CNT-SKU-EXP-FILE           ASSIGN TO OUT01.                   
+                                                                                
+                                                                                
+      *****************************************************************         
+       DATA DIVISION.                                                           
+      *****************************************************************         
+       FILE SECTION.                                                            
+                                                                                
+       FD  CNT-STORE-EXP-FILE                                                   
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS                                             
+           DATA RECORD IS CNT-STORE-EXP-REC.                                    
+       01  CNT-STORE-EXP-REC          PIC  X(32).                               
+                                                                                
+       FD  CARDIN-CURR-DATE-FILE                                                
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS                                             
+           RECORD CONTAINS 80 CHARACTERS.                                       
+       01  CC-CURR-DATE-RECORD        PIC  X(80).                               
+                                                                                
+       FD  CNT-SKU-EXP-FILE                                                     
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS                                             
+           DATA RECORD IS CNT-SKU-EXP-REC.                                      
+       01  CNT-SKU-EXP-REC            PIC  X(10).                               
+                                                                                
+                                                                                
+      *                                                                         
+       WORKING-STORAGE SECTION.                                                 
+      ******************************************************************        
+      * PC PROGRAM CONSTANTS                                           *        
+      ******************************************************************        
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-PROGRAM-NAME                PIC X(08)    VALUE                
+                                                 'ICKUT086'.                    
+           05  PC-MAXIMUM-RETRY-COUNT         PIC S9(04)   VALUE +2             
+                                                           COMP SYNC.           
+                                                                                
+      ******************************************************************        
+      * PV PROGRAM VARIABLES                                           *        
+      ******************************************************************        
+       01  PV-WORK-VARIABLES.                                                   
+           05  PV-RETRIES                     PIC S9(04)   VALUE +0             
+                                                           COMP.                
+           05  PV-PARAGRAPH-NAME              PIC  X(30)   VALUE SPACES.        
+           05  PV-COMPLETED-COUNT-FLG         PIC  X       VALUE SPACES.        
+           05  PV-DB2-OPERATION-ATTEMPTED     PIC  X(30)   VALUE SPACES.        
+           05  PV-SQLCODE-DISPLAY             PIC +(8)9    VALUE ZEROES.00830000
+           05  PV-SKU-NBR-NULL-IND            PIC S9(04)   COMP                 
+                                                           VALUE ZERO.          
+               88 PV-SKU-NBR-IS-NULL          VALUE -1.                         
+           05  PV-DEPT-NULL-IND               PIC S9(04)   COMP            CL*15
+                                                           VALUE ZERO.     CL*15
+               88 PV-DEPT-IS-NULL             VALUE -1.                         
+               88 PV-DEPT-IS-NOT-NULL         VALUE 0.                          
+           05  PV-MAJ-CL-NULL-IND             PIC S9(04)   COMP            CL*15
+                                                           VALUE ZERO.     CL*15
+               88 PV-MAJ-CL-IS-NULL           VALUE -1.                         
+               88 PV-MAJ-CL-IS-NOT-NULL       VALUE 0.                          
+           05  PV-SUB-CL-NULL-IND             PIC S9(04)   COMP            CL*15
+                                                           VALUE ZERO.     CL*15
+               88 PV-SUB-CL-IS-NULL           VALUE -1.                         
+               88 PV-SUB-CL-IS-NOT-NULL       VALUE 0.                          
+           05  PV-STYL-ID-NULL-IND            PIC S9(04)   COMP            CL*15
+                                                           VALUE ZERO.     CL*15
+               88 PV-STYL-ID-IS-NULL          VALUE -1.                         
+               88 PV-STYL-ID-IS-NOT-NULL      VALUE 0.                          
+           05  PV-GP-CDE-NULL-IND             PIC S9(04)   COMP            CL*15
+                                                           VALUE ZERO.     CL*15
+               88 PV-GP-CDE-IS-NULL           VALUE -1.                         
+               88 PV-GP-CDE-IS-NOT-NULL       VALUE 0.                          
+           05  PV-SKU-NULL-IND                PIC S9(04)   COMP            CL*15
+                                                           VALUE ZERO.     CL*15
+               88 PV-SKU-IS-NULL              VALUE -1.                         
+               88 PV-SKU-IS-NOT-NULL          VALUE 0.                          
+           05  PV-ORIG-CLR-DTE-NULL-IND       PIC S9(04)   COMP            CL*15
+                                                           VALUE ZERO.     CL*15
+               88 PV-ORIG-CLR-DTE-IS-NULL     VALUE -1.                         
+               88 PV-ORIG-CLR-DTEIS-NOT-NULL  VALUE 0.                          
+           05  PV-CURRENT-DATE             PIC X(10).                      CL**4
+916792     05  PV-LOC-NBR                  PIC S9(4) COMP VALUE ZEROES.    CL**4
+                                                                                
+      ******************************************************************        
+      * PS PROGRAM SWITCHES                                            *        
+      ******************************************************************        
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-END-OF-INPUT-FILE-SW        PIC  X(01)   VALUE 'N'.           
+               88  PS-END-OF-INPUT-FILE                    VALUE 'Y'.           
+           05  PS-EOF-CARDIN-SWITCH           PIC X(01)    VALUE 'N'.           
+               88  PS-EOF-CARDIN                           VALUE 'Y'.           
+               88  PS-NOT-EOF-CARDIN                       VALUE 'N'.           
+           05  PS-NO-MORE-COUNT-SKUS-SW       PIC  X(01)   VALUE 'N'.           
+               88  PS-NO-MORE-COUNT-SKUS                   VALUE 'Y'.           
+               88  PS-MORE-COUNT-SKUS                      VALUE 'N'.           
+           05  PS-NO-MORE-MC-SKUS-SW          PIC  X(01)   VALUE 'N'.           
+               88  PS-NO-MORE-MC-SKUS                      VALUE 'Y'.           
+               88  PS-MORE-MC-SKUS                         VALUE 'N'.           
+           05  PS-NO-MORE-SC-SKUS-SW          PIC  X(01)   VALUE 'N'.           
+               88  PS-NO-MORE-SC-SKUS                      VALUE 'Y'.           
+               88  PS-MORE-SC-SKUS                         VALUE 'N'.           
+           05  PS-NO-MORE-STYLE-CSR-SW        PIC  X(01)   VALUE 'N'.           
+               88  PS-NO-MORE-STYLE-CSR                    VALUE 'Y'.           
+               88  PS-MORE-STYLE-CSR                       VALUE 'N'.           
+           05  PS-NO-MORE-GP-CDE-CSR-SW       PIC  X(01)   VALUE 'N'.           
+               88  PS-NO-MORE-GP-CDE-CSR                   VALUE 'Y'.           
+               88  PS-MORE-GP-CDE-CSR                      VALUE 'N'.           
+CR9773     05  PS-SKU-FOUND-SW                PIC  X(01)   VALUE 'N'.           
+CR9773         88  PS-SKU-FOUND                            VALUE 'Y'.           
+CR9773         88  PS-SKU-NOT-FOUND                        VALUE 'N'.           
+           05  PS-PROCESS-STOP-SW             PIC  X(01)   VALUE 'N'.           
+               88  PS-PROCESS-STOP                         VALUE 'Y'.           
+CR9773     05  PS-END-OF-TEMP-CSR-SW          PIC  X(01)   VALUE 'N'.           
+CR9773         88  PS-END-OF-TEMP-CSR                      VALUE 'Y'.           
+                                                                                
+       01  ABEND-CODE                         PIC S9(04)   VALUE +0             
+                                                           COMP SYNC.           
+                                                                                
+       01  DISPLAY-EDITS.                                                       
+           05  DI-ACT-CNTR                  PIC  9(09)  VALUE ZEROS.            
+           05  DI-CLR-CNTR                  PIC  9(09)  VALUE ZEROS.            
+                                                                                
+       01  CC-CARDIN.                                                           
+           05  CC-CURR-DATE                 PIC  X(10)  VALUE SPACES.           
+           05  FILLER                       PIC  X(70)  VALUE SPACES.           
+                                                                                
+      *                                                                         
+      *----------------------------------------------------------------         
+      * DATE ROUTINE COPY MEMBERS                                               
+      *----------------------------------------------------------------         
+           COPY DPWS500.                                                        
+                                                                                
+      *****************************************************************         
+      *    INPUT COPYBOOKS                                                      
+      *****************************************************************         
+           COPY ICRD052.                                                        
+                                                                                
+      *****************************************************************         
+      *    OUTPUT COPYBOOKS                                                     
+      *****************************************************************         
+           COPY PCRD054.                                                        
+                                                                                
+      *****************************************************************         
+      *    DB2 COMMUNICATION AREA                                               
+      *****************************************************************         
+           COPY DPWS004.                                                        
+                                                                                
+      *****************************************************************         
+      *  XST_LOC TABLE                                                          
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE XST00001                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  XST_SKU_LOC TABLE                                                      
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE XST00008                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  XST_SKU TABLE                                                          
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE XST00010                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  XST_VND_STYL  TABLE                                                    
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE XST00013                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  ICT_CNT_LOC_GP TABLE                                                   
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE ICT00014                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  ICT_LOC_GP_ASSN TABLE                                                  
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE ICT00015                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  ICT_CNT_STUP_STAT TABLE                                                
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE ICT00019                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  ICT_CNT_MDSE_GP TABLE                                                  
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE ICT00016                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  ICT_CNT_STUP TABLE                                                     
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE ICT00010                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  ICT_LOC_CNT_STAT TABLE                                                 
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE ICT00020                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  ICT_MDSE_GP_ASSN TABLE                                                 
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE ICT00017                                                
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  ICT_CNT_RPET_PARM TABLE                                                
+      *****************************************************************         
+           EXEC SQL                                                             
+                INCLUDE ICT00013                                                
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+           COPY SQLCA2.                                                         
+                                                                                
+      *----------------------------------------------------------------         
+      *  USA IC COUNTS CURSOR WILL FETCH COUNT GROUPINGS.                       
+      *----------------------------------------------------------------         
+           EXEC SQL                                                             
+             DECLARE CNT-GRP-CSR CURSOR FOR                                     
+             SELECT  B.DEPT_NBR                                                 
+                    ,B.MAJ_CL_NBR                                               
+                    ,B.SUB_CL_NBR                                               
+                    ,B.STYL_ID                                                  
+                    ,B.SKU_NBR                                                  
+                    ,B.GP_CDE                                                   
+CR9773     FROM    SESSION.TESTT    T                                           
+                  ,ICT_MDSE_GP_ASSN A                                           
+                  ,ICT_CNT_MDSE_GP  B                                           
+           WHERE A.CNT_STUP_ID       = :ICT00017-CNT-STUP-ID                    
+             AND B.LAST_ACTN_CDE     = 'A'                                      
+             AND B.MDSE_GP_ID        = A.MDSE_GP_ID                             
+             AND B.MDSE_GP_ID        = T.MDSE_GP_ID                             
+             AND B.LAST_UPD_TMST     = T.MAX_TMST                               
+           END-EXEC.                                                            
+                                                                                
+                                                                                
+      *----------------------------------------------------------------         
+      *  USA IC COUNTS CURSOR WILL FETCH SKUS WITHIN A MAJOR CLASS              
+      *----------------------------------------------------------------         
+           EXEC SQL                                                             
+             DECLARE MAJ-CLS-CSR CURSOR FOR                                     
+             SELECT C.SKU_NBR                                                   
+                   ,A.UNT_RTL_AMT                                               
+                   ,A.LOC_SKU_STAT_CDE                                          
+                   ,A.ORIG_CLR_DTE                                              
+                   ,A.INTR_UPC_ID                                               
+916792             ,A.LOC_NBR                                                   
+             FROM    XST_SKU                 C                                  
+                    ,XST_VND_STYL            D                                  
+                    ,XST_SKU_LOC             A                                  
+             WHERE D.DEPT_NBR       = :XST00013-DEPT-NBR                        
+               AND D.MAJ_CL_NBR     = :XST00013-MAJ-CL-NBR                      
+               AND C.STYL_ID        = D.STYL_ID                                 
+               AND (A.LOC_NBR       = :XST00008-LOC-NBR                         
+               AND  A.BEG_TMST     <= CURRENT TIMESTAMP                         
+              AND (A.END_TMST      > CURRENT TIMESTAMP                          
+               OR  A.END_TMST    IS NULL)                                       
+               AND  A.INTR_UPC_ID   = C.INTR_UPC_ID)                            
+C17705         AND  A.LOC_SKU_STAT_CDE NOT IN('30')                             
+CR9773       UNION ALL                                                          
+             SELECT C.SKU_NBR                                                   
+                   ,E.UNT_RTL_AMT                                               
+                   ,E.LOC_SKU_STAT_CDE                                          
+                   ,E.ORIG_CLR_DTE                                              
+                   ,E.INTR_UPC_ID                                               
+916792             ,E.LOC_NBR                                                   
+             FROM    XST_SKU                 C                                  
+                    ,XST_VND_STYL            D                                  
+                    ,XST_SKU_LOC             E                                  
+             WHERE D.DEPT_NBR       = :XST00013-DEPT-NBR                        
+               AND D.MAJ_CL_NBR     = :XST00013-MAJ-CL-NBR                      
+               AND C.STYL_ID        = D.STYL_ID                                 
+               AND (E.LOC_NBR       = 0                                         
+               AND  E.BEG_TMST     <= CURRENT TIMESTAMP                         
+               AND (E.END_TMST      > CURRENT TIMESTAMP                         
+               OR  E.END_TMST    IS NULL)                                       
+               AND  E.INTR_UPC_ID   = C.INTR_UPC_ID)                            
+C17705         AND  E.LOC_SKU_STAT_CDE NOT IN('30')                             
+               AND NOT EXISTS ( SELECT 1 FROM  XST_SKU_LOC F                    
+             WHERE E.INTR_UPC_ID    = F.INTR_UPC_ID                             
+               AND  F.LOC_NBR       =  :XST00008-LOC-NBR                        
+               AND  F.BEG_TMST     <= CURRENT TIMESTAMP                         
+               AND (F.END_TMST      > CURRENT TIMESTAMP                         
+                OR  F.END_TMST    IS NULL))                                     
+           END-EXEC.                                                            
+                                                                                
+      *----------------------------------------------------------------         
+      *  USA IC COUNTS CURSOR WILL FETCH SKUS WITHIN A SUB CLASS                
+      *----------------------------------------------------------------         
+           EXEC SQL                                                             
+             DECLARE SUB-CLS-CSR CURSOR FOR                                     
+             SELECT  C.SKU_NBR                                                  
+                    ,A.UNT_RTL_AMT                                              
+                    ,A.LOC_SKU_STAT_CDE                                         
+                    ,A.ORIG_CLR_DTE                                             
+                    ,A.INTR_UPC_ID                                              
+916792              ,A.LOC_NBR                                                  
+             FROM    XST_SKU         C                                          
+                    ,XST_VND_STYL    D                                          
+                    ,XST_SKU_LOC     A                                          
+             WHERE D.DEPT_NBR       = :XST00013-DEPT-NBR                        
+               AND D.MAJ_CL_NBR     = :XST00013-MAJ-CL-NBR                      
+               AND D.SUB_CL_NBR     = :XST00013-SUB-CL-NBR                      
+               AND C.STYL_ID        = D.STYL_ID                                 
+               AND (A.LOC_NBR       = :XST00008-LOC-NBR                         
+               AND  A.BEG_TMST     <= CURRENT TIMESTAMP                         
+              AND (A.END_TMST      > CURRENT TIMESTAMP                          
+               OR  A.END_TMST    IS NULL)                                       
+               AND  A.INTR_UPC_ID   = C.INTR_UPC_ID)                            
+C17705         AND  A.LOC_SKU_STAT_CDE NOT IN('30')                             
+             UNION                                                              
+             SELECT  C.SKU_NBR                                                  
+                    ,E.UNT_RTL_AMT                                              
+                    ,E.LOC_SKU_STAT_CDE                                         
+                    ,E.ORIG_CLR_DTE                                             
+                    ,E.INTR_UPC_ID                                              
+916792              ,E.LOC_NBR                                                  
+             FROM    XST_SKU         C                                          
+                    ,XST_VND_STYL    D                                          
+                    ,XST_SKU_LOC     E                                          
+             WHERE D.DEPT_NBR       = :XST00013-DEPT-NBR                        
+               AND D.MAJ_CL_NBR     = :XST00013-MAJ-CL-NBR                      
+               AND D.SUB_CL_NBR     = :XST00013-SUB-CL-NBR                      
+               AND C.STYL_ID        = D.STYL_ID                                 
+               AND (E.LOC_NBR       = 0                                         
+               AND  E.BEG_TMST     <= CURRENT TIMESTAMP                         
+              AND (E.END_TMST      > CURRENT TIMESTAMP                          
+               OR  E.END_TMST    IS NULL)                                       
+              AND  E.INTR_UPC_ID   = C.INTR_UPC_ID)                             
+C17705        AND  E.LOC_SKU_STAT_CDE NOT IN('30')                              
+              AND NOT EXISTS ( SELECT 1 FROM  XST_SKU_LOC F                     
+             WHERE E.INTR_UPC_ID    = F.INTR_UPC_ID                             
+               AND  F.LOC_NBR       =  :XST00008-LOC-NBR                        
+               AND  F.BEG_TMST     <= CURRENT TIMESTAMP                         
+               AND (F.END_TMST      > CURRENT TIMESTAMP                         
+                OR  F.END_TMST    IS NULL))                                     
+           END-EXEC.                                                            
+                                                                                
+      *----------------------------------------------------------------         
+      *  USA IC COUNTS CURSOR WILL FETCH SKUS WITHIN A STYLE                    
+      *----------------------------------------------------------------         
+           EXEC SQL                                                             
+             DECLARE STYLE-CSR CURSOR FOR                                       
+             SELECT  C.SKU_NBR                                                  
+                    ,A.UNT_RTL_AMT                                              
+                    ,A.LOC_SKU_STAT_CDE                                         
+                    ,A.ORIG_CLR_DTE                                             
+                    ,A.INTR_UPC_ID                                              
+916792              ,A.LOC_NBR                                                  
+             FROM    XST_SKU         C                                          
+                    ,XST_SKU_LOC     A                                          
+             WHERE C.STYL_ID       = :XST00010-STYL-ID                          
+              AND (A.LOC_NBR       = :XST00008-LOC-NBR                          
+              AND  A.BEG_TMST     <= CURRENT TIMESTAMP                          
+              AND (A.END_TMST      > CURRENT TIMESTAMP                          
+               OR  A.END_TMST    IS NULL)                                       
+              AND  A.INTR_UPC_ID   = C.INTR_UPC_ID)                             
+C17705        AND  A.LOC_SKU_STAT_CDE NOT IN('30')                              
+             UNION                                                              
+             SELECT  C.SKU_NBR                                                  
+                    ,E.UNT_RTL_AMT                                              
+                    ,E.LOC_SKU_STAT_CDE                                         
+                    ,E.ORIG_CLR_DTE                                             
+                    ,E.INTR_UPC_ID                                              
+916792              ,E.LOC_NBR                                                  
+             FROM    XST_SKU         C                                          
+                    ,XST_SKU_LOC     E                                          
+             WHERE C.STYL_ID       = :XST00010-STYL-ID                          
+              AND (E.LOC_NBR       = 0                                          
+              AND  E.BEG_TMST     <= CURRENT TIMESTAMP                          
+              AND (E.END_TMST      > CURRENT TIMESTAMP                          
+               OR  E.END_TMST    IS NULL)                                       
+              AND  E.INTR_UPC_ID   = C.INTR_UPC_ID)                             
+C17705        AND  E.LOC_SKU_STAT_CDE NOT IN('30')                              
+              AND NOT EXISTS ( SELECT 1 FROM  XST_SKU_LOC F                     
+             WHERE E.INTR_UPC_ID    = F.INTR_UPC_ID                             
+               AND  F.LOC_NBR       =  :XST00008-LOC-NBR                        
+               AND  F.BEG_TMST     <= CURRENT TIMESTAMP                         
+               AND (F.END_TMST      > CURRENT TIMESTAMP                         
+                OR  F.END_TMST    IS NULL))                                     
+           END-EXEC.                                                            
+                                                                                
+      *----------------------------------------------------------------         
+      *  USA IC COUNTS CURSOR WILL FETCH SKUS WITHIN A GROUP CODE               
+      *----------------------------------------------------------------         
+           EXEC SQL                                                             
+             DECLARE GP-CDE-CSR CURSOR FOR                                      
+             SELECT  C.SKU_NBR                                                  
+                    ,A.UNT_RTL_AMT                                              
+                    ,A.LOC_SKU_STAT_CDE                                         
+                    ,A.ORIG_CLR_DTE                                             
+                    ,A.INTR_UPC_ID                                              
+916792              ,A.LOC_NBR                                                  
+             FROM    XST_SKU         C                                          
+                    ,XST_SKU_LOC     A                                          
+             WHERE C.GP_CDE        = :XST00010-GP-CDE                           
+              AND (A.LOC_NBR       = :XST00008-LOC-NBR                          
+              AND  A.BEG_TMST     <= CURRENT TIMESTAMP                          
+              AND (A.END_TMST      > CURRENT TIMESTAMP                          
+               OR  A.END_TMST    IS NULL)                                       
+              AND  A.INTR_UPC_ID   = C.INTR_UPC_ID)                             
+C17705        AND  A.LOC_SKU_STAT_CDE NOT IN('30')                              
+             UNION                                                              
+             SELECT  C.SKU_NBR                                                  
+                    ,E.UNT_RTL_AMT                                              
+                    ,E.LOC_SKU_STAT_CDE                                         
+                    ,E.ORIG_CLR_DTE                                             
+                    ,E.INTR_UPC_ID                                              
+916792              ,E.LOC_NBR                                                  
+             FROM    XST_SKU         C                                          
+                    ,XST_SKU_LOC     E                                          
+             WHERE C.GP_CDE        = :XST00010-GP-CDE                           
+              AND (E.LOC_NBR       = :XST00008-LOC-NBR                          
+              AND  E.BEG_TMST     <= CURRENT TIMESTAMP                          
+              AND (E.END_TMST      > CURRENT TIMESTAMP                          
+               OR  E.END_TMST    IS NULL)                                       
+              AND  E.INTR_UPC_ID   = C.INTR_UPC_ID)                             
+C17705        AND  E.LOC_SKU_STAT_CDE NOT IN('30')                              
+              AND NOT EXISTS ( SELECT 1 FROM  XST_SKU_LOC F                     
+             WHERE E.INTR_UPC_ID    = F.INTR_UPC_ID                             
+               AND  F.LOC_NBR       =  :XST00008-LOC-NBR                        
+               AND  F.BEG_TMST     <= CURRENT TIMESTAMP                         
+               AND (F.END_TMST      > CURRENT TIMESTAMP                         
+                OR  F.END_TMST    IS NULL))                                     
+           END-EXEC.                                                            
+                                                                                
+CR9773*----------------------------------------------------------------         
+CR9773*  TEST CURSOR WILL FETCH MDSE GROUP ID FOR TEMP TABLE TESTT              
+CR9773*----------------------------------------------------------------         
+CR9773     EXEC SQL                                                             
+CR9773       DECLARE TEMP-CSR CURSOR FOR                                        
+CR9773       SELECT MAX(LAST_UPD_TMST) AS MAX_TMST                              
+CR9773              ,MDSE_GP_ID                                                 
+CR9773       FROM ICT_CNT_MDSE_GP                                               
+CR9773       GROUP BY  MDSE_GP_ID                                               
+CR9773                ,DEPT_NBR                                                 
+CR9773                ,MAJ_CL_NBR                                               
+CR9773                ,SUB_CL_NBR                                               
+CR9773                ,STYL_ID                                                  
+CR9773                ,SKU_NBR                                                  
+CR9773                ,GP_CDE                                                   
+CR9773                ,SKU_NBR                                                  
+CR9773     END-EXEC.                                                            
+                                                                                
+       PROCEDURE DIVISION.                                                      
+      ******************************************************************        
+      * 0000-MAIN-MODULE.                                              *        
+      *  ==> PROCESSES:                                                *        
+      *    - CONTROLS HIGHEST LEVEL FLOW OF PROGRAM                    *        
+      ******************************************************************        
+       0000-MAIN-MODULE.                                                        
+           MOVE '0000-MAIN-MODULE' TO PV-PARAGRAPH-NAME.                        
+           PERFORM 1000-INITIALIZATION.                                         
+                                                                                
+CR9773     PERFORM 1300-TEMP-TABLE-PROCESS                                      
+           PERFORM 7000-READ-CNT-STORE-EXP-FL.                                  
+           PERFORM 2000-PROCESS-COUNT-SKUS                                      
+             UNTIL PS-END-OF-INPUT-FILE.                                        
+           DISPLAY 'COUNT/LOC PROCESSING DONE'.                                 
+                                                                                
+           PERFORM 3000-EOJ-PROCESSING.                                         
+                                                                                
+           STOP RUN.                                                            
+                                                                                
+      ******************************************************************        
+      * 1000-INITIALIZATION.                                           *        
+      ******************************************************************        
+       1000-INITIALIZATION.                                                     
+           MOVE '1000-INITIALIZATION ' TO PV-PARAGRAPH-NAME.                    
+                                                                                
+           OPEN INPUT  CNT-STORE-EXP-FILE                                       
+                       CARDIN-CURR-DATE-FILE                                    
+                OUTPUT CNT-SKU-EXP-FILE.                                        
+                                                                                
+           PERFORM 1100-READ-CARDIN.                                            
+                                                                                
+           PERFORM 1200-SELECT-DATE.                                            
+           DISPLAY 'CURRENT   DATE -  ' CC-CURR-DATE.                           
+           DISPLAY 'COUNT EXECUTION DATE -  ' PV-CURRENT-DATE.                  
+                                                                                
+      ******************************************************************        
+      * READ CURRENT DATE CONTROL FILE RECORD.                                  
+      ******************************************************************        
+       1100-READ-CARDIN.                                                        
+                                                                                
+           READ CARDIN-CURR-DATE-FILE INTO CC-CARDIN                            
+             AT END                                                             
+                SET PS-EOF-CARDIN TO TRUE                                       
+           END-READ.                                                            
+                                                                                
+           IF PS-EOF-CARDIN                                                     
+               DISPLAY '** ICKUT086 ABEND **'                                   
+               DISPLAY '** CARDIN (CURR DATE) FILE IS EMPTY **'                 
+               MOVE +4003 TO ABEND-CODE                                         
+               CALL 'ILBOABN0' USING ABEND-CODE                                 
+           END-IF.                                                              
+                                                                                
+      *-------------------------------------------------------------            
+      * 1200-SELECT-DATE.                                                       
+      *      GET CURRENT DATE - SHCEDULER DATE + 1                              
+      *-------------------------------------------------------------            
+       1200-SELECT-DATE.                                                        
+                                                                                
+           INITIALIZE DPG51 DPG52 DPG53 DPG54 DPG55 DPG56                       
+           SET  DPG51-ACTUAL-CALENDAR-ONLY   TO TRUE                            
+           SET  DPG52-LK-DTE-ISO-FMT         TO TRUE                            
+           SET  DPG51-INCREMENT-DATE         TO TRUE                            
+           MOVE 1 TO DPG51-INCR-DECR-DAYS-9                                     
+           MOVE CC-CURR-DATE           TO DPG52-LK-DATE-INPUT                   
+           PERFORM 1500-FUTURE-OFFSET-DTE                                       
+           MOVE DPG55-DB2-ISO-DATE-FMT TO PV-CURRENT-DATE.                      
+                                                                                
+      *----------------------------------------------------------               
+      * 1500-FUTURE-OFFSET-DTE.                                                 
+      *     GETS THE FUTURE DATE.                                               
+      *----------------------------------------------------------               
+       1500-FUTURE-OFFSET-DTE.                                                  
+                                                                                
+           DISPLAY 'INPUT TO DATE OFFSET ' DPG52-LK-DATE-INPUT.                 
+                                                                                
+           CALL DP500-KOHLS-CALENDAR-ROUTINE USING DPG51 DPG52 DPG53            
+                                                   DPG54 DPG55 DPG56.           
+           EVALUATE TRUE                                                        
+               WHEN DPG54-NO-ERROR                                              
+                   DISPLAY 'DAYS AHEAD NEEDED: ' DPG51-INCR-DECR-DAYS-X         
+                   DISPLAY 'RETRIEVING FUTURE OFFSET DATE'                      
+               WHEN DPG54-SEVERE-ERROR                                          
+                   DISPLAY ' '                                                  
+                   DISPLAY '** ABEND ** IN ICKUT086'                            
+                   DISPLAY '** INVALID RETURN FROM CALENDAR ROUTINE'            
+                   DISPLAY '** CALLED BY 1500-FUTURE-OFFSET-DTE'                
+                   DISPLAY '** ERROR MESSAGE = '                                
+                                     DPG54-ERROR-MESSAGE                        
+                   DISPLAY '** DPG51 = ' DPG51                                  
+                   DISPLAY '** DPG52 = ' DPG52                                  
+                   DISPLAY '** DPG53 = ' DPG53                                  
+                   DISPLAY '** DPG54 = ' DPG54                                  
+                   DISPLAY '** DPG55 = ' DPG55                                  
+                   DISPLAY '** DPG56 = ' DPG56                                  
+                   MOVE '1500-FUTURE-OFFSET-DTE'                                
+                                                 TO PV-PARAGRAPH-NAME           
+                   MOVE 'ERROR VALIDATING INPUT DATE'                           
+                                 TO PV-DB2-OPERATION-ATTEMPTED                  
+                   MOVE +4013 TO ABEND-CODE                                     
+                   DISPLAY DPG54-ERROR-MESSAGE                                  
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+CR9773******************************************************************        
+CR9773* CREATE TEMPORARY TABLE TESTT                                            
+CR9773******************************************************************        
+CR9773 1300-TEMP-TABLE-PROCESS.                                                 
+CR9773     PERFORM 1310-CREATE-TEMP-TABLE                                       
+CR9773     PERFORM 1400-CREATE-INDEX-TABLE                                      
+CR9773     PERFORM 1600-OPEN-TEMP-CSR                                           
+CR9773     PERFORM 1700-FETCH-TEMP-CSR                                          
+CR9773       UNTIL PS-END-OF-TEMP-CSR                                           
+CR9773     PERFORM 1800-CLOSE-TEMP-CSR                                          
+CR9773     .                                                                    
+CR9773                                                                          
+CR9773******************************************************************        
+CR9773* CREATE TEMPORARY TABLE TESTT                                            
+CR9773******************************************************************        
+CR9773 1310-CREATE-TEMP-TABLE.                                                  
+CR9773                                                                          
+CR9773     MOVE '1300-CREATE-TEMP-TABLE' TO PV-PARAGRAPH-NAME.                  
+CR9773     EXEC SQL                                                             
+CR9773       DECLARE GLOBAL TEMPORARY TABLE SESSION.TESTT                       
+CR9773         ( MAX_TMST TIMESTAMP NOT NULL,                                   
+CR9773           MDSE_GP_ID INTEGER NOT NULL)                                   
+CR9773         ON COMMIT PRESERVE ROWS                                          
+243397         NOT LOGGED ON ROLLBACK DELETE ROWS                               
+CR9773     END-EXEC.                                                            
+CR9773                                                                          
+CR9773     EVALUATE TRUE                                                        
+CR9773       WHEN SQLCODE = 0                                                   
+CR9773         CONTINUE                                                         
+CR9773       WHEN OTHER                                                         
+CR9773         SET PS-PROCESS-STOP    TO TRUE                                   
+CR9773         DISPLAY '** ICKUT086 CREATE TEMP TABLE'                          
+CR9773                 ' HAD SQLCODE OF ' SQLCODE                               
+CR9773         PERFORM 9999-SQL-ABEND                                           
+CR9773     END-EVALUATE.                                                        
+CR9773                                                                          
+CR9773******************************************************************        
+CR9773* CREATE INDEX FOR TEMPORARY TABLE TESTT                                  
+CR9773******************************************************************        
+CR9773 1400-CREATE-INDEX-TABLE.                                                 
+CR9773                                                                          
+CR9773     MOVE '1400-CREATE-INDEX-TABLE' TO PV-PARAGRAPH-NAME.                 
+CR9773     EXEC SQL                                                             
+CR9773       CREATE UNIQUE INDEX SESSION.ITESTT0                                
+CR9773       ON SESSION.TESTT                                                   
+CR9773       (MAX_TMST  ASC,                                                    
+CR9773        MDSE_GP_ID  ASC)                                                  
+228316**     CLUSTER                                                            
+228316**     USING STOGROUP STGM000                                             
+228316**      PRIQTY   720                                                      
+228316**      SECQTY   720                                                      
+228316**      BUFFERPOOL BP2                                                    
+CR9773     END-EXEC.                                                            
+CR9773                                                                          
+CR9773     EVALUATE TRUE                                                        
+CR9773       WHEN SQLCODE = 0                                                   
+CR9773         CONTINUE                                                         
+CR9773       WHEN OTHER                                                         
+CR9773         SET PS-PROCESS-STOP    TO TRUE                                   
+CR9773         DISPLAY '** ICKUT086 CREATE TEMP INDEX TABLE'                    
+CR9773                 ' HAD SQLCODE OF ' SQLCODE                               
+CR9773         PERFORM 9999-SQL-ABEND                                           
+CR9773     END-EVALUATE.                                                        
+CR9773                                                                          
+CR9773******************************************************************        
+CR9773* OPEN THE TEMP-CSR                                                       
+CR9773******************************************************************        
+CR9773 1600-OPEN-TEMP-CSR.                                                      
+CR9773                                                                          
+CR9773     MOVE '1600-OPEN-TEMP-CSR' TO PV-PARAGRAPH-NAME.                      
+CR9773                                                                          
+CR9773     PERFORM                                                              
+CR9773         WITH TEST AFTER                                                  
+CR9773         VARYING PV-RETRIES                                               
+CR9773         FROM 1 BY 1                                                      
+CR9773         UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+CR9773                PS-PROCESS-STOP                    OR                     
+CR9773                SQLCODE = 0)                                              
+CR9773                                                                          
+CR9773           EXEC SQL                                                       
+CR9773              OPEN TEMP-CSR                                               
+CR9773           END-EXEC                                                       
+CR9773                                                                          
+CR9773         EVALUATE TRUE                                                    
+CR9773             WHEN SQLCODE = -904                                          
+CR9773             WHEN SQLCODE = -911                                          
+CR9773             WHEN SQLCODE = -913                                          
+CR9773                 CONTINUE                                                 
+CR9773             WHEN SQLCODE = 0                                             
+CR9773                 CONTINUE                                                 
+CR9773             WHEN OTHER                                                   
+CR9773                 SET PS-PROCESS-STOP TO TRUE                              
+CR9773         END-EVALUATE                                                     
+CR9773     END-PERFORM.                                                         
+CR9773                                                                          
+CR9773     IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+CR9773        PS-PROCESS-STOP                                                   
+CR9773         SET PS-PROCESS-STOP    TO TRUE                                   
+CR9773         DISPLAY '** ICKUT086 OPEN OF TEMP-CSR CURSOR'                    
+CR9773                 ' HAD SQLCODE OF ' SQLCODE                               
+CR9773         PERFORM 9999-SQL-ABEND                                           
+CR9773     END-IF.                                                              
+CR9773                                                                          
+CR9773******************************************************************        
+CR9773* FETCH THE TEMP-CSR                                                      
+CR9773******************************************************************        
+CR9773 1700-FETCH-TEMP-CSR.                                                     
+CR9773                                                                          
+CR9773     MOVE '1700-FETCH-TEMP-CSR' TO PV-PARAGRAPH-NAME.                     
+CR9773                                                                          
+CR9773     PERFORM                                                              
+CR9773         WITH TEST AFTER                                                  
+CR9773         VARYING PV-RETRIES                                               
+CR9773         FROM 1 BY 1                                                      
+CR9773         UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+CR9773                PS-PROCESS-STOP                   OR                      
+CR9773                SQLCODE = 0                       OR                      
+CR9773                SQLCODE = +100)                                           
+CR9773                                                                          
+CR9773           EXEC SQL                                                       
+CR9773              FETCH TEMP-CSR                                              
+CR9773              INTO  :ICT00016-LAST-UPD-TMST                               
+CR9773                   ,:ICT00016-MDSE-GP-ID                                  
+CR9773           END-EXEC                                                       
+CR9773                                                                          
+CR9773          EVALUATE TRUE                                                   
+CR9773              WHEN SQLCODE = -904                                         
+CR9773              WHEN SQLCODE = -911                                         
+CR9773              WHEN SQLCODE = -913                                         
+CR9773                  CONTINUE                                                
+CR9773              WHEN SQLCODE = ZERO                                         
+CR9773                  PERFORM 1710-INSERT-TESTT-TABLE                         
+CR9773              WHEN SQLCODE = +100                                         
+CR9773                  SET PS-END-OF-TEMP-CSR     TO TRUE                      
+CR9773              WHEN OTHER                                                  
+CR9773                  SET PS-PROCESS-STOP        TO TRUE                      
+CR9773          END-EVALUATE                                                    
+CR9773     END-PERFORM.                                                         
+CR9773                                                                          
+CR9773     IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+CR9773        PS-PROCESS-STOP                                                   
+CR9773         SET PS-PROCESS-STOP    TO TRUE                                   
+CR9773         DISPLAY '** ICKUT086 FETCH OF TEMP-CSR CURSOR'                   
+CR9773                 ' HAD SQLCODE OF ' SQLCODE                               
+CR9773         PERFORM 9999-SQL-ABEND                                           
+CR9773     END-IF.                                                              
+CR9773                                                                          
+CR9773******************************************************************        
+CR9773* INSERT RECORD INTO TEMP TABLE TESTT                                     
+CR9773******************************************************************        
+CR9773 1710-INSERT-TESTT-TABLE.                                                 
+CR9773                                                                          
+CR9773     MOVE '1710-INSERT-TESTT-TABLE' TO PV-PARAGRAPH-NAME.                 
+CR9773                                                                          
+CR9773     EXEC SQL                                                             
+CR9773       INSERT INTO SESSION.TESTT                                          
+CR9773       (MAX_TMST                                                          
+CR9773       ,MDSE_GP_ID)                                                       
+CR9773       VALUES                                                             
+CR9773       (:ICT00016-LAST-UPD-TMST                                           
+CR9773       ,:ICT00016-MDSE-GP-ID)                                             
+CR9773     END-EXEC.                                                            
+CR9773                                                                          
+CR9773     EVALUATE TRUE                                                        
+CR9773        WHEN SQLCODE = 0                                                  
+CR9773            CONTINUE                                                      
+CR9773        WHEN OTHER                                                        
+CR9773         SET PS-PROCESS-STOP    TO TRUE                                   
+CR9773         DISPLAY '** ICKUT086 INSERT INTO TESTT TABLE'                    
+CR9773                 ' HAD SQLCODE OF ' SQLCODE                               
+CR9773         PERFORM 9999-SQL-ABEND                                           
+CR9773     END-EVALUATE.                                                        
+CR9773                                                                          
+CR9773******************************************************************        
+CR9773* CLOSE THE TEMP-CSR                                                      
+CR9773******************************************************************        
+CR9773 1800-CLOSE-TEMP-CSR.                                                     
+CR9773                                                                          
+CR9773     MOVE '1800-CLOSE-TEMP-CSR' TO PV-PARAGRAPH-NAME.                     
+CR9773                                                                          
+CR9773     PERFORM                                                              
+CR9773         WITH TEST AFTER                                                  
+CR9773         VARYING PV-RETRIES                                               
+CR9773         FROM 1 BY 1                                                      
+CR9773         UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+CR9773                PS-PROCESS-STOP                    OR                     
+CR9773                SQLCODE = 0)                                              
+CR9773                                                                          
+CR9773           EXEC SQL                                                       
+CR9773              CLOSE TEMP-CSR                                              
+CR9773           END-EXEC                                                       
+CR9773                                                                          
+CR9773          EVALUATE TRUE                                                   
+CR9773             WHEN SQLCODE = -904                                          
+CR9773             WHEN SQLCODE = -911                                          
+CR9773             WHEN SQLCODE = -913                                          
+CR9773                 CONTINUE                                                 
+CR9773             WHEN SQLCODE = 0                                             
+CR9773                 CONTINUE                                                 
+CR9773             WHEN OTHER                                                   
+CR9773                 SET PS-PROCESS-STOP TO TRUE                              
+CR9773          END-EVALUATE                                                    
+CR9773     END-PERFORM.                                                         
+CR9773                                                                          
+CR9773     IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+CR9773        PS-PROCESS-STOP                                                   
+CR9773         SET PS-PROCESS-STOP    TO TRUE                                   
+CR9773         DISPLAY '** ICKUT086 CLOSE OF TEMP-CSR CURSOR'                   
+CR9773                 ' HAD SQLCODE OF ' SQLCODE                               
+CR9773         PERFORM 9999-SQL-ABEND                                           
+CR9773     END-IF.                                                              
+CR9773                                                                          
+      ******************************************************************        
+      * 2000-PROCESS-COUNT-SKUS.                                       *        
+      *  ==> FINDS ALL SKUS FOR EACH COUNT/LOCATION                    *        
+      ******************************************************************        
+       2000-PROCESS-COUNT-SKUS.                                                 
+           MOVE '2000-PROCESS-COUNT-SKUS' TO PV-PARAGRAPH-NAME.                 
+           MOVE ICRD052-CNT-STUP-ID TO ICT00015-CNT-STUP-ID                     
+                                       ICT00017-CNT-STUP-ID.                    
+           SET PS-MORE-COUNT-SKUS TO TRUE.                                      
+           PERFORM 8100-OPEN-CNT-GRP.                                           
+           PERFORM 8110-FETCH-CNT-GRP.                                          
+           PERFORM 2100-PROCESS-SKUS                                            
+             UNTIL PS-NO-MORE-COUNT-SKUS.                                       
+           PERFORM 8120-CLOSE-CNT-GRP.                                          
+           PERFORM 7000-READ-CNT-STORE-EXP-FL.                                  
+                                                                                
+                                                                                
+      ******************************************************************        
+      * 2100-PROCESS-SKUS.                                             *        
+      *  ==> FINDS ALL SKUS FOR FOR EACH GROUP SPECIFIED FOR A COUNT  *         
+      ******************************************************************        
+       2100-PROCESS-SKUS.                                                       
+           MOVE '2100-PROCESS-SKUS' TO PV-PARAGRAPH-NAME.                       
+           MOVE ICRD052-LOC-NBR TO XST00008-LOC-NBR.                            
+           IF PV-DEPT-IS-NOT-NULL                                               
+             AND PV-MAJ-CL-IS-NOT-NULL                                          
+             AND PV-SUB-CL-IS-NULL                                              
+               MOVE ICT00016-DEPT-NBR TO XST00013-DEPT-NBR                      
+               MOVE ICT00016-MAJ-CL-NBR TO XST00013-MAJ-CL-NBR                  
+               SET PS-MORE-MC-SKUS TO TRUE                                      
+               PERFORM 8300-OPEN-MAJ-CLS-CSR                                    
+               PERFORM 8310-FETCH-MAJ-CLS-CSR                                   
+               PERFORM                                                          
+                 UNTIL PS-NO-MORE-MC-SKUS                                       
+                 PERFORM 2110-CREATE-COUNTS                                     
+                 PERFORM 8310-FETCH-MAJ-CLS-CSR                                 
+               END-PERFORM                                                      
+                 PERFORM 8320-CLOSE-MAJ-CLS-CSR                                 
+           ELSE                                                                 
+           IF PV-DEPT-IS-NOT-NULL                                               
+             AND PV-MAJ-CL-IS-NOT-NULL                                          
+             AND PV-SUB-CL-IS-NOT-NULL                                          
+               MOVE ICT00016-DEPT-NBR TO XST00013-DEPT-NBR                      
+               MOVE ICT00016-MAJ-CL-NBR TO XST00013-MAJ-CL-NBR                  
+               MOVE ICT00016-SUB-CL-NBR TO XST00013-SUB-CL-NBR                  
+               SET PS-MORE-SC-SKUS TO TRUE                                      
+               PERFORM 8400-OPEN-SUB-CLS-CSR                                    
+               PERFORM 8410-FETCH-SUB-CLS-CSR                                   
+               PERFORM                                                          
+                 UNTIL PS-NO-MORE-SC-SKUS                                       
+                 PERFORM 2110-CREATE-COUNTS                                     
+                 PERFORM 8410-FETCH-SUB-CLS-CSR                                 
+               END-PERFORM                                                      
+               PERFORM 8420-CLOSE-SUB-CLS-CSR                                   
+           ELSE                                                                 
+           IF  PV-STYL-ID-IS-NOT-NULL                                           
+               MOVE ICT00016-STYL-ID  TO XST00010-STYL-ID                       
+               SET PS-MORE-STYLE-CSR TO TRUE                                    
+               PERFORM 8500-OPEN-STYLE-CSR                                      
+               PERFORM 8510-FETCH-STYLE-CSR                                     
+               PERFORM                                                          
+                 UNTIL PS-NO-MORE-STYLE-CSR                                     
+                 PERFORM 2110-CREATE-COUNTS                                     
+                 PERFORM 8510-FETCH-STYLE-CSR                                   
+               END-PERFORM                                                      
+               PERFORM 8520-CLOSE-STYLE-CSR                                     
+           ELSE                                                                 
+           IF  PV-GP-CDE-IS-NOT-NULL                                            
+               MOVE ICT00016-GP-CDE   TO XST00010-GP-CDE                        
+               SET PS-MORE-GP-CDE-CSR TO TRUE                                   
+               PERFORM 8600-OPEN-GP-CDE-CSR                                     
+               PERFORM 8610-FETCH-GP-CDE-CSR                                    
+               PERFORM                                                          
+                 UNTIL PS-NO-MORE-GP-CDE-CSR                                    
+                 PERFORM 2110-CREATE-COUNTS                                     
+                 PERFORM 8610-FETCH-GP-CDE-CSR                                  
+               END-PERFORM                                                      
+               PERFORM 8620-CLOSE-GP-CDE-CSR                                    
+           ELSE                                                                 
+           IF  PV-SKU-IS-NOT-NULL                                               
+             MOVE ICT00016-SKU-NBR   TO XST00010-SKU-NBR                        
+             MOVE ICRD052-LOC-NBR    TO XST00008-LOC-NBR                        
+             PERFORM 8900-CHECK-FOR-ACTIVE                                      
+CR9773       IF PS-SKU-FOUND                                                    
+                PERFORM 2110-CREATE-COUNTS                                      
+CR9773       END-IF                                                             
+           ELSE                                                                 
+               DISPLAY 'INVALID MDSE GROUPING - '                               
+                        ICRD052-CNT-STUP-ID  ' - '                              
+                        ICRD052-LOC-NBR      ' - '                              
+                        ICT00016-DEPT-NBR    ' - '                              
+                        PV-DEPT-NULL-IND     ' - '                              
+                        ICT00016-MAJ-CL-NBR  ' - '                              
+                        PV-MAJ-CL-NULL-IND   ' - '                              
+                        ICT00016-SUB-CL-NBR  ' - '                              
+                        PV-SUB-CL-NULL-IND   ' - '                              
+                        ICT00016-STYL-ID     ' - '                              
+                        PV-STYL-ID-NULL-IND  ' - '                              
+                        ICT00016-SKU-NBR     ' - '                              
+                        PV-SKU-NULL-IND      ' - '                              
+                        ICT00016-GP-CDE      ' - '                              
+                        PV-GP-CDE-NULL-IND   ' - '.                             
+           PERFORM 8110-FETCH-CNT-GRP.                                          
+                                                                                
+      ******************************************************************        
+      * 2110-CREATE-COUNTS                                             *        
+      *  ==> FORMAT AND WRITE COUNT RECORDS.                           *        
+      ******************************************************************        
+       2110-CREATE-COUNTS.                                                      
+           MOVE '2110-CREATE-COUNTS'   TO PV-PARAGRAPH-NAME.                    
+           MOVE XST00008-INTR-UPC-ID   TO PC054-INTR-UPC-ID.                    
+           MOVE ICRD052-LOC-NBR        TO PC054-LOC-NBR.                        
+           IF  ICRD052-EXCL-MDSE-IND NOT = 'Y'                                  
+             OR (ICRD052-EXCL-MDSE-IND = 'Y'                                    
+              AND XST00008-UNT-RTL-AMT > .03)                                   
+916792*      IF XST00008-LOC-SKU-STAT-CDE NOT = ('30' AND '25')                 
+916792       IF  XST00008-LOC-SKU-STAT-CDE = '30'                               
+916792       OR (XST00008-LOC-SKU-STAT-CDE = '25'                               
+916792       AND PV-LOC-NBR NOT = 0)                                            
+916792          ADD +1 TO DI-CLR-CNTR                                           
+916792       ELSE                                                               
+916792          PERFORM 7010-WRITE-CNT-SKU-EXP-FL                               
+916792          ADD +1 TO DI-ACT-CNTR                                           
+916792       END-IF                                                             
+916792       MOVE ZEROES TO PV-LOC-NBR                                          
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      * 3000-EOJ-PROCESSING.                                           *        
+      *  ==> PROCESSES:                                                *        
+      *    - CLOSE FILES                                               *        
+      *    - DISPLAYS PROCESSING TOTALS                                *        
+      *    - TAKES A FINAL COMMIT                                      *        
+      ******************************************************************        
+       3000-EOJ-PROCESSING.                                                     
+           MOVE '3000-EOJ-PROCESSING' TO PV-PARAGRAPH-NAME.                     
+                                                                                
+           CLOSE CNT-STORE-EXP-FILE                                             
+                 CARDIN-CURR-DATE-FILE                                          
+                 CNT-SKU-EXP-FILE.                                              
+                                                                                
+           PERFORM 9990-DISPLAY-CONTROL-INFO.                                   
+                                                                                
+                                                                                
+      *----------------------------------------------------------               
+      * 7000-READ-CNT-STORE-EXP-FL.                                             
+      *----------------------------------------------------------               
+       7000-READ-CNT-STORE-EXP-FL.                                              
+           MOVE '7000-READ-CNT-STORE-EXP-FL' TO PV-PARAGRAPH-NAME.              
+           READ CNT-STORE-EXP-FILE                                              
+             INTO ICRD052-IC-COUNTS-FILE                                        
+           AT END SET PS-END-OF-INPUT-FILE TO TRUE.                             
+                                                                                
+      *----------------------------------------------------------               
+      * 7010-WRITE-CNT-SKU-EXP-FL.                                              
+      *----------------------------------------------------------               
+       7010-WRITE-CNT-SKU-EXP-FL.                                               
+           MOVE '7010-WRITE-CNT-SKU-EXP-FL' TO PV-PARAGRAPH-NAME.               
+           WRITE CNT-SKU-EXP-REC                                                
+             FROM PC054-UPC-STORE-EXTRACT.                                      
+           INITIALIZE PC054-UPC-STORE-EXTRACT.                                  
+                                                                                
+      *----------------------------------------------------------               
+      * 8100-OPEN-CNT-GRP.                                                      
+      *      OPEN THE CURSOR OF COUNT GROUPS.                                   
+      *----------------------------------------------------------               
+       8100-OPEN-CNT-GRP.                                                       
+                                                                                
+           MOVE '8100-OPEN-CNT-GRP'  TO PV-PARAGRAPH-NAME.                      
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    OPEN CNT-GRP-CSR                                            
+                 END-EXEC                                                       
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 OPEN OF CNT-GRP CURSOR'                     
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8110-FETCH-CNT-GRP.                                                     
+      *      FETCH A COUNT GROUP ROW.                                           
+      *----------------------------------------------------------               
+       8110-FETCH-CNT-GRP.                                                      
+                                                                                
+           MOVE '8110-FETCH-CNT-GRP'  TO PV-PARAGRAPH-NAME.                     
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                   OR                      
+                      SQLCODE = 0                       OR                      
+                      SQLCODE = +100)                                           
+                                                                                
+                 EXEC SQL                                                       
+                    FETCH CNT-GRP-CSR                                           
+                    INTO  :ICT00016-DEPT-NBR:PV-DEPT-NULL-IND                   
+                         ,:ICT00016-MAJ-CL-NBR:PV-MAJ-CL-NULL-IND               
+                         ,:ICT00016-SUB-CL-NBR:PV-SUB-CL-NULL-IND               
+                         ,:ICT00016-STYL-ID:PV-STYL-ID-NULL-IND                 
+                         ,:ICT00016-SKU-NBR:PV-SKU-NBR-NULL-IND                 
+                         ,:ICT00016-GP-CDE:PV-GP-CDE-NULL-IND                   
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                    WHEN SQLCODE = -904                                         
+                    WHEN SQLCODE = -911                                         
+                    WHEN SQLCODE = -913                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = ZERO                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = +100                                         
+                        SET PS-NO-MORE-COUNT-SKUS TO TRUE                       
+                    WHEN OTHER                                                  
+                        SET PS-PROCESS-STOP        TO TRUE                      
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 FETCH OF CNT-GRP CURSOR'                    
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *-------------------------------------------------------------            
+      * 8120-CLOSE-CNT-GRP.                                                     
+      *      CLOSE THE COUNT GROUP CURSOR.                                      
+      *-------------------------------------------------------------            
+       8120-CLOSE-CNT-GRP.                                                      
+                                                                                
+           MOVE '8120-CLOSE-CNT-GRP'  TO PV-PARAGRAPH-NAME.                     
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    CLOSE CNT-GRP-CSR                                           
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 CLOSE OF CNT-GRP CURSOR'                    
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      *----------------------------------------------------------               
+      * 8300-OPEN-MAJ-CLS-CSR.                                                  
+      *      OPEN THE CURSOR OF IMMEDIATE COUNTS.                               
+      *----------------------------------------------------------               
+       8300-OPEN-MAJ-CLS-CSR.                                                   
+                                                                                
+           MOVE '8300-OPEN-MAJ-CLS-CSR'  TO PV-PARAGRAPH-NAME.                  
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    OPEN MAJ-CLS-CSR                                            
+                 END-EXEC                                                       
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 OPEN OF MAJ-CLS-CSR CURSOR'                 
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8310-FETCH-MAJ-CLS-CSR.                                                 
+      *      FETCH AN IMMEDIATE COUNT ROW.                                      
+      *----------------------------------------------------------               
+       8310-FETCH-MAJ-CLS-CSR.                                                  
+                                                                                
+           MOVE '8310-FETCH-MAJ-CLS-CSR'  TO PV-PARAGRAPH-NAME.                 
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                   OR                      
+                      SQLCODE = 0                       OR                      
+                      SQLCODE = +100)                                           
+                                                                                
+                 EXEC SQL                                                       
+                  FETCH MAJ-CLS-CSR                                             
+                  INTO  :XST00010-SKU-NBR                                       
+                       ,:XST00008-UNT-RTL-AMT                                   
+                       ,:XST00008-LOC-SKU-STAT-CDE                              
+                       ,:XST00008-ORIG-CLR-DTE:PV-ORIG-CLR-DTE-NULL-IND         
+                       ,:XST00008-INTR-UPC-ID                                   
+916792                 ,:PV-LOC-NBR                                             
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                    WHEN SQLCODE = -904                                         
+                    WHEN SQLCODE = -911                                         
+                    WHEN SQLCODE = -913                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = ZERO                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = +100                                         
+                        SET PS-NO-MORE-MC-SKUS    TO TRUE                       
+                    WHEN OTHER                                                  
+                        SET PS-PROCESS-STOP        TO TRUE                      
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 FETCH OF MAJ-CLS-CSR CURSOR'                
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *-------------------------------------------------------------            
+      * 8320-CLOSE-MAJ-CLS-CSR.                                                 
+      *      CLOSE THE MAJOR CLASS SKUS CURSOR.                                 
+      *-------------------------------------------------------------            
+       8320-CLOSE-MAJ-CLS-CSR.                                                  
+                                                                                
+           MOVE '8320-CLOSE-MAJ-CLS-CSR'  TO PV-PARAGRAPH-NAME.                 
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    CLOSE MAJ-CLS-CSR                                           
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 CLOSE OF MAJ-CLS-CSR CURSOR'                
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8400-OPEN-SUB-CLS-CSR.                                                  
+      *      OPEN THE CURSOR OF IMMEDIATE COUNTS.                               
+      *----------------------------------------------------------               
+       8400-OPEN-SUB-CLS-CSR.                                                   
+                                                                                
+           MOVE '8400-OPEN-SUB-CLS-CSR'  TO PV-PARAGRAPH-NAME.                  
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    OPEN SUB-CLS-CSR                                            
+                 END-EXEC                                                       
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 OPEN OF SUB-CLS-CSR CURSOR'                 
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8410-FETCH-SUB-CLS-CSR.                                                 
+      *      FETCH AN SUB CLASS SKU ROW.                                        
+      *----------------------------------------------------------               
+       8410-FETCH-SUB-CLS-CSR.                                                  
+                                                                                
+           MOVE '8410-FETCH-SUB-CLS-CSR'  TO PV-PARAGRAPH-NAME.                 
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                   OR                      
+                      SQLCODE = 0                       OR                      
+                      SQLCODE = +100)                                           
+                                                                                
+                 EXEC SQL                                                       
+                  FETCH SUB-CLS-CSR                                             
+                  INTO  :XST00010-SKU-NBR                                       
+                       ,:XST00008-UNT-RTL-AMT                                   
+                       ,:XST00008-LOC-SKU-STAT-CDE                              
+                       ,:XST00008-ORIG-CLR-DTE:PV-ORIG-CLR-DTE-NULL-IND         
+                       ,:XST00008-INTR-UPC-ID                                   
+916792                 ,:PV-LOC-NBR                                             
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                    WHEN SQLCODE = -904                                         
+                    WHEN SQLCODE = -911                                         
+                    WHEN SQLCODE = -913                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = ZERO                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = +100                                         
+                        SET PS-NO-MORE-SC-SKUS    TO TRUE                       
+                    WHEN OTHER                                                  
+                        SET PS-PROCESS-STOP        TO TRUE                      
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 FETCH OF SUB-CLS-CSR CURSOR'                
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *-------------------------------------------------------------            
+      * 8420-CLOSE-SUB-CLS-CSR.                                                 
+      *      CLOSE THE SUB CLASS SKUS CURSOR.                                   
+      *-------------------------------------------------------------            
+       8420-CLOSE-SUB-CLS-CSR.                                                  
+                                                                                
+           MOVE '8420-CLOSE-SUB-CLS-CSR'  TO PV-PARAGRAPH-NAME.                 
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    CLOSE SUB-CLS-CSR                                           
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 CLOSE OF SUB-CLS-CSR CURSOR'                
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8500-OPEN-STYLE-CSR.                                                    
+      *      OPEN THE CURSOR OF SKUS WITHIN A STYLE.                            
+      *----------------------------------------------------------               
+       8500-OPEN-STYLE-CSR.                                                     
+                                                                                
+           MOVE '8500-OPEN-STYLE-CSR'  TO PV-PARAGRAPH-NAME.                    
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    OPEN STYLE-CSR                                              
+                 END-EXEC                                                       
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 OPEN OF STYLE-CSR CURSOR'                   
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8510-FETCH-STYLE-CSR.                                                   
+      *      FETCH AN STYLE CLASS SKU ROW.                                      
+      *----------------------------------------------------------               
+       8510-FETCH-STYLE-CSR.                                                    
+                                                                                
+           MOVE '8510-FETCH-STYLE-CSR'  TO PV-PARAGRAPH-NAME.                   
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                   OR                      
+                      SQLCODE = 0                       OR                      
+                      SQLCODE = +100)                                           
+                                                                                
+                 EXEC SQL                                                       
+                  FETCH STYLE-CSR                                               
+                  INTO  :XST00010-SKU-NBR                                       
+                       ,:XST00008-UNT-RTL-AMT                                   
+                       ,:XST00008-LOC-SKU-STAT-CDE                              
+                       ,:XST00008-ORIG-CLR-DTE:PV-ORIG-CLR-DTE-NULL-IND         
+                       ,:XST00008-INTR-UPC-ID                                   
+916792                 ,:PV-LOC-NBR                                             
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                    WHEN SQLCODE = -904                                         
+                    WHEN SQLCODE = -911                                         
+                    WHEN SQLCODE = -913                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = ZERO                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = +100                                         
+                        SET PS-NO-MORE-STYLE-CSR TO TRUE                        
+                    WHEN OTHER                                                  
+                        SET PS-PROCESS-STOP        TO TRUE                      
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 FETCH OF STYLE-CSR CURSOR'                  
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *-------------------------------------------------------------            
+      * 8520-CLOSE-STYLE-CSR.                                                   
+      *      CLOSE THE STYLE SKUS CURSOR.                                       
+      *-------------------------------------------------------------            
+       8520-CLOSE-STYLE-CSR.                                                    
+                                                                                
+           MOVE '8520-CLOSE-STYLE-CSR'  TO PV-PARAGRAPH-NAME.                   
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    CLOSE STYLE-CSR                                             
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 CLOSE OF STYLE-CSR CURSOR'                  
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8600-OPEN-GP-CDE-CSR.                                                   
+      *      OPEN THE CURSOR OF SKUS WITHIN A GROUP CODE.                       
+      *----------------------------------------------------------               
+       8600-OPEN-GP-CDE-CSR.                                                    
+                                                                                
+           MOVE '8600-OPEN-GP-CDE-CSR'  TO PV-PARAGRAPH-NAME.                   
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    OPEN GP-CDE-CSR                                             
+                 END-EXEC                                                       
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 OPEN OF GP-CDE-CSR CURSOR'                  
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *----------------------------------------------------------               
+      * 8610-FETCH-GP-CDE-CSR.                                                  
+      *      FETCH AN GP-CDE-CSR SKU ROW.                                       
+      *----------------------------------------------------------               
+       8610-FETCH-GP-CDE-CSR.                                                   
+                                                                                
+           MOVE '8610-FETCH-GP-CDE-CSR' TO PV-PARAGRAPH-NAME.                   
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                   OR                      
+                      SQLCODE = 0                       OR                      
+                      SQLCODE = +100)                                           
+                                                                                
+                 EXEC SQL                                                       
+                  FETCH GP-CDE-CSR                                              
+                  INTO  :XST00010-SKU-NBR                                       
+                       ,:XST00008-UNT-RTL-AMT                                   
+                       ,:XST00008-LOC-SKU-STAT-CDE                              
+                       ,:XST00008-ORIG-CLR-DTE:PV-ORIG-CLR-DTE-NULL-IND         
+                       ,:XST00008-INTR-UPC-ID                                   
+916792                 ,:PV-LOC-NBR                                             
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                    WHEN SQLCODE = -904                                         
+                    WHEN SQLCODE = -911                                         
+                    WHEN SQLCODE = -913                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = ZERO                                         
+                        CONTINUE                                                
+                    WHEN SQLCODE = +100                                         
+                        SET PS-NO-MORE-GP-CDE-CSR TO TRUE                       
+                    WHEN OTHER                                                  
+                        SET PS-PROCESS-STOP        TO TRUE                      
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 FETCH OF GP-CDE-CSR CURSOR'                 
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *-------------------------------------------------------------            
+      * 8620-CLOSE-GP-CDE-CSR                                                   
+      *      CLOSE THE GP-CDE-CSR CURSOR.                                       
+      *-------------------------------------------------------------            
+       8620-CLOSE-GP-CDE-CSR.                                                   
+                                                                                
+           MOVE '8620-CLOSE-GP-CDE-CSR' TO PV-PARAGRAPH-NAME.                   
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRIES                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR              
+                      PS-PROCESS-STOP                    OR                     
+                      SQLCODE = 0)                                              
+                                                                                
+                 EXEC SQL                                                       
+                    CLOSE GP-CDE-CSR                                            
+                 END-EXEC                                                       
+                                                                                
+                EVALUATE TRUE                                                   
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       SET PS-PROCESS-STOP TO TRUE                              
+                END-EVALUATE                                                    
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRIES GREATER PC-MAXIMUM-RETRY-COUNT OR                      
+              PS-PROCESS-STOP                                                   
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 CLOSE OF GP-CDE-CSR CURSOR'                 
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *-------------------------------------------------------------            
+      * 8900-CHECK-FOR-ACTIVE.                                                  
+      *      CHECK TO SEE IF A SKU IS ACTIVE OR CLEARANCE                       
+      *-------------------------------------------------------------            
+       8900-CHECK-FOR-ACTIVE.                                                   
+           MOVE '8900-CHECK-FOR-ACTIVE' TO PV-PARAGRAPH-NAME.                   
+CR9773     SET PS-SKU-NOT-FOUND         TO TRUE                                 
+           EXEC SQL                                                             
+             SELECT  UNT_RTL_AMT                                                
+                    ,LOC_SKU_STAT_CDE                                           
+                    ,ORIG_CLR_DTE                                               
+                    ,A.INTR_UPC_ID                                              
+916792              ,A.LOC_NBR                                                  
+             INTO   :XST00008-UNT-RTL-AMT                                       
+                   ,:XST00008-LOC-SKU-STAT-CDE                                  
+                   ,:XST00008-ORIG-CLR-DTE:PV-ORIG-CLR-DTE-NULL-IND             
+                   ,:XST00008-INTR-UPC-ID                                       
+916792             ,:PV-LOC-NBR                                                 
+             FROM   XST_SKU_LOC  A                                              
+                   ,XST_SKU      B                                              
+             WHERE A.LOC_NBR     = :XST00008-LOC-NBR                            
+              AND  A.BEG_TMST   <= CURRENT TIMESTAMP                            
+              AND (A.END_TMST    > CURRENT TIMESTAMP                            
+               OR  A.END_TMST    IS NULL)                                       
+              AND  B.SKU_NBR     = :XST00010-SKU-NBR                            
+              AND  A.INTR_UPC_ID = B.INTR_UPC_ID                                
+           END-EXEC.                                                            
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = 0                                                  
+CR9773          SET PS-SKU-FOUND       TO TRUE                                  
+              WHEN SQLCODE = +100                                               
+                PERFORM 8905-CHECK-FOR-ACT-LOC-0                                
+              WHEN OTHER                                                        
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 CHECK FOR ACT SELECT'                       
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               DISPLAY 'KEY = ' XST00008-LOC-NBR ' - '                          
+                                XST00010-SKU-NBR                                
+               PERFORM 9999-SQL-ABEND                                           
+           END-EVALUATE.                                                        
+                                                                                
+      *-------------------------------------------------------------            
+      * 8905-CHECK-FOR-ACT-LOC-0                                                
+      *      CHECK TO SEE IF A SKU IS ACTIVE OR CLEARANCE                       
+      *-------------------------------------------------------------            
+       8905-CHECK-FOR-ACT-LOC-0.                                                
+           MOVE '8905-CHECK-FOR-ACT-LOC-0' TO PV-PARAGRAPH-NAME.                
+           EXEC SQL                                                             
+             SELECT  UNT_RTL_AMT                                                
+                    ,LOC_SKU_STAT_CDE                                           
+                    ,ORIG_CLR_DTE                                               
+                    ,A.INTR_UPC_ID                                              
+916792              ,A.LOC_NBR                                                  
+             INTO  :XST00008-UNT-RTL-AMT                                        
+                  ,:XST00008-LOC-SKU-STAT-CDE                                   
+                  ,:XST00008-ORIG-CLR-DTE:PV-ORIG-CLR-DTE-NULL-IND              
+                  ,:XST00008-INTR-UPC-ID                                        
+916792            ,:PV-LOC-NBR                                                  
+             FROM   XST_SKU_LOC   A                                             
+                   ,XST_SKU       B                                             
+             WHERE A.LOC_NBR     = 0                                            
+              AND  A.BEG_TMST   <= CURRENT TIMESTAMP                            
+              AND (A.END_TMST    > CURRENT TIMESTAMP                            
+               OR  A.END_TMST    IS NULL)                                       
+              AND  B.SKU_NBR     = :XST00010-SKU-NBR                            
+              AND  A.INTR_UPC_ID = B.INTR_UPC_ID                                
+           END-EXEC.                                                            
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = 0                                                  
+CR9773          SET PS-SKU-FOUND       TO TRUE                                  
+              WHEN SQLCODE = +100                                               
+                MOVE '99' TO XST00008-LOC-SKU-STAT-CDE                          
+                DISPLAY 'STORE/SKU NOT FOUND ' ICRD052-LOC-NBR                  
+                                       ' - '   XST00008-LOC-NBR                 
+                                       ' - '   XST00010-SKU-NBR                 
+              WHEN OTHER                                                        
+               SET PS-PROCESS-STOP    TO TRUE                                   
+               DISPLAY '** ICKUT086 CHECK FOR ACT SELECT'                       
+                       ' HAD SQLCODE OF ' SQLCODE                               
+               PERFORM 9999-SQL-ABEND                                           
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      * 9990-DISPLAY-CONTROL-INFO.                                     *        
+      *  ==> PROCESSES:                                                *        
+      *    - DISPLAYS CONTROL INFORMATION AT END OF JOB                *        
+      ******************************************************************        
+       9990-DISPLAY-CONTROL-INFO.                                               
+                                                                                
+           DISPLAY '********************************************'.              
+           DISPLAY '**** RUN STATISTICS FOR PROGRAM ICKUT086 ***'.              
+           DISPLAY '****'.                                                      
+           DISPLAY 'ACTIVE COUNTS PROCESSED    :' DI-ACT-CNTR.                  
+           DISPLAY 'CLEARRANCE COUNTS PROCESSED:' DI-CLR-CNTR.                  
+           DISPLAY '****'.                                                      
+           DISPLAY '**** RUN STATS END FOR PROGRAM ICKUT086  ***'.              
+           DISPLAY '********************************************'.              
+                                                                                
+      ******************************************************************        
+      * 9999-SQL-ABEND.                                                *        
+      *  ==> PROCESSES:                                                *        
+      *    - PERFORMS ABENDS AFTER UNEXPECTED SQLCODE                  *        
+      ******************************************************************        
+       9999-SQL-ABEND.                                                          
+                                                                                
+           MOVE SQLCODE TO PV-SQLCODE-DISPLAY.                                  
+                                                                                
+           DISPLAY '** ABEND **'.                                               
+           DISPLAY 'ICKUT086 - ABEND'.                                          
+           DISPLAY 'PARAGRAPH = ' PV-PARAGRAPH-NAME.                            
+           DISPLAY 'OPERATION = ' PV-DB2-OPERATION-ATTEMPTED.                   
+           DISPLAY 'SQL CODE  = ' PV-SQLCODE-DISPLAY.                           
+           PERFORM 9990-DISPLAY-CONTROL-INFO.                                   
+                                                                                
+           COPY DPPD004.                                                        
+                                                                                
+           MOVE +4013 TO ABEND-CODE.                                            
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    
+                                                                                

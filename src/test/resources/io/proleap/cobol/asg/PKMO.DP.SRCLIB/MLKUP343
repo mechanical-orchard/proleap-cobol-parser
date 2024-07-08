@@ -1,0 +1,2121 @@
+       IDENTIFICATION DIVISION.                                                 
+       PROGRAM-ID.    MLKUP343.                                                 
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+       DATE-WRITTEN.  09-01-2000.                                               
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      * MLKUP343 - M/L WEEKLY DEPT/CHANNEL CDE TABLE (TWKDPTC) RECALC   *       
+      *  THIS PROGRAM WILL RECALCULATE THE FOLLOWING FIELDS ON TWKDPTC **       
+      *    SHNK_RTL_AMT     - RETAIL SHRINK                            *        
+      *    END_INV_RTL_AMT  - RETAIL ENDING INVENTORY                  *        
+      *    CUM_MKUP_PCT     - CUM-TO-DATE MARKUP PERCENT               *        
+      *    END_INV_COST_AMT - COST ENDING INVENTORY                    *        
+      *    SLS_COST_AMT     - COST AS A BASIS OF SALES                 *        
+      *    GRO_MRGN_AMT     - GROSS MARGIN DOLLAR AMOUNT               *        
+      ******************************************************************        
+      *                                                                         
+      * THIS PGM WILL USE CHECKPOINT RESTART LOGIC TO DETERMINE IF AND          
+      * WHEN A CHECKPOINT IS TO BE TAKEN. A MINIMUM OF 10 SECONDS WILL          
+      * EXPIRE BEFORE A CHECKPOINT / COMMIT WILL BE PERFORMED.                  
+      * CONDITIONS ....                                                         
+      * NORMAL START - INITIAL CURSOR WILL SELECT ALL DEPT/CHNL ROWS            
+      *   WITH ACTIVITY - CHECK IF TIME FOR A COMMIT ONLY AFTER AN              
+      *   ENTIRE DEPT/CHNL COMBINATION HAS BEEN RECALCED FOR THE ENTIRE         
+      *   DATE RANGE.                                                           
+      * RESTART - SELECT CHECKPOINT RESTART KEY FROM TCKRSTINF, USE             
+      *   DEPT/CHNL KEY TO DETERMINE WHICH ROWS TO SELECT FOR RECALC -          
+      *   WHICH IS ALL ROWS >= TO LAST COMMITED DEPT/CHNL.                      
+      *                                                                         
+      *CHANGE HISTORY:                                                          
+      *   DATE       PGMR         DESCRIPTION                                   
+      *   02/04/01 - RONNA BUTZ - CHANGED PC-MAX-SEASON-WEEKS FROM              
+      *              A VALUE OF 27 TO A VALUE OF 28 TO HANDLE PROCESSING        
+      *              THE 53RD WEEK OF THE FISCAL YEAR.                          
+W02131*   02/13/01 - R.JANSSEN  - EXPANDED 'DATE-TABLE' OCCURS CONSTANT         
+W02131*              TO ALLOW FOR RECALCS SPANNING TWO SEASON'S WEEKS.          
+W02131*              INCREASE 'OCCURS 27 TIMES' TO 'OCCURS 32 TIMES'            
+W02151*   02/15/01 - R.JANSSEN  - PROBLEM WITH CALCULATED COLUMNS WHEN          
+W02151*              2 MONTHS AND 2 DIFFERENT SEASONS ARE OPN.                  
+W09051*   09/05/01 - R.JANSSEN  - TRIM I/O WHEN CALCING CHNL TBL SHRINK         
+W26603*   03/24/04 - D.THEEL    - ADDED WITH UR TO ALL SELECTS, REPLACED        
+W26603*              TSTR000 WITH XMT_LOC.  CHANGED WHERE CLAUSES TO USE        
+W26603*              HOST VARIABLES.                                            
+W26006*   02/24/05 - ERIN SEARL - REMOVE REFERENCES TO OBSOLETE STORE           
+W26006*                           TABLE.                                        
+W31475*   01/06/09 - COGNIZANT  - INTRODUCE MULTI-ROW FETCH - CHANGED AS        
+W31475*                           PART OF ML BATCH PERF TUNING PROJECT          
+      ******************************************************************        
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+       CONFIGURATION SECTION.                                                   
+       SOURCE-COMPUTER.        IBM-3090.                                        
+       OBJECT-COMPUTER.        IBM-3090.                                        
+       INPUT-OUTPUT SECTION.                                                    
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT WKDPTC-EXTR-FILE                                              
+               ASSIGN TO INP01.                                                 
+                                                                                
+       DATA DIVISION.                                                           
+       FILE SECTION.                                                            
+                                                                                
+       FD  WKDPTC-EXTR-FILE                                                     
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+                                                                                
+       01  WKDPTC-EXTR-REC             PIC X(04).                               
+                                                                                
+      ******************************************************************        
+       WORKING-STORAGE SECTION.                                                 
+      ******************************************************************        
+                                                                                
+W26603*01  WS-EDIT-STORE-ALPH          PIC X(03)  VALUE ZEROS.                  
+W26603*01  WS-EDIT-STORE-NUM REDEFINES                                          
+W26603*    WS-EDIT-STORE-ALPH          PIC 9(03).                               
+W31475 01  ROW-ID                              PIC S9(04) COMP VALUE 0.         
+  |    01  HOST-VARIABLES.                                                      
+  |        05  HV-WKSHNK-SUB-CL-NBR            PIC   X(2) VALUE SPACES          
+  |                                            OCCURS 100 TIMES.                
+  |        05  HV-WKSHNK-STR-NBR               PIC  S9(4) COMP VALUE 0          
+  |                                            OCCURS 100 TIMES.                
+  |        05  HV-WKSHNK-SHNK-RTL-AMT   PIC  S9(11)V9(2) COMP-3 VALUE 0         
+W31475                                         OCCURS 100 TIMES.                
+                                                                                
+       01  ABEND-CODE                  PIC S9(04)  VALUE ZERO COMP SYNC.        
+                                                                                
+       01  PA-PROGRAM-ACCUMULATORS.                                             
+           05  PA-COMMIT-COUNT                 PIC  9(09) VALUE ZEROES.         
+           05  PA-INSERT-COUNT                 PIC  9(09) VALUE ZEROES.         
+           05  PA-UPDATE-COUNT                 PIC  9(09) VALUE ZEROES.         
+           05  PA-EXTRACT-RECS-READ            PIC  9(09) VALUE ZEROES.         
+                                                                                
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-EOF-EXTR-FILE-SW             PIC X(01) VALUE 'N'.             
+               88  PS-EOF-EXTR-FILE                      VALUE 'Y'.             
+           05  PS-EOF-EXTR-FILE2-SW            PIC X(01) VALUE 'N'.             
+               88  PS-EOF-EXTR-FILE2                     VALUE 'Y'.             
+           05  PS-CONTROL-TABLE-EMPTY-SW       PIC X     VALUE 'N'.             
+               88  PS-EMPTY-CONTROL-TABLE                VALUE 'Y'.             
+           05  PS-FIRST-TIME-SW                PIC X     VALUE 'N'.             
+               88  PS-FIRST-TIME-THRU                    VALUE 'Y'.             
+           05  PS-FIRST-COMMIT-SW              PIC X     VALUE 'N'.             
+               88  PS-FIRST-COMMIT                       VALUE 'Y'.             
+           05  PS-LOAD-DATE-TABLE-SW           PIC X     VALUE 'N'.             
+               88  PS-DATE-TABLE-LOADED                  VALUE 'Y'.             
+           05  PS-SEA-LOAD-DATE-TABLE-SW       PIC X     VALUE 'N'.             
+               88  PS-SEA-DATE-TABLE-LOADED              VALUE 'Y'.             
+           05  PS-SEASON-DATE-TABLE-SW         PIC X     VALUE 'N'.             
+               88  PS-SEASON-DATE-TABLE-LOADED           VALUE 'Y'.             
+               88  PS-SEASON-DATE-TAB-NOT-LOADED         VALUE 'N'.             
+           05  PS-TABLE-PROCESSING-SW          PIC X     VALUE 'N'.             
+               88  PS-TABLE-PROCESSED                    VALUE 'Y'.             
+           05  PS-CURR-WEEK-SW                 PIC X     VALUE 'N'.             
+               88  PS-CURR-WEEK-ROW-NOT-FOUND            VALUE 'Y'.             
+           05  PS-PREV-WEEK-ROW-SW             PIC X     VALUE 'N'.             
+               88  PS-PREV-WEEK-ROW-NOT-FOUND            VALUE 'Y'.             
+           05  PS-CARRY-FORWARD-SW             PIC X     VALUE 'N'.             
+               88  PS-PFM-INV-DOLLARS-FOUND              VALUE 'Y'.             
+           05  PS-PREV-SEASON-INV-SW           PIC X     VALUE 'N'.             
+               88  PS-NO-PREV-SEASONAL-INV               VALUE 'Y'.             
+           05  PS-CURRENT-PURCH-COST-SW        PIC X     VALUE 'N'.             
+               88  PS-NO-CURRENT-PURCH-COSTS             VALUE 'Y'.             
+           05  PS-RESTART-ROW-SW               PIC X     VALUE 'N'.             
+               88  PS-RESTART-KEY-ESTABLISHED            VALUE 'Y'.             
+           05  PS-COMMIT-TAKEN-SW              PIC X     VALUE 'N'.             
+               88  PS-COMMIT-TAKEN                       VALUE 'Y'.             
+           05  PS-CURR-SEASON-WKS-SW           PIC X     VALUE 'N'.             
+               88  PS-END-OF-CURR-SEASON-WKS             VALUE 'Y'.             
+               88  PS-NOT-END-OF-CURR-SEASON-WKS         VALUE 'N'.             
+           05  PS-SEASON-WK-SW                 PIC X     VALUE 'N'.             
+               88  PS-SEASON-WK-FOUND                    VALUE 'Y'.             
+               88  PS-SEASON-WK-NOT-FOUND                VALUE 'N'.             
+W26603     05  PS-XMTLOC-DONE-SW               PIC X     VALUE 'N'.             
+W26603         88  XMTLOC-PROCESS-COMPLETE               VALUE 'Y'.             
+           05  PS-TWKSHNK-DONE-SW              PIC X     VALUE 'N'.             
+               88  TWKSHNK-PROCESS-COMPLETE              VALUE 'Y'.             
+                                                                                
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-JOB-NAME             PIC  X(06)    VALUE 'MLK396'.            
+           05  PC-PROGRAM-NAME         PIC  X(08)    VALUE 'MLKUP343'.          
+           05  PC-MAX-SEASON-WEEKS     PIC  S9(4)    VALUE +28  COMP.           
+                                                                                
+       01  PE-PROGRAM-ERROR-MESSAGES.                                           
+           05  PE-MSG-01                       PIC X(30) VALUE                  
+                'INSPECT WHERE CLAUSE VARIABLE'.                                
+           05  PE-MSG-02                       PIC X(30) VALUE                  
+                'DB2 SELECT ATTEMPTED         '.                                
+           05  PE-MSG-03                       PIC X(30) VALUE                  
+                'ATTEMPTING TO OPEN DB2 CURSOR'.                                
+           05  PE-MSG-04                       PIC X(30) VALUE                  
+                'ATTEMPT TO FETCH CURSOR ROW  '.                                
+           05  PE-MSG-05                       PIC X(30) VALUE                  
+                'ATTEMPT TO CLOSE DB2 CURSOR  '.                                
+           05  PE-MSG-06                       PIC X(30) VALUE                  
+                'ERROR ON UPDATE OF TWKDPTC    '.                               
+           05  PE-MSG-07                       PIC X(30) VALUE                  
+                'ERROR IN SELECT - TCKRSTCNTL '.                                
+           05  PE-MSG-08                       PIC X(30) VALUE                  
+                'UPDATE WORK_STRG - TCKRSTINF '.                                
+           05  PE-MSG-09                       PIC X(30) VALUE                  
+                'PGM ABEND DURING A COMMIT    '.                                
+           05  PE-MSG-10                       PIC X(30) VALUE                  
+                'UPDATE OF TCKRSTCNTL FAILED  '.                                
+           05  PE-MSG-11                       PIC X(30) VALUE                  
+                'ERROR IN SELECT - TCKRSTINF  '.                                
+           05  PE-MSG-12                       PIC X(30) VALUE                  
+                'UNABLE TO OBTAIN TIMESTAMP   '.                                
+           05  PE-MSG-13                       PIC X(30) VALUE                  
+                'SHRINK NOT FND FOR DEPT/DATE '.                                
+           05  PE-MSG-14                       PIC X(30) VALUE                  
+                'ERROR ON ''INSERT'' TO TWKDPTC'.                               
+           05  PE-MSG-15                       PIC X(30) VALUE                  
+                'CURRENT DATE LIMIT IS 27 WKS.'.                                
+           05  PE-MSG-17                       PIC X(30) VALUE                  
+                'ERROR IN PFW WK NBR - DTATTR.'.                                
+           05  PE-MSG-18                       PIC X(30) VALUE                  
+                'ERR PREV SEA WK NBR - DTATTR.'.                                
+           05  PE-MSG-20                       PIC X(30) VALUE                  
+                'ERR IN OPN SEA MTH - TDTATTR.'.                                
+           05  PE-MSG-21                       PIC X(30) VALUE                  
+                'ERR IN FETCH SEA MTH - DTATTR'.                                
+           05  PE-MSG-22                       PIC X(30) VALUE                  
+                'ERROR IN NBR OF SEAONS      .'.                                
+           05  PE-MSG-23                       PIC X(30) VALUE                  
+                'ERROR IN CLOS SEA MTH - DTAT.'.                                
+       01  MISC.                                                                
+           05  MISC-HOLD-DEPT                  PIC X(03)  VALUE SPACES.         
+      *                                                                         
+       01  PROGRAM-VARIABLES.                                                   
+           05  PV-TWKDPTC-UPDATE-VARIABLES.                                     
+      * THESE VARIABLES WILL UPDATE CURRENT TWKDPTC ROW *****************       
+               10  PV-SHNK-RTL-AMT             PIC  S9(11)V9(2) COMP-3.         
+               10  PV-SHNK-RTL-AMT-V           PIC  S9(11)V9(2) COMP-3.         
+               10  PV-SHNK-RTL-AMT-P           PIC  S9(11)V9(2) COMP-3.         
+               10  PV-END-INV-RTL-AMT          PIC  S9(11)V9(2) COMP-3.         
+               10  PV-CUM-MKUP-PCT             PIC  S9(4)V9(7)  COMP-3.         
+               10  PV-CUM-MKUP-PCT-MAX         PIC  S9(9)V9(7)  COMP-3.         
+               10  PV-END-INV-COST-AMT         PIC  S9(11)V9(2) COMP-3.         
+               10  PV-SLS-COST-AMT             PIC  S9(11)V9(2) COMP-3.         
+               10  PV-GRO-MRGN-AMT             PIC  S9(11)V9(2) COMP-3.         
+                                                                                
+           05  PV-SEASON-TO-DATE-CSR-VAR.                                       
+               10  PV-WKDPTC-PLU-RTL-AMT       PIC  S9(11)V9(2) COMP-3.         
+               10  PV-WKDPTC-RGST-RTL-AMT      PIC  S9(11)V9(2) COMP-3.         
+               10  PV-WKDPTC-UMTCH-RTL-AMT     PIC  S9(11)V9(2) COMP-3.         
+               10  PV-WKDPTC-BYR-RTL-AMT       PIC  S9(11)V9(2) COMP-3.         
+               10  PV-WKDPTC-STR-RTL-AMT       PIC  S9(11)V9(2) COMP-3.         
+               10  PV-WKDPTC-RCPT-RTL-AMT      PIC  S9(11)V9(2) COMP-3.         
+               10  PV-WKDPTC-RCPT-NET-COST-AMT PIC  S9(11)V9(2) COMP-3.         
+               10  PV-WKDPTC-PADJ-RTL-AMT      PIC  S9(11)V9(2) COMP-3.         
+               10  PV-WKDPTC-PADJ-NET-COST-AMT PIC  S9(11)V9(2) COMP-3.         
+               10  PV-WKDPTC-PADJ-FRGT-COST-AMT PIC  S9(11)V9(2) COMP-3.        
+               10  PV-WKDPTC-MKUP-RTL-AMT      PIC  S9(11)V9(2) COMP-3.         
+               10  PV-WKDPTC-XFER-NET-AMT      PIC  S9(11)V9(2) COMP-3.         
+               10  PV-WKDPTC-XFER-IN-RTL-AMT   PIC  S9(11)V9(2) COMP-3.         
+               10  PV-WKDPTC-XFER-OUT-RTL-AMT  PIC  S9(11)V9(2) COMP-3.         
+           05  PV-CURR-WEEK-COST-VAR.                                           
+               10  PV-CURR-WEEK-RCPT-NET-COST PIC   S9(11)V9(2) COMP-3.         
+               10  PV-CURR-WEEK-PADJ-NET-COST PIC   S9(11)V9(2) COMP-3.         
+           05  PV-PREV-WEEK-VAR.                                                
+               10  PV-PREV-WEEK-END-INV-RTL    PIC  S9(11)V9(2) COMP-3.         
+               10  PV-PREV-WEEK-END-INV-COST   PIC  S9(11)V9(2) COMP-3.         
+           05  PV-PREV-SEASON-VAR.                                              
+               10  PV-PREV-SEASON-PURCH-RETAIL PIC  S9(11)V9(2) COMP-3.         
+               10  PV-PREV-SEASON-PURCH-COST   PIC  S9(11)V9(2) COMP-3.         
+           05  PV-CUM-TO-DATE-VARIABLES.                                        
+               10  PV-CUM-TO-DATE-PURCH-RETAIL PIC  S9(11)V9(2) COMP-3.         
+               10  PV-CUM-TO-DATE-PURCH-COST   PIC  S9(11)V9(2) COMP-3.         
+               10  PV-CUM-SEASON-MKUP          PIC  S9(11)V9(2) COMP-3.         
+      *                                                                         
+       01  PV-VARIABLE-FIELDS.                                                  
+           05  PV-SUB1                         PIC S9(04) VALUE +0 COMP.        
+           05  PV-SB1                          PIC S9(04) VALUE +0 COMP.        
+           05  PV-SEA-SUB                      PIC S9(04) VALUE +0 COMP.        
+           05  PV-MAX-DATE-SUB                 PIC S9(04) VALUE +0 COMP.        
+           05  PV-HOLD-ROW.                                                     
+               10  PV-HOLD-DEPT-NBR            PIC  X(03) VALUE SPACES.         
+               10  PV-HOLD-CHNL-CDE            PIC  X(01) VALUE SPACE.          
+           05  PV-HOLD-DATE                    PIC  X(10) VALUE SPACES.         
+           05  PV-HOLD-PFW-WK-NBR              PIC  X(02) VALUE SPACES.         
+           05  PV-HOLD-PFW-END-DTE             PIC  X(10) VALUE SPACES.         
+           05  PV-HOLD-MONTH-FIRST-WEEK        PIC  X(10) VALUE SPACES.         
+           05  PV-HOLD-PFM-END-DTE             PIC  X(10) VALUE SPACES.         
+           05  PV-TEMP-PFW-END-DTE             PIC  X(10) VALUE SPACES.         
+           05  PV-HOLD-SEA-BEG-DTE             PIC  X(10) VALUE SPACES.         
+           05  PV-TEMP-SEA-BEG-DTE             PIC  X(10) VALUE SPACES.         
+           05  PV-HOLD-PREV-SEA-WK-NBR         PIC  X(02) VALUE SPACES.         
+           05  PV-TEMP-PREV-SEA-WK-NBR         PIC  X(02) VALUE SPACES.         
+           05  PV-HOLD-PREV-SEA-END-DTE        PIC  X(10) VALUE SPACES.         
+           05  PV-TEMP-PREV-SEA-END-DTE        PIC  X(10) VALUE SPACES.         
+           05  PV-HOLD-OPN-WK-END-DTE          PIC  X(10) VALUE SPACES.         
+           05  PV-HOLD-FSCL-WK-NBR             PIC  X(02) VALUE SPACES.         
+           05  PV-CURRENT-TIMESTAMP            PIC  X(26) VALUE SPACES.         
+           05  PV-COMMIT-TIMESTAMP             PIC  X(26) VALUE SPACES.         
+           05  PV-PARAGRAPH-NAME               PIC  X(30) VALUE SPACES.         
+           05  PV-ABEND-MESSAGE                PIC  X(75) VALUE SPACES.         
+           05  PV-OPERATION-ATTEMPTED          PIC  X(30) VALUE SPACES.         
+           05  PV-XFER-NET                     PIC  S9(11)V99   COMP-3.         
+           05  PV-SEA-WK-DTE-DB2               PIC  X(10) VALUE SPACES.         
+           05  PV-SEA-WK-NBR-DB2               PIC  X(02) VALUE SPACES.         
+           05  PV-SEASON-WK-DTE                PIC  X(10) VALUE SPACES.         
+           05  PV-SEASON-WK-NBR                PIC  X(02) VALUE SPACES.         
+           05  PV-E-BUS-LOC-IND                PIC  X(01) VALUE SPACES.         
+           05  PV-ENT-ID-MKDN-AMT       PIC S9(11)V99 COMP-3 VALUE +0.          
+W09051     05  PV-STR-NDX              PIC S9(05) COMP-3 VALUE ZEROS.           
+      *                                                                         
+       01  SAVE-SEASON-VARIABLES.                                               
+           05  SSV-MKDN-PLU-RTL-AMT    PIC  S9(11)V99  COMP-3 VALUE +0.         
+           05  SSV-MKDN-RGST-PLU-AMT   PIC  S9(11)V99  COMP-3 VALUE +0.         
+           05  SSV-MKDN-UMTCH-RTL-AMT  PIC  S9(11)V99  COMP-3 VALUE +0.         
+           05  SSV-MKDN-BYR-RTL-AMT    PIC  S9(11)V99  COMP-3 VALUE +0.         
+           05  SSV-MKDN-STR-RTL-AMT    PIC  S9(11)V99  COMP-3 VALUE +0.         
+           05  SSV-XFER-IN-RTL-AMT     PIC  S9(11)V99  COMP-3 VALUE +0.         
+           05  SSV-XFER-OUT-RTL-AMT    PIC  S9(11)V99  COMP-3 VALUE +0.         
+           05  SSV-XFER-NET-AMT        PIC  S9(11)V99  COMP-3 VALUE +0.         
+           05  SSV-RCPT-RTL-AMT        PIC  S9(11)V99  COMP-3 VALUE +0.         
+           05  SSV-RCPT-NET-COST-AMT   PIC  S9(11)V99  COMP-3 VALUE +0.         
+           05  SSV-PADJ-RTL-AMT        PIC  S9(11)V99  COMP-3 VALUE +0.         
+           05  SSV-PADJ-NET-COST-AMT   PIC  S9(11)V99  COMP-3 VALUE +0.         
+           05  SSV-PADJ-FRGT-COST-AMT  PIC  S9(11)V99  COMP-3 VALUE +0.         
+           05  SSV-MKUP-RTL-AMT        PIC  S9(11)V99  COMP-3 VALUE +0.         
+                                                                                
+      *** TWKDPTC EXTRACT FILE                                                  
+       01  EXTR-RECORD.                                                         
+           05  EXTR-DEPT-NBR    PIC X(03)       VALUE SPACES.                   
+           05  EXTR-CHNL-CDE    PIC X(01)       VALUE SPACES.                   
+                                                                                
+      * REFORMAT CALENDAR NUMBER TO PIC 9 FIELD FOR USE AS A SUBSCRIPT          
+       01  REFORMAT-ALPHA-CALENDAR.                                             
+           05  FMT-CALENDAR-MO-NUMERIC          PIC 9(2)  VALUE ZEROES.         
+                                                                                
+      * TABLE TO CONTAIN DATE INFORMATION FOR ALL WEEKS RE-CALCULATED           
+       01  DATE-TABLE.                                                          
+W02131     05  CONTROL-DATES OCCURS 32 TIMES.                                   
+W02131**** 05  CONTROL-DATES OCCURS 27 TIMES.                                   
+               10  DT-OPN-WK-END-DTE            PIC X(10) VALUE SPACES.         
+               10  DT-CAL-MN-NBR                PIC X(02) VALUE SPACES.         
+               10  DT-PFM-END-DTE               PIC X(10) VALUE SPACES.         
+               10  DT-PFW-WK-NBR                PIC X(02) VALUE SPACES.         
+               10  DT-PFW-END-DTE               PIC X(10) VALUE SPACES.         
+               10  DT-SEA-BEG-DTE               PIC X(10) VALUE SPACES.         
+               10  DT-PREV-SEA-END-DTE          PIC X(10) VALUE SPACES.         
+               10  DT-PREV-SEA-WK-NBR           PIC X(02) VALUE SPACES.         
+               10  DT-FSCL-WK-NBR               PIC X(02) VALUE SPACES.         
+               10  DT-FSCL-YR-NBR               PIC X(04) VALUE SPACES.         
+W02131         10  DT-SEA-WK-INFO  OCCURS 32 TIMES.                             
+W02131******   10  DT-SEA-WK-INFO  OCCURS 27 TIMES.                             
+                   15  DT-SEA-WK-DTE            PIC X(10) VALUE SPACES.         
+                   15  DT-SEA-WK-NBR            PIC X(02) VALUE SPACES.         
+                                                                                
+W09051* TABLE TO CONTAIN INFORMATION ON THE STORES..                            
+  |    01  WS-STORE-TABLE.                                                      
+  |        05  WS-STORE-TABLE-ELEMENTS   OCCURS 9999 TIMES.                     
+  |            10  WS-E-BUS-LOC-IND      PIC X(01) VALUE SPACES.                
+W09051                                                                          
+      ******************************************************************        
+      *  WEEKLY SHRINKAGE TABLE                                                 
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TWKSHNK                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  COMMUNICATION AREAS FOR DB2                                            
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  M/L WEEKLY DEPARTMENT/CHANNEL CODE TABLE                               
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TWKDPTC                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      * M/L DATE TABLE AND CURRENT OPEN FISCAL DATE INFO *                      
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TDTATTR                                                  
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TMLCNTL                                                  
+           END-EXEC.                                                            
+      *                                                                         
+      ******************************************************************        
+      *CHECKPOINT RESTART CONTROL AND INFORMATION TABLES *                      
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TCKRSTCN                                                 
+           END-EXEC.                                                            
+      *                                                                         
+           EXEC SQL                                                             
+               INCLUDE TCKRSTIN                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  XMT LOC TABLE DESCRIPTION                                              
+      ******************************************************************        
+W26603     EXEC SQL                                                             
+W26603         INCLUDE XMT00001                                                 
+W26603     END-EXEC.                                                            
+W26603*****************************************************************         
+W26603* XMTLOC CURSOR FOR SHRINK CALCULATIONS.                                  
+W26603******************************************************************        
+W26603     EXEC SQL                                                             
+W26603         DECLARE XMTLOC_CURSOR CURSOR FOR                                 
+W26603           SELECT LOC_NBR,                                                
+W26603                  VALUE(E_BUS_IND,'N')                                    
+W26603           FROM XMT_LOC                                                   
+W26603           FOR FETCH ONLY                                                 
+W26603           WITH UR                                                        
+W26603    END-EXEC                                                              
+      ******************************************************************        
+      * WEEKS TO BE PROCESSED - ALL WEEKS FOR THE CURRENT MONTH                 
+      ******************************************************************        
+           EXEC SQL                                                             
+               DECLARE FISCAL_DATE_CSR CURSOR FOR                               
+                SELECT  DISTINCT FSCL_WK_END_DTE                                
+                  FROM  TDTATTR                                                 
+                 WHERE FSCL_WK_END_DTE BETWEEN                                  
+                                            :PV-HOLD-MONTH-FIRST-WEEK           
+                                        AND :MLCNTL-MXPSTG-FSCL-WK-DTE          
+                 ORDER BY FSCL_WK_END_DTE                                       
+                 FOR FETCH ONLY                                                 
+W26603           WITH UR                                                        
+           END-EXEC.                                                            
+      *                                                                         
+      ******************************************************************        
+      * WEEKS TO BE PROCESSED - ALL DATES IN THE CURRENT SEASON                 
+      ******************************************************************        
+           EXEC SQL                                                             
+               DECLARE SEASON_DATE_CSR CURSOR FOR                               
+                SELECT  DISTINCT FSCL_WK_END_DTE                                
+                                ,FSCL_WK_NBR                                    
+                  FROM  TDTATTR                                                 
+                 WHERE FSCL_WK_END_DTE BETWEEN                                  
+                                            :PV-TEMP-SEA-BEG-DTE                
+                                        AND :PV-HOLD-DATE                       
+                 ORDER BY FSCL_WK_END_DTE                                       
+                 FOR FETCH ONLY                                                 
+W26603           WITH UR                                                        
+           END-EXEC.                                                            
+      *                                                                         
+      ******************************************************************        
+      * WEEKLY SHRINK TABLE CURSOR.                                             
+      ******************************************************************        
+           EXEC SQL                                                             
+             DECLARE SHRINK_CURSOR CURSOR                                       
+W31475         WITH ROWSET POSITIONING FOR                                      
+W31475*        SELECT FSCL_WK_END_DTE,                                          
+W31475*               DEPT_NBR,                                                 
+W31475         SELECT SUB_CL_NBR,                                               
+                      STR_NBR,                                                  
+                      SHNK_RTL_AMT                                              
+               FROM TWKSHNK                                                     
+               WHERE FSCL_WK_END_DTE = :PV-HOLD-OPN-WK-END-DTE                  
+                 AND DEPT_NBR = :PV-HOLD-DEPT-NBR                               
+W26603           WITH UR                                                        
+           END-EXEC.                                                            
+      *                                                                         
+      ******************************************************************        
+      * CHECKPOINT RESTART VARIABLES                                   *        
+      ******************************************************************        
+       01  CR-CHECKPOINT-RESTART-AREA.                                          
+           05  CR-AREA-LEN                  PIC S9(04) VALUE +65  COMP.         
+           05  CR-CHECKPOINT-RESTART-VAR.                                       
+               10  CR-PREV-DTL-KEY          PIC  X(18)  VALUE SPACES.           
+               10  FILLER REDEFINES CR-PREV-DTL-KEY.                            
+                   15  CR-FISCAL-WK-END-DTE PIC  X(10).                         
+                   15  FILLER               PIC  X(01).                         
+                   15  CR-FISCAL-WK-NBR     PIC  X(02).                         
+                   15  FILLER               PIC  X(01).                         
+                   15  CR-DEPT-CHNL-KEY.                                        
+                       20  CR-DEPT-NBR      PIC  X(03).                         
+                       20  CR-CHNL-CDE      PIC  X(01).                         
+               10  FILLER                   PIC  X(01) VALUE SPACES.            
+               10  CR-TWKDPTC-UPDATE-COUNT  PIC  9(09) VALUE ZEROES.            
+               10  FILLER                   PIC  X(01) VALUE SPACES.            
+               10  CR-TWKDPTC-INSERT-COUNT  PIC  9(09) VALUE ZEROES.            
+               10  FILLER                   PIC  X(01) VALUE SPACES.            
+               10  CR-TWKDPTC-COMMIT-COUNT  PIC  9(09) VALUE ZEROES.            
+               10  FILLER                   PIC  X(01) VALUE SPACES.            
+               10  CR-TWKDPTC-INPUT-COUNT   PIC  9(09) VALUE ZEROES.            
+           EJECT                                                                
+      *                                                                         
+      ****************************************************                      
+      *  ERROR MESSAGE AREA FOR DB2                      *                      
+      ****************************************************                      
+           COPY DPWS004.                                                        
+                                                                                
+      ******************************************************************        
+       PROCEDURE DIVISION.                                                      
+      ******************************************************************        
+                                                                                
+       0000-MAIN-MODULE.                                                        
+                                                                                
+           PERFORM 1000-INITIALIZATION.                                         
+                                                                                
+           PERFORM 2000-PROCESS-INPUT                                           
+                UNTIL PS-EOF-EXTR-FILE.                                         
+                                                                                
+           PERFORM 8000-EOJ-ROUTINE.                                            
+                                                                                
+           STOP RUN.                                                            
+                                                                                
+      ******************************************************************        
+      * 1000-INITIALIZATION.                                                    
+      * LOAD TABLE WITH WEEKS TO BE RECALCULATED - OPN_WK THRU MXPSTG           
+      * DETERMINE IF THIS IS A 'RESTART' (TCKRSTINF-CKPT-STAT-CODE = 9)         
+      ******************************************************************        
+      *                                                                         
+       1000-INITIALIZATION.                                                     
+      *                                                                         
+           PERFORM 7000-READ-CONTROL-TABLE.                                     
+           PERFORM 7025-PROCESS-CNTL-TBL.                                       
+      *                                                                         
+                                                                                
+           PERFORM 7650-INIT-CHECKPOINT-SELECT.                                 
+      *                                                                         
+           IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                                   
+                PERFORM 7700-SELECT-RESTART-INFO                                
+                MOVE TCKRSTINF-WORK-STRG-DESC-TEXT TO                           
+                                              CR-CHECKPOINT-RESTART-VAR         
+                MOVE CR-DEPT-CHNL-KEY     TO PV-HOLD-ROW                        
+                DISPLAY 'RESTART-LAST DEPT/CHNL COMMIT: ',                      
+                         ' DEPT:  ' CR-DEPT-NBR                                 
+                         ' CHANNEL: ' CR-CHNL-CDE                               
+                 DISPLAY '          '                                           
+                 DISPLAY '--------------------------------------------'         
+                 DISPLAY '          '                                           
+                MOVE CR-DEPT-NBR   TO PV-HOLD-DEPT-NBR                          
+                MOVE CR-CHNL-CDE   TO PV-HOLD-CHNL-CDE                          
+           ELSE                                                                 
+               SET PS-FIRST-COMMIT TO TRUE                                      
+               INITIALIZE CR-CHECKPOINT-RESTART-VAR                             
+      *                                                                         
+               DISPLAY 'COMMITS WILL BE TAKEN EVERY ',                          
+                                 TCKRSTCNTL-CKPT-FRQNCY-QTY, ' SECONDS.'        
+               PERFORM 7600-GET-COMMIT-TIMESTAMP                                
+           END-IF.                                                              
+      *                                                                         
+           SET PS-FIRST-TIME-THRU TO TRUE.                                      
+           INITIALIZE PA-PROGRAM-ACCUMULATORS.                                  
+      *                                                                         
+           OPEN INPUT WKDPTC-EXTR-FILE.                                         
+                                                                                
+      *    **************************************************                   
+      *    **  THE INPUT EXTRACT FILE IS THE DRIVING FORCE                      
+      *    **  IN THIS PROGRAM.                                                 
+      *    **************************************************                   
+           IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                                   
+               PERFORM 4000-READ-EXTR-FILE                                      
+                   UNTIL                                                        
+                   (PA-EXTRACT-RECS-READ = CR-TWKDPTC-INPUT-COUNT)              
+                    OR (PS-EOF-EXTR-FILE)                                       
+           ELSE                                                                 
+               PERFORM 4000-READ-EXTR-FILE                                      
+           END-IF.                                                              
+                                                                                
+           MOVE EXTR-DEPT-NBR TO MISC-HOLD-DEPT.                                
+           DISPLAY 'PROCESSING DEPT: ' MISC-HOLD-DEPT.                          
+      *                                                                         
+                                                                                
+           IF  PS-EOF-EXTR-FILE                                                 
+               IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                               
+                   DISPLAY 'NO RECORDS TO PROCESSED AFTER RESTART'              
+               ELSE                                                             
+                   IF TCKRSTCNTL-CKPT-STAT-CODE = '0'                           
+                       DISPLAY 'NO ROWS SELECTED FOR RECALCULATION'             
+                       DISPLAY 'CHECK IF INPUT FILE IS EMPTY      '             
+                   END-IF                                                       
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+W09051*** LOAD THE STORE TABLE UP FOR SHRINK RECALCS....                        
+  |        IF (NOT PS-EOF-EXTR-FILE)                                            
+  |            INITIALIZE      WS-STORE-TABLE                                   
+  |            MOVE ZEROS      TO PV-STR-NDX                                    
+W26603         MOVE 'N'        TO PS-XMTLOC-DONE-SW                             
+  |            PERFORM 8200-OPEN-XMTLOC                                         
+  |            PERFORM 8300-LOAD-STORE-TABLE                                    
+W26603             UNTIL XMTLOC-PROCESS-COMPLETE  OR                            
+  |                      PV-STR-NDX IS GREATER THAN 9999                        
+W26603         PERFORM 8400-CLOSE-XMTLOC                                        
+  |        END-IF.                                                              
+W09051                                                                          
+      ******************************************************************        
+      * MAIN PROCESSING PARAGRAPH-PERFORMED UNTIL END OF CSR PROCESSING         
+      * WHEN PV-SUB1 > PV-MAX-SUB - THEN ALL DATES FOR THIS DEPT/CHNL/STR       
+      *                 HAVE BEEN PROCESSED, CHECK IF COMMIT REQUIRED.          
+      ******************************************************************        
+       2000-PROCESS-INPUT.                                                      
+                                                                                
+           MOVE 1 TO PV-SUB1.                                                   
+      *                                                                         
+           PERFORM 2020-PROCESS-DPTC                                            
+               UNTIL PV-SUB1 > PV-MAX-DATE-SUB.                                 
+                                                                                
+           PERFORM 7800-COMMIT-PROCESSING.                                      
+                                                                                
+           PERFORM 4000-READ-EXTR-FILE.                                         
+                                                                                
+           IF PS-EOF-EXTR-FILE                                                  
+               DISPLAY 'END OF INPUT FILE'                                      
+           ELSE                                                                 
+               IF EXTR-DEPT-NBR NOT = MISC-HOLD-DEPT                            
+                   MOVE EXTR-DEPT-NBR TO MISC-HOLD-DEPT                         
+                   DISPLAY 'PROCESSING DEPT: ' MISC-HOLD-DEPT                   
+               END-IF                                                           
+               IF PS-COMMIT-TAKEN                                               
+                   MOVE 'N' TO PS-COMMIT-TAKEN-SW                               
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * DEPT LEVEL PROCESSING PARAGRAPH                                         
+      * PROCESS ALL DATES FOR THIS DEPARTMENT                                   
+      ******************************************************************        
+       2020-PROCESS-DPTC.                                                       
+                                                                                
+           INITIALIZE  PROGRAM-VARIABLES.                                       
+           MOVE 'N' TO PS-CURR-WEEK-SW                                          
+                       PS-PREV-WEEK-ROW-SW                                      
+                       PS-RESTART-ROW-SW                                        
+                       PS-CARRY-FORWARD-SW.                                     
+                                                                                
+           MOVE EXTR-DEPT-NBR   TO PV-HOLD-DEPT-NBR.                            
+           MOVE EXTR-CHNL-CDE   TO PV-HOLD-CHNL-CDE.                            
+                                                                                
+           PERFORM 2800-FORMAT-DATES.                                           
+                                                                                
+      * DETERMINE IF CURRENT DOLLARS AND PRIOR INVENTORY DOLLARS EXIST          
+           PERFORM 7350-SELECT-PREV-WEEK-END-INV.                               
+           PERFORM 7300-SELECT-CURRENT-DOLLARS.                                 
+      *                                                                         
+      ******************************************************************        
+      *****                CARRY FORWARD LOGIC                     *****        
+      ******************************************************************        
+      *    CURRENT $ FOUND FOR THIS WEEK   - RECALC ROW                *        
+      * NO CURRENT $ FOUND/NO PREV $ FOUND - BYPASS RECALC THIS WEEK   *        
+      * NO CURRENT $ FOUND/   PREV $ FOUND - CARRY FORWARD INVENTORY $ *        
+      ******************************************************************        
+           IF PS-CURR-WEEK-ROW-NOT-FOUND                                        
+               IF PS-PREV-WEEK-ROW-NOT-FOUND                                    
+                   CONTINUE                                                     
+               ELSE                                                             
+                   IF PS-PFM-INV-DOLLARS-FOUND                                  
+                       PERFORM 7950-INSERT-CARRY-FWD-ROW                        
+                       PERFORM 7300-SELECT-CURRENT-DOLLARS                      
+                       PERFORM 2035-RECALC-PROCESSING                           
+                   END-IF                                                       
+               END-IF                                                           
+           ELSE                                                                 
+               PERFORM 2035-RECALC-PROCESSING                                   
+           END-IF.                                                              
+                                                                                
+           ADD 1 TO PV-SUB1.                                                    
+                                                                                
+      ******************************************************************        
+      * 2035-RECALC-PROCESSING.                                                 
+      ******************************************************************        
+       2035-RECALC-PROCESSING.                                                  
+      *                                                                         
+           MOVE EXTR-DEPT-NBR     TO PV-HOLD-DEPT-NBR.                          
+           MOVE EXTR-CHNL-CDE     TO PV-HOLD-CHNL-CDE.                          
+      *                                                                         
+           PERFORM 7150-OPEN-SHRINK-CURSOR.                                     
+      *                                                                         
+           MOVE 'N' TO PS-TWKSHNK-DONE-SW.                                      
+           MOVE ZEROS TO PV-SHNK-RTL-AMT.                                       
+           MOVE ZEROS TO PV-SHNK-RTL-AMT-V.                                     
+           MOVE ZEROS TO PV-SHNK-RTL-AMT-P.                                     
+           PERFORM 7200-OBTAIN-SHRINK-DLRS                                      
+               UNTIL TWKSHNK-PROCESS-COMPLETE.                                  
+      *                                                                         
+           PERFORM 7250-CLOSE-SHRINK-CURSOR.                                    
+                                                                                
+           PERFORM 2150-CALC-ENDINV-RETAIL.                                     
+                                                                                
+           PERFORM 7400-PREV-SEASON-END-INV.                                    
+      *                                                                         
+           PERFORM 2200-CALC-PREV-SEASN-END-PURCH.                              
+                                                                                
+      **   RETRIEVE SEASON-TO-DATE PURCHS FOR FIRST WK OF RECALC MN             
+W02151     SET PS-NOT-END-OF-CURR-SEASON-WKS TO TRUE.                           
+  |        PERFORM 2250-CALC-SEASON-TO-DATE-PURCH                               
+  |            VARYING PV-SEA-SUB FROM 1 BY 1                                   
+  |            UNTIL PS-END-OF-CURR-SEASON-WKS.                                 
+  |                                                                             
+  |   *    IF PV-SUB1 = 1                                                       
+  |   *        SET PS-NOT-END-OF-CURR-SEASON-WKS TO TRUE                        
+  |   *        PERFORM 2250-CALC-SEASON-TO-DATE-PURCH                           
+  |   *            VARYING PV-SEA-SUB FROM 1 BY 1                               
+  |   *            UNTIL PS-END-OF-CURR-SEASON-WKS                              
+  |   *        PERFORM 2275-UPD-SEASON-TO-DATE-PURCH                            
+  |   **   SUBSEQUENT WEEKS WILL USE THIS AS A BASIS FOR PRIOR WEEK TOTS        
+  |   **   AND ACCUMULATE SAVE VALUES OF THE PRIOR WEEKS SEASON TOTALS          
+  |   *    ELSE                                                                 
+  |   *        PERFORM 2275-UPD-SEASON-TO-DATE-PURCH                            
+  |   *    END-IF.                                                              
+W02151*                                                                         
+           PERFORM 2300-CALC-CUMM-TO-DATE-PURCH.                                
+           PERFORM 2400-CALC-CUMM-MARKUP-PCT.                                   
+                                                                                
+      * CURRENT WEEK ENDING INVENTORY COST AMOUNT                               
+           PERFORM 2500-CALC-END-INV-COST.                                      
+                                                                                
+      * SALES COST AMOUNT                                                       
+           PERFORM 7475-CURR-SEASON-COST.                                       
+           PERFORM 2600-CALC-SALES-COST-AMT.                                    
+                                                                                
+      * GROSS MARGIN AMOUNT                                                     
+           PERFORM 2700-CALC-GROSS-MARGIN-AMT.                                  
+           PERFORM 7500-UPDATE-PROCESSING.                                      
+                                                                                
+      ******************************************************************        
+      * CALCULATE THE ENDING INVENTORY OF CURRENT WEEK BASED ON THE             
+      *       ENDING INVENTORY FROM THE PRIOR WEEK                              
+      ******************************************************************        
+       2150-CALC-ENDINV-RETAIL.                                                 
+      *                                                                         
+           COMPUTE PV-ENT-ID-MKDN-AMT = WKDPTC-MKDN-PLU-RTL-AMT                 
+                                      + WKDPTC-MKDN-RGST-RTL-AMT                
+                                      + WKDPTC-MKDN-UMTCH-RTL-AMT               
+                                      + WKDPTC-MKDN-BYR-RTL-AMT                 
+                                      + WKDPTC-MKDN-STR-RTL-AMT.                
+                                                                                
+           IF PV-HOLD-CHNL-CDE IS EQUAL TO 'V'                                  
+               MOVE PV-SHNK-RTL-AMT-V TO PV-SHNK-RTL-AMT                        
+           ELSE                                                                 
+           IF PV-HOLD-CHNL-CDE IS EQUAL TO 'P'                                  
+               MOVE PV-SHNK-RTL-AMT-P TO PV-SHNK-RTL-AMT                        
+           ELSE                                                                 
+               COMPUTE PV-SHNK-RTL-AMT = PV-SHNK-RTL-AMT-V                      
+                                       + PV-SHNK-RTL-AMT-P                      
+           END-IF.                                                              
+                                                                                
+           COMPUTE PV-END-INV-RTL-AMT = (  PV-PREV-WEEK-END-INV-RTL             
+                                         + WKDPTC-RCPT-RTL-AMT                  
+                                         + WKDPTC-PADJ-RTL-AMT                  
+                                         + WKDPTC-MKUP-RTL-AMT                  
+                                         - WKDPTC-SLS-RTL-AMT                   
+                                         + WKDPTC-XFER-IN-RTL-AMT               
+                                         - WKDPTC-XFER-OUT-RTL-AMT              
+                                         - PV-ENT-ID-MKDN-AMT                   
+                                         - WKDPTC-INV-ADJ-RTL-AMT               
+                                         - PV-SHNK-RTL-AMT    ).                
+      *                                                                         
+      ******************************************************************        
+      * CALCULATE CUMULATIVE MARKUP PERCENTAGE FOR UPDATE                       
+      ******************************************************************        
+       2200-CALC-PREV-SEASN-END-PURCH.                                          
+      *                                                                         
+           IF PS-NO-PREV-SEASONAL-INV                                           
+                MOVE 0 TO PV-PREV-SEASON-PURCH-RETAIL                           
+                MOVE 0 TO PV-PREV-SEASON-PURCH-COST                             
+           ELSE                                                                 
+                MOVE WKDPTC-END-INV-RTL-AMT TO                                  
+                                         PV-PREV-SEASON-PURCH-RETAIL            
+                MOVE WKDPTC-END-INV-COST-AMT TO                                 
+                                         PV-PREV-SEASON-PURCH-COST              
+           END-IF.                                                              
+      *                                                                         
+W02151******************************************************************        
+   |  * ACCUMULATE CURRENT SEASON RETAIL/COST AMTS FROM SEASON BEGINNING        
+   |  ******************************************************************        
+   |   2250-CALC-SEASON-TO-DATE-PURCH.                                          
+   |  *                                                                         
+   |       PERFORM 7450-GET-SEASONAL-WEEK.                                      
+   |                                                                            
+   |       IF PS-SEASON-WK-FOUND                                                
+   |           COMPUTE PV-XFER-NET =                                            
+   |              (WKDPTC-XFER-IN-RTL-AMT -                                     
+   |               WKDPTC-XFER-OUT-RTL-AMT)                                     
+   |           ADD PV-XFER-NET             TO PV-WKDPTC-XFER-NET-AMT            
+   |           ADD WKDPTC-RCPT-RTL-AMT     TO PV-WKDPTC-RCPT-RTL-AMT            
+   |           ADD WKDPTC-RCPT-NET-COST-AMT                                     
+   |                                      TO PV-WKDPTC-RCPT-NET-COST-AMT        
+   |           ADD WKDPTC-PADJ-RTL-AMT     TO PV-WKDPTC-PADJ-RTL-AMT            
+   |           ADD WKDPTC-PADJ-NET-COST-AMT                                     
+   |               TO PV-WKDPTC-PADJ-NET-COST-AMT                               
+   |           ADD WKDPTC-MKUP-RTL-AMT     TO PV-WKDPTC-MKUP-RTL-AMT            
+   |       END-IF.                                                              
+   |  *                                                                         
+   |  ******************************************************************        
+   |  * ACCUMULATE CURRENT SEASON RETAIL/COST AMTS FROM SEASON BEGINNING        
+   |  ******************************************************************        
+   |  *2250-CALC-SEASON-TO-DATE-PURCH.                                          
+   |  *                                                                         
+   |  *    PERFORM 7450-GET-SEASONAL-WEEK.                                      
+   |  *                                                                         
+   |  *    IF PS-SEASON-WK-FOUND                                                
+   |  *        ADD WKDPTC-XFER-IN-RTL-AMT  TO PV-WKDPTC-XFER-IN-RTL-AMT         
+   |  *        ADD WKDPTC-XFER-OUT-RTL-AMT TO PV-WKDPTC-XFER-OUT-RTL-AMT        
+   |  *        ADD WKDPTC-RCPT-RTL-AMT     TO PV-WKDPTC-RCPT-RTL-AMT            
+   |  *        ADD WKDPTC-RCPT-NET-COST-AMT                                     
+   |  *                                   TO PV-WKDPTC-RCPT-NET-COST-AMT        
+   |  *        ADD WKDPTC-PADJ-RTL-AMT    TO PV-WKDPTC-PADJ-RTL-AMT             
+   |  *        ADD WKDPTC-PADJ-NET-COST-AMT                                     
+   |  *                                   TO PV-WKDPTC-PADJ-NET-COST-AMT        
+   |  *        ADD WKDPTC-MKUP-RTL-AMT    TO PV-WKDPTC-MKUP-RTL-AMT             
+   |  *    END-IF.                                                              
+   |  *                                                                         
+   |  *2275-UPD-SEASON-TO-DATE-PURCH.                                           
+   |  *                                                                         
+   |  *    IF PV-SUB1 = 1                                                       
+   |  *        MOVE PV-WKDPTC-XFER-IN-RTL-AMT   TO SSV-XFER-IN-RTL-AMT          
+   |  *        MOVE PV-WKDPTC-XFER-OUT-RTL-AMT  TO SSV-XFER-OUT-RTL-AMT         
+   |  *        MOVE PV-WKDPTC-RCPT-RTL-AMT      TO SSV-RCPT-RTL-AMT             
+   |  *        MOVE PV-WKDPTC-RCPT-NET-COST-AMT TO SSV-RCPT-NET-COST-AMT        
+   |  *        MOVE PV-WKDPTC-PADJ-RTL-AMT      TO SSV-PADJ-RTL-AMT             
+   |  *        MOVE PV-WKDPTC-PADJ-NET-COST-AMT TO SSV-PADJ-NET-COST-AMT        
+   |  *        MOVE PV-WKDPTC-MKUP-RTL-AMT      TO SSV-MKUP-RTL-AMT             
+   |  *    ELSE                                                                 
+   | ******    RETRIEVE CURRENT WEEK PURCHASE VARIABLES                         
+   |  *        PERFORM 7460-GET-WEEK-PURCH                                      
+   | ******    ACCUMULATE NEW UPDATED SEASON-TO-DATE SAVE TOTALS                
+   |  *        ADD  WKDPTC-XFER-IN-RTL-AMT   TO SSV-XFER-IN-RTL-AMT             
+   |  *        ADD  WKDPTC-XFER-OUT-RTL-AMT  TO SSV-XFER-OUT-RTL-AMT            
+   |  *        ADD  WKDPTC-RCPT-RTL-AMT      TO SSV-RCPT-RTL-AMT                
+   |  *        ADD  WKDPTC-RCPT-NET-COST-AMT TO SSV-RCPT-NET-COST-AMT           
+   |  *        ADD  WKDPTC-PADJ-RTL-AMT      TO SSV-PADJ-RTL-AMT                
+   |  *        ADD  WKDPTC-PADJ-NET-COST-AMT TO SSV-PADJ-NET-COST-AMT           
+   |  *        ADD  WKDPTC-MKUP-RTL-AMT      TO SSV-MKUP-RTL-AMT                
+   |  *    END-IF.                                                              
+   |  *                                                                         
+   |  ******************************************************************        
+   |  * DETERMINE CUMULATIVE RETAIL AND COST                                    
+   |  * ADD PRIOR SEASON END INV AMTS TO CURRENT SEASON-TO-DATE AMTS            
+   |  ******************************************************************        
+   |   2300-CALC-CUMM-TO-DATE-PURCH.                                            
+   |  *                                                                         
+   |       COMPUTE PV-CUM-TO-DATE-PURCH-COST   =                                
+   |                                     (  PV-PREV-SEASON-PURCH-COST           
+   |                                      + PV-WKDPTC-RCPT-NET-COST-AMT         
+   |                                      + PV-WKDPTC-PADJ-NET-COST-AMT).       
+   |                                                                            
+   |       COMPUTE PV-CUM-TO-DATE-PURCH-RETAIL =                                
+   |                                      (  PV-PREV-SEASON-PURCH-RETAIL        
+   |                                       + PV-WKDPTC-XFER-NET-AMT             
+   |                                       + PV-WKDPTC-RCPT-RTL-AMT             
+   |                                       + PV-WKDPTC-PADJ-RTL-AMT             
+   |                                       + PV-WKDPTC-MKUP-RTL-AMT).           
+   |  *                                                                         
+   |  ******************************************************************        
+   |  * DETERMINE CUMULATIVE RETAIL AND COST                                    
+   |  * ADD PRIOR SEASON END INV AMTS TO CURRENT SEASON-TO-DATE AMTS            
+   |  ******************************************************************        
+   |  *2300-CALC-CUMM-TO-DATE-PURCH.                                            
+   |  *                                                                         
+   |  *    COMPUTE SSV-XFER-NET-AMT = (  SSV-XFER-IN-RTL-AMT                    
+   |  *                                - SSV-XFER-OUT-RTL-AMT )                 
+   |  *                                                                         
+   |  *    COMPUTE PV-CUM-TO-DATE-PURCH-COST   =                                
+   |  *                                (   PV-PREV-SEASON-PURCH-COST            
+   |  *                                  + SSV-RCPT-NET-COST-AMT                
+   |  *                                  + SSV-PADJ-NET-COST-AMT)       .       
+   |  *                                                                         
+   |  *    COMPUTE PV-CUM-TO-DATE-PURCH-RETAIL =                                
+   |  *                                (   PV-PREV-SEASON-PURCH-RETAIL          
+   |  *                                  + SSV-XFER-NET-AMT                     
+   |  *                                  + SSV-RCPT-RTL-AMT                     
+   |  *                                  + SSV-PADJ-RTL-AMT                     
+   |  *                                  + SSV-MKUP-RTL-AMT).                   
+W02151*                                                                         
+      ******************************************************************        
+      * FINAL CALCULATIONS OF VALUES TO UPDATE TWKDPTC - CUM_MKUP_PCT           
+      ******************************************************************        
+       2400-CALC-CUMM-MARKUP-PCT.                                               
+      *                                                                         
+           COMPUTE PV-CUM-SEASON-MKUP = (  PV-CUM-TO-DATE-PURCH-RETAIL          
+                                         - PV-CUM-TO-DATE-PURCH-COST  ).        
+      * CUM SEASON RETAIL CANNOT EQUAL ZERO IN DIVISOR ('ON SIZE ERROR')        
+           IF PV-CUM-TO-DATE-PURCH-RETAIL = 0                                   
+                MOVE 100 TO PV-CUM-MKUP-PCT                                     
+           ELSE                                                                 
+                COMPUTE PV-CUM-MKUP-PCT ROUNDED =                               
+               (PV-CUM-SEASON-MKUP * 100) / PV-CUM-TO-DATE-PURCH-RETAIL         
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      * FINAL CALCULATIONS OF VALUES TO UPDATE TWKDPTC - END_INV_COST_AMT       
+      ******************************************************************        
+       2500-CALC-END-INV-COST.                                                  
+      *                                                                         
+           COMPUTE PV-END-INV-COST-AMT ROUNDED =                                
+                        ( (100 - PV-CUM-MKUP-PCT)  *                            
+                               ( PV-END-INV-RTL-AMT) ) / 100.                   
+      *                                                                         
+      ******************************************************************        
+      * FINAL CALCULATIONS OF VALUES TO UPDATE TWKDPTC - SALES_COST_AMT *       
+      ******************************************************************        
+       2600-CALC-SALES-COST-AMT.                                                
+      *                                                                         
+           IF PS-NO-CURRENT-PURCH-COSTS                                         
+               MOVE ZEROES            TO PV-CURR-WEEK-RCPT-NET-COST             
+                                         PV-CURR-WEEK-PADJ-NET-COST             
+           END-IF.                                                              
+      *                                                                         
+           COMPUTE PV-SLS-COST-AMT =                                            
+                 (  PV-PREV-WEEK-END-INV-COST                                   
+                  + PV-CURR-WEEK-RCPT-NET-COST                                  
+                  + PV-CURR-WEEK-PADJ-NET-COST                                  
+                  - PV-END-INV-COST-AMT         ).                              
+      *                                                                         
+      ******************************************************************        
+      * FINAL CALCULATIONS OF VALUES TO UPDATE TWKDPTC - GRO_MRGN_AMT  *        
+      ******************************************************************        
+       2700-CALC-GROSS-MARGIN-AMT.                                              
+      *                                                                         
+           IF WKDPTC-SLS-RTL-AMT = 0                                            
+               MOVE 0 TO PV-GRO-MRGN-AMT                                        
+           ELSE                                                                 
+               COMPUTE PV-GRO-MRGN-AMT =                                        
+               ( ( WKDPTC-SLS-RTL-AMT ) - ( PV-SLS-COST-AMT ) )                 
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      * MOVE SUBSCRIPTED VARIABLE TO FORMAT USABLE BY DB2                       
+      ******************************************************************        
+       2800-FORMAT-DATES.                                                       
+           MOVE DT-SEA-BEG-DTE(PV-SUB1)    TO PV-HOLD-SEA-BEG-DTE.              
+           MOVE DT-OPN-WK-END-DTE(PV-SUB1) TO PV-HOLD-OPN-WK-END-DTE.           
+           MOVE DT-PFW-WK-NBR(PV-SUB1)     TO PV-HOLD-PFW-WK-NBR.               
+           MOVE DT-PFW-END-DTE(PV-SUB1)    TO PV-HOLD-PFW-END-DTE.              
+           MOVE DT-PFM-END-DTE(PV-SUB1)    TO PV-HOLD-PFM-END-DTE.              
+           MOVE DT-FSCL-WK-NBR(PV-SUB1)    TO PV-HOLD-FSCL-WK-NBR.              
+           MOVE DT-PREV-SEA-END-DTE(PV-SUB1)                                    
+                                           TO PV-HOLD-PREV-SEA-END-DTE.         
+           MOVE DT-PREV-SEA-WK-NBR(PV-SUB1)                                     
+                                           TO PV-HOLD-PREV-SEA-WK-NBR.          
+                                                                                
+      ******************************************************************        
+      * DISTINCT DEPT / CHNL /STR                                               
+      ******************************************************************        
+      *                                                                         
+       4000-READ-EXTR-FILE.                                                     
+                                                                                
+           READ WKDPTC-EXTR-FILE INTO EXTR-RECORD                               
+               AT END                                                           
+                  SET PS-EOF-EXTR-FILE TO TRUE.                                 
+                                                                                
+           IF PS-EOF-EXTR-FILE                                                  
+               CONTINUE                                                         
+           ELSE                                                                 
+               ADD 1 TO PA-EXTRACT-RECS-READ                                    
+           END-IF.                                                              
+         EJECT                                                                  
+      *                                                                         
+      ******************************************************************        
+      * READ THE DB2 CONTROL TABLE CONTAINING OPEN FISCAL DATE INFO             
+      ******************************************************************        
+       7000-READ-CONTROL-TABLE.                                                 
+      *                                                                         
+            EXEC SQL                                                            
+                SELECT OPN_FSCL_WK_DTE                                          
+                      ,OPN_FSCL_WK_NBR                                          
+                      ,MXPSTG_FSCL_WK_DTE                                       
+                      ,MXPSTG_FSCL_WK_NBR                                       
+                 INTO  :MLCNTL-OPN-FSCL-WK-DTE                                  
+                      ,:MLCNTL-OPN-FSCL-WK-NBR                                  
+                      ,:MLCNTL-MXPSTG-FSCL-WK-DTE                               
+                      ,:MLCNTL-MXPSTG-FSCL-WK-NBR                               
+                 FROM  TMLCNTL                                                  
+W26603          WITH UR                                                         
+            END-EXEC.                                                           
+      *                                                                         
+           EVALUATE SQLCODE                                                     
+               WHEN 0                                                           
+                   MOVE MLCNTL-OPN-FSCL-WK-DTE TO CR-FISCAL-WK-END-DTE          
+                   MOVE MLCNTL-OPN-FSCL-WK-NBR TO CR-FISCAL-WK-NBR              
+                 DISPLAY '--------------------------------------------'         
+                   DISPLAY 'CONTROL DATES (TMLCNTL)'                            
+                   DISPLAY 'FISCAL OPEN WEEK DATE: ',                           
+                                                 MLCNTL-OPN-FSCL-WK-DTE         
+                   DISPLAY '       OPEN WEEK NBR : ',                           
+                                                 MLCNTL-OPN-FSCL-WK-NBR         
+                   DISPLAY 'MAXPSTG  WEEK END DTE: ',                           
+                                              MLCNTL-MXPSTG-FSCL-WK-DTE         
+                   DISPLAY '     MAX WEEK NUMBER : ',                           
+                                              MLCNTL-MXPSTG-FSCL-WK-NBR         
+                 DISPLAY '--------------------------------------------'         
+                 DISPLAY '     '                                                
+               WHEN OTHER                                                       
+                  MOVE '7000-READ-CONTROL-TABLE' TO PV-PARAGRAPH-NAME           
+                  MOVE PE-MSG-01 TO PV-OPERATION-ATTEMPTED                      
+                  PERFORM 9999-SQL-ABEND                                        
+           END-EVALUATE.                                                        
+      *                                                                         
+      ******************************************************************        
+      * LOAD ALL DATES TO BE PROCESSED TO INTERNAL TABLE                        
+      ******************************************************************        
+       7025-PROCESS-CNTL-TBL.                                                   
+      *                                                                         
+            PERFORM 7035-GET-FIRST-WEEK.                                        
+            PERFORM 7050-OPEN-DATE-CURSOR.                                      
+            PERFORM 7075-PROCESS-DATE-CURSOR                                    
+                UNTIL PS-DATE-TABLE-LOADED.                                     
+      *                                                                         
+      ******************************************************************        
+      * RETRIEVE 1ST WEEK OF OPEN MONTH AS A STARTING POINT TO BEGIN            
+      * RECALC OF THE CURRENT DATE RANGE. THIS WILL ENSURE RECALC OF            
+      * UPDATES TO ALL CURRENT WEEKS WITHIN THE CURRENT MONTH                   
+      ******************************************************************        
+      **FOR THE FIRST WEEK OF ANY FISCAL MONTH, THE PREVIOUS MONTH'S            
+      * FISCAL END DATE WILL NEED TO BE RETRIEVED AS A STARTING POINT           
+      * TO ENSURE CARRY-FORWARD LOGIC IS BROUGHT FORWARD PROPERLY               
+      ******************************************************************        
+       7035-GET-FIRST-WEEK.                                                     
+      *                                                                         
+           EXEC SQL                                                             
+               SELECT  PFM_END_DTE                                              
+                     ,(PFM_END_DTE + 7 DAYS)                                    
+                INTO  :PV-HOLD-PFM-END-DTE                                      
+                     ,:PV-HOLD-MONTH-FIRST-WEEK                                 
+                FROM TDTATTR                                                    
+                WHERE KY_DTE  = :MLCNTL-OPN-FSCL-WK-DTE                         
+W26603         WITH UR                                                          
+           END-EXEC.                                                            
+      *                                                                         
+           EVALUATE SQLCODE                                                     
+               WHEN 0                                                           
+                  DISPLAY 'RECALC STARTS AT ', PV-HOLD-PFM-END-DTE              
+               WHEN +100                                                        
+                  DISPLAY 'NO ROWS QUALIFY FOR RECALCULATION'                   
+               WHEN OTHER                                                       
+                  MOVE '7035-GET-FIRST-WEEK' TO PV-PARAGRAPH-NAME               
+                  MOVE PE-MSG-02 TO PV-OPERATION-ATTEMPTED                      
+                  PERFORM 9999-SQL-ABEND                                        
+           END-EVALUATE.                                                        
+      *                                                                         
+      *****************************************************************         
+      * OPEN CURSOR FOR UPDATE AT INITIALIZATION & AFTER EACH COMMIT            
+      *****************************************************************         
+       7050-OPEN-DATE-CURSOR.                                                   
+      *                                                                         
+           EXEC SQL                                                             
+               OPEN FISCAL_DATE_CSR                                             
+           END-EXEC                                                             
+                                                                                
+           EVALUATE SQLCODE                                                     
+               WHEN 0                                                           
+                    CONTINUE                                                    
+               WHEN OTHER                                                       
+                  MOVE '7050-OPEN-DATE-CSR' TO PV-PARAGRAPH-NAME                
+                  MOVE PE-MSG-03 TO PV-OPERATION-ATTEMPTED                      
+                  PERFORM 9999-SQL-ABEND                                        
+           END-EVALUATE.                                                        
+      *                                                                         
+      *****************************************************************         
+      * INCREMENT SUBSCRIPT AND CONTINUE LOADING INTERNAL TABLE                 
+      *****************************************************************         
+       7075-PROCESS-DATE-CURSOR.                                                
+      *                                                                         
+           EXEC SQL                                                             
+                  FETCH FISCAL_DATE_CSR                                         
+                   INTO :PV-HOLD-DATE                                           
+           END-EXEC                                                             
+                                                                                
+           EVALUATE SQLCODE                                                     
+               WHEN +0                                                          
+                 DISPLAY '--------------------------------------------'         
+                   ADD 1 TO PV-SUB1                                             
+                   DISPLAY 'WEEK # ', PV-SUB1                                   
+                   DISPLAY 'PROCESS DATE: ', PV-HOLD-DATE                       
+                   PERFORM 7100-SELECT-DB2-DATES                                
+                   PERFORM 7125-LOAD-DATE-TABLE                                 
+               WHEN +100                                                        
+                 DISPLAY '     '                                                
+                 DISPLAY '--------------------------------------------'         
+                 DISPLAY 'NBR OF WEEKS PROCESSED THIS RUN: ', PV-SUB1           
+                   IF PV-SUB1 > 1                                               
+                       DISPLAY '   ' PV-HOLD-MONTH-FIRST-WEEK ' THRU '          
+                                      MLCNTL-MXPSTG-FSCL-WK-DTE                 
+                   END-IF                                                       
+                 DISPLAY '--------------------------------------------'         
+                 DISPLAY '     '                                                
+                   MOVE PV-SUB1 TO PV-MAX-DATE-SUB                              
+                   MOVE ZEROES  TO PV-SUB1                                      
+                   SET PS-DATE-TABLE-LOADED TO TRUE                             
+               WHEN OTHER                                                       
+                   MOVE '7075-PROCESS-DATE-CSR' TO PV-PARAGRAPH-NAME            
+                   MOVE PE-MSG-04 TO PV-OPERATION-ATTEMPTED                     
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+      *                                                                         
+           IF PV-SUB1 > PC-MAX-SEASON-WEEKS                                     
+               MOVE '7075-PROCESS-DATE-CSR' TO PV-PARAGRAPH-NAME                
+               MOVE PE-MSG-15 TO PV-OPERATION-ATTEMPTED                         
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      * 7100-SELECT-DB2-DATES.                                                  
+      ******************************************************************        
+       7100-SELECT-DB2-DATES.                                                   
+      *                                                                         
+           EXEC SQL                                                             
+               SELECT  CAL_MN_NBR                                               
+                      ,PFM_END_DTE                                              
+                      ,SEA_BEG_DTE                                              
+                      ,PREV_SEA_END_DTE                                         
+                      ,(FSCL_WK_END_DTE - 7 DAYS)                               
+                      ,FSCL_WK_NBR                                              
+                      ,FSCL_YR_NBR                                              
+                INTO  :DTATTR-CAL-MN-NBR                                        
+                     ,:DTATTR-PFM-END-DTE                                       
+                     ,:DTATTR-SEA-BEG-DTE                                       
+                     ,:DTATTR-PREV-SEA-END-DTE                                  
+                     ,:PV-HOLD-PFW-END-DTE                                      
+                     ,:DTATTR-FSCL-WK-NBR                                       
+                     ,:DTATTR-FSCL-YR-NBR                                       
+                FROM TDTATTR                                                    
+                WHERE KY_DTE  = :PV-HOLD-DATE                                   
+W26603         WITH UR                                                          
+           END-EXEC.                                                            
+      *                                                                         
+           EVALUATE SQLCODE                                                     
+               WHEN 0                                                           
+                   CONTINUE                                                     
+               WHEN +100                                                        
+                  DISPLAY '**************************************'              
+                  DISPLAY 'TDTATTR-KEY ' PV-HOLD-DATE                           
+                  DISPLAY 'NO ROW FOUND ON TDTATTR TABLE'                       
+                  MOVE '7100-SELECT-DB2-DATES' TO PV-PARAGRAPH-NAME             
+                  MOVE PE-MSG-02 TO PV-OPERATION-ATTEMPTED                      
+                  PERFORM 9999-SQL-ABEND                                        
+               WHEN OTHER                                                       
+                  DISPLAY 'TDTATTR-KEY ' PV-HOLD-DATE                           
+                  MOVE '7100-SELECT-DB2-DATES' TO PV-PARAGRAPH-NAME             
+                  MOVE PE-MSG-02 TO PV-OPERATION-ATTEMPTED                      
+                  PERFORM 9999-SQL-ABEND                                        
+           END-EVALUATE.                                                        
+      *                                                                         
+      ******************************************************************        
+      * 7112-SELECT-PREV-WK-NBR.                                                
+      ******************************************************************        
+       7112-SELECT-PREV-WK-NBR.                                                 
+      *                                                                         
+           EXEC SQL                                                             
+               SELECT  FSCL_WK_NBR                                              
+                INTO  :PV-HOLD-PFW-WK-NBR                                       
+                FROM TDTATTR                                                    
+                WHERE KY_DTE  = :PV-TEMP-PFW-END-DTE                            
+W26603         WITH UR                                                          
+           END-EXEC.                                                            
+      *                                                                         
+           EVALUATE SQLCODE                                                     
+               WHEN 0                                                           
+                   CONTINUE                                                     
+               WHEN OTHER                                                       
+                  DISPLAY '******************************************'          
+                  DISPLAY 'PREV FSCL WK DTE :  ' PV-TEMP-PFW-END-DTE            
+                  DISPLAY ' '                                                   
+                  MOVE '7112-SELECT-PREV-WK-NBR' TO PV-PARAGRAPH-NAME           
+                  MOVE PE-MSG-17 TO PV-OPERATION-ATTEMPTED                      
+                  PERFORM 9999-SQL-ABEND                                        
+           END-EVALUATE.                                                        
+      *                                                                         
+      ******************************************************************        
+      * 7114-SELECT-PREV-SEA-WK-NBR.                                            
+      ******************************************************************        
+       7114-SELECT-PREV-SEA-WK-NBR.                                             
+      *                                                                         
+           EXEC SQL                                                             
+               SELECT  FSCL_WK_NBR                                              
+                INTO  :PV-TEMP-PREV-SEA-WK-NBR                                  
+                FROM TDTATTR                                                    
+                WHERE KY_DTE  = :PV-TEMP-PREV-SEA-END-DTE                       
+W26603         WITH UR                                                          
+           END-EXEC.                                                            
+      *                                                                         
+           EVALUATE SQLCODE                                                     
+               WHEN 0                                                           
+                   CONTINUE                                                     
+               WHEN OTHER                                                       
+                  DISPLAY '********************************************'        
+                  DISPLAY 'PREV SEA END DTE:  ' PV-TEMP-PREV-SEA-END-DTE        
+                  DISPLAY ' '                                                   
+                  MOVE '7114-SELECT-PREV-SEA-WK-NBR'                            
+                        TO PV-PARAGRAPH-NAME                                    
+                  MOVE PE-MSG-18 TO PV-OPERATION-ATTEMPTED                      
+                  PERFORM 9999-SQL-ABEND                                        
+           END-EVALUATE.                                                        
+      *                                                                         
+      *****************************************************************         
+      * POPULATE INTERNAL TABLE WITH DATES RELATED TO EACH WEEK                 
+      * TO BE RE-CALCULATED                                                     
+      *****************************************************************         
+       7125-LOAD-DATE-TABLE.                                                    
+           MOVE PV-HOLD-DATE            TO DT-OPN-WK-END-DTE(PV-SUB1).          
+                                                                                
+           MOVE DTATTR-CAL-MN-NBR       TO DT-CAL-MN-NBR(PV-SUB1).              
+PFW        MOVE PV-HOLD-PFW-END-DTE     TO DT-PFW-END-DTE(PV-SUB1).             
+           MOVE DTATTR-PFM-END-DTE      TO DT-PFM-END-DTE(PV-SUB1).             
+           MOVE DTATTR-SEA-BEG-DTE      TO DT-SEA-BEG-DTE(PV-SUB1)              
+                                           PV-TEMP-SEA-BEG-DTE.                 
+           MOVE DTATTR-PREV-SEA-END-DTE TO DT-PREV-SEA-END-DTE(PV-SUB1).        
+           MOVE DTATTR-FSCL-WK-NBR      TO DT-FSCL-WK-NBR(PV-SUB1).             
+           MOVE DTATTR-FSCL-YR-NBR      TO DT-FSCL-YR-NBR(PV-SUB1).             
+                                                                                
+           MOVE PV-HOLD-PFW-END-DTE     TO PV-TEMP-PFW-END-DTE.                 
+JS0200     PERFORM 7112-SELECT-PREV-WK-NBR.                                     
+           MOVE PV-HOLD-PFW-WK-NBR      TO DT-PFW-WK-NBR(PV-SUB1).              
+                                                                                
+           MOVE DTATTR-PREV-SEA-END-DTE TO PV-TEMP-PREV-SEA-END-DTE.            
+JS0200     PERFORM 7114-SELECT-PREV-SEA-WK-NBR.                                 
+           MOVE PV-TEMP-PREV-SEA-WK-NBR TO DT-PREV-SEA-WK-NBR(PV-SUB1).         
+                                                                                
+JS0200     PERFORM 7150-GET-SEASON-DATE-RANGE.                                  
+                                                                                
+           DISPLAY '--------------------------------------------'               
+           DISPLAY '    OPN WK END DTE    ' DT-OPN-WK-END-DTE(PV-SUB1).         
+           DISPLAY '    CAL MN NBR        ' DT-CAL-MN-NBR(PV-SUB1).             
+           DISPLAY '    PREV FSCL WK NBR  ' DT-PFW-WK-NBR(PV-SUB1).             
+           DISPLAY '    PREV FSCL WK END DTE ' DT-PFW-END-DTE(PV-SUB1).         
+           DISPLAY '    PREV FSCL MN END DTE ' DT-PFM-END-DTE(PV-SUB1).         
+           DISPLAY '    SEA BEG DTE       ' DT-SEA-BEG-DTE(PV-SUB1).            
+           DISPLAY '    PREV SEA END DTE  '                                     
+                   DT-PREV-SEA-END-DTE(PV-SUB1).                                
+           DISPLAY '    PREV SEA WK NBR   '                                     
+                   DT-PREV-SEA-WK-NBR(PV-SUB1).                                 
+           DISPLAY '    FSCL WK NBR       ' DT-FSCL-WK-NBR(PV-SUB1).            
+           DISPLAY '    FSCL YR NBR       ' DT-FSCL-YR-NBR(PV-SUB1).            
+                                                                                
+           IF PS-SEASON-DATE-TABLE-LOADED                                       
+               SUBTRACT 2 FROM PV-SEA-SUB                                       
+           ELSE                                                                 
+               SUBTRACT 1 FROM PV-SEA-SUB                                       
+           END-IF.                                                              
+                                                                                
+           DISPLAY ' '                                                          
+           DISPLAY '    NBR OF SEA WEEKS PROCESSED FOR THIS DATE: ',            
+                            PV-SEA-SUB                                          
+           IF PV-SEA-SUB > 0                                                    
+               DISPLAY '        ' DT-SEA-BEG-DTE(PV-SUB1)' THRU ' ,             
+                             PV-HOLD-DATE                                       
+               DISPLAY ' '                                                      
+               DISPLAY '      1ST WEEK DTE ' DT-SEA-WK-DTE(PV-SUB1, 1)          
+                       '    WK NBR '      DT-SEA-WK-NBR(PV-SUB1, 1)             
+               DISPLAY '     LAST WEEK DTE '                                    
+                                   DT-SEA-WK-DTE(PV-SUB1, PV-SEA-SUB)           
+                       '    WK NBR '                                            
+                                   DT-SEA-WK-NBR(PV-SUB1, PV-SEA-SUB)           
+           ELSE                                                                 
+               DISPLAY ' ************************'                              
+               DISPLAY '   NO SEASONAL DATA EXISTS '                            
+               MOVE '7125-LOAD-DATE-TABLE' TO PV-PARAGRAPH-NAME                 
+               PERFORM 9999-ABEND                                               
+           END-IF.                                                              
+                                                                                
+      *****************************************************************         
+      * 7150-GET-SEASON-DATE-RANGE.                                             
+      *****************************************************************         
+JS0200 7150-GET-SEASON-DATE-RANGE.                                              
+                                                                                
+           SET PS-SEASON-DATE-TAB-NOT-LOADED TO TRUE.                           
+           PERFORM 7152-OPN-SEA-DTE-RANGE-CUR.                                  
+           PERFORM 7154-PROCESS-SEA-DATE-CURSOR                                 
+               VARYING PV-SEA-SUB FROM 1 BY 1                                   
+               UNTIL PV-SEA-SUB > PC-MAX-SEASON-WEEKS                           
+                 OR PS-SEASON-DATE-TABLE-LOADED.                                
+           PERFORM 7158-CLOSE-SEA-DTE-RANGE-CUR.                                
+           IF PS-SEASON-DATE-TAB-NOT-LOADED                                     
+               DISPLAY '**********************************************'         
+               DISPLAY 'SEASONS PROCESSED > ' PC-MAX-SEASON-WEEKS               
+               MOVE '7156-LOAD-SEA-DATE-RANGE-TABLE'                            
+                   TO PV-PARAGRAPH-NAME                                         
+               PERFORM 9999-ABEND                                               
+           END-IF.                                                              
+                                                                                
+      *****************************************************************         
+      * OPEN CURSOR FOR UPDATE AT INITIALIZATION & AFTER EACH COMMIT            
+      *****************************************************************         
+       7152-OPN-SEA-DTE-RANGE-CUR.                                              
+      *                                                                         
+           EXEC SQL                                                             
+               OPEN SEASON_DATE_CSR                                             
+           END-EXEC                                                             
+                                                                                
+           EVALUATE SQLCODE                                                     
+               WHEN 0                                                           
+                    CONTINUE                                                    
+               WHEN OTHER                                                       
+                  MOVE '7152-OPEN-SEASON-CSR' TO PV-PARAGRAPH-NAME              
+                  MOVE PE-MSG-20 TO PV-OPERATION-ATTEMPTED                      
+                  PERFORM 9999-SQL-ABEND                                        
+           END-EVALUATE.                                                        
+      *                                                                         
+      *****************************************************************         
+      * 7154-PROCESS-SEA-DATE-CURSOR.                                           
+      *****************************************************************         
+       7154-PROCESS-SEA-DATE-CURSOR.                                            
+      *                                                                         
+           EXEC SQL                                                             
+                  FETCH SEASON_DATE_CSR                                         
+                   INTO :PV-SEASON-WK-DTE                                       
+                       ,:PV-SEASON-WK-NBR                                       
+           END-EXEC                                                             
+                                                                                
+           EVALUATE SQLCODE                                                     
+               WHEN +0                                                          
+                   MOVE PV-SEASON-WK-DTE TO                                     
+                         DT-SEA-WK-DTE (PV-SUB1, PV-SEA-SUB)                    
+                   MOVE PV-SEASON-WK-NBR TO                                     
+                         DT-SEA-WK-NBR (PV-SUB1, PV-SEA-SUB)                    
+               WHEN +100                                                        
+                   SET PS-SEASON-DATE-TABLE-LOADED TO TRUE                      
+               WHEN OTHER                                                       
+                   MOVE '7154-PROCESS-SEA-DATE-CSR'                             
+                        TO PV-PARAGRAPH-NAME                                    
+                   MOVE PE-MSG-21 TO PV-OPERATION-ATTEMPTED                     
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+      *                                                                         
+      *****************************************************************         
+      * CLOSE CURSOR FOR UPDATE AT INITIALIZATION & AFTER EACH COMMIT           
+      *****************************************************************         
+       7158-CLOSE-SEA-DTE-RANGE-CUR.                                            
+      *                                                                         
+           EXEC SQL                                                             
+               CLOSE SEASON_DATE_CSR                                            
+           END-EXEC                                                             
+                                                                                
+           EVALUATE SQLCODE                                                     
+               WHEN 0                                                           
+                    CONTINUE                                                    
+               WHEN OTHER                                                       
+                  MOVE '7158-CLOSE-SEASON-CSR' TO PV-PARAGRAPH-NAME             
+                  MOVE PE-MSG-23 TO PV-OPERATION-ATTEMPTED                      
+                  PERFORM 9999-SQL-ABEND                                        
+           END-EVALUATE.                                                        
+      *                                                                         
+      *****************************************************************         
+      * 7150-OPEN-SHRINK-CURSOR.                                                
+      *****************************************************************         
+       7150-OPEN-SHRINK-CURSOR.                                                 
+      *                                                                         
+           EXEC SQL                                                             
+               OPEN SHRINK_CURSOR                                               
+           END-EXEC                                                             
+                                                                                
+           EVALUATE TRUE                                                        
+             WHEN SQLCODE IS EQUAL TO ZERO                                      
+               CONTINUE                                                         
+             WHEN SQLWARN IS NOT EQUAL TO SPACES                                
+             WHEN SQLCODE IS NOT EQUAL TO ZERO                                  
+               MOVE '7150-OPEN-SHRINK-C' TO PV-PARAGRAPH-NAME                   
+               MOVE PE-MSG-03 TO PV-OPERATION-ATTEMPTED                         
+               PERFORM 9999-SQL-ABEND                                           
+           END-EVALUATE.                                                        
+      *                                                                         
+      *****************************************************************         
+      * 7200-OBTAIN-SHRINK-DLRS.                                                
+      *****************************************************************         
+       7200-OBTAIN-SHRINK-DLRS.                                                 
+      *** ACCUMULATE THE SHRINK DOLLARS FOR ALL STORES BY DEPARTMENT.           
+      *** DETERMINE IF THE SHRINK DOLLARS FOR THE STORE ARE FOR AN              
+      *** ESTORE OR NOT.                                                        
+                                                                                
+W31475*    EXEC SQL                                                             
+  |   *      FETCH SHRINK_CURSOR                                                
+  |   *      INTO :WKSHNK-FSCL-WK-END-DTE                                       
+  |   *          ,:WKSHNK-DEPT-NBR                                              
+  |   *          ,:WKSHNK-SUB-CL-NBR                                            
+  |   *          ,:WKSHNK-STR-NBR                                               
+  |   *          ,:WKSHNK-SHNK-RTL-AMT                                          
+  |   *    END-EXEC.                                                            
+  |        INITIALIZE HOST-VARIABLES.                                           
+  |                                                                             
+  |        EXEC SQL                                                             
+  |          FETCH NEXT ROWSET FROM SHRINK_CURSOR FOR 100 ROWS                  
+  |          INTO  :HV-WKSHNK-SUB-CL-NBR                                        
+  |               ,:HV-WKSHNK-STR-NBR                                           
+  |               ,:HV-WKSHNK-SHNK-RTL-AMT                                      
+W31475     END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+             WHEN SQLCODE IS EQUAL TO ZERO                                      
+               PERFORM 8100-GET-CHANNEL-AND-ACCUM                               
+             WHEN SQLCODE IS EQUAL TO +100                                      
+               MOVE 'Y' TO PS-TWKSHNK-DONE-SW                                   
+W31475         PERFORM 8100-GET-CHANNEL-AND-ACCUM                               
+             WHEN SQLCODE IS EQUAL TO -305                                      
+               MOVE ZEROS         TO PV-SHNK-RTL-AMT                            
+               MOVE ZEROS         TO PV-SHNK-RTL-AMT-V                          
+               MOVE ZEROS         TO PV-SHNK-RTL-AMT-P                          
+               MOVE 'Y' TO PS-TWKSHNK-DONE-SW                                   
+             WHEN SQLWARN IS NOT EQUAL TO SPACES                                
+             WHEN SQLCODE IS NOT EQUAL TO ZERO                                  
+               MOVE 'Y' TO PS-TWKSHNK-DONE-SW                                   
+               MOVE '7200-OBTAIN-SHRINK-DLRS' TO PV-PARAGRAPH-NAME              
+               MOVE PE-MSG-02 TO PV-OPERATION-ATTEMPTED                         
+               PERFORM 9999-SQL-ABEND                                           
+           END-EVALUATE.                                                        
+                                                                                
+      *****************************************************************         
+      * 7250-CLOSE-SHRINK-CURSOR.                                               
+      *****************************************************************         
+       7250-CLOSE-SHRINK-CURSOR.                                                
+      *                                                                         
+           EXEC SQL                                                             
+               CLOSE SHRINK_CURSOR                                              
+           END-EXEC                                                             
+                                                                                
+           EVALUATE TRUE                                                        
+             WHEN SQLCODE IS EQUAL TO ZERO                                      
+               CONTINUE                                                         
+             WHEN SQLWARN IS NOT EQUAL TO SPACES                                
+             WHEN SQLCODE IS NOT EQUAL TO ZERO                                  
+               MOVE '7250-CLOSE-SHRINK-CUR' TO PV-PARAGRAPH-NAME                
+               MOVE PE-MSG-23 TO PV-OPERATION-ATTEMPTED                         
+               PERFORM 9999-SQL-ABEND                                           
+           END-EVALUATE.                                                        
+      *                                                                         
+      *****************************************************************         
+      * SELECT A ROW FROM DB2 TO BE RECALCED & UPDATED (OR INSERT/UPD)          
+      *****************************************************************         
+       7300-SELECT-CURRENT-DOLLARS.                                             
+      *                                                                         
+W26603     MOVE PV-HOLD-FSCL-WK-NBR      TO WKDPTC-FSCL-WK-NBR.                 
+W26603     MOVE PV-HOLD-OPN-WK-END-DTE   TO WKDPTC-FSCL-WK-END-DTE.             
+W26603     MOVE PV-HOLD-DEPT-NBR         TO WKDPTC-DEPT-NBR.                    
+W26603     MOVE PV-HOLD-CHNL-CDE         TO WKDPTC-CHNL-CDE.                    
+      *                                                                         
+           EXEC SQL                                                             
+                SELECT  SLS_RTL_AMT                                             
+                       ,MKDN_PLU_RTL_AMT                                        
+                       ,MKDN_RGST_RTL_AMT                                       
+                       ,MKDN_UMTCH_RTL_AMT                                      
+                       ,MKDN_BYR_RTL_AMT                                        
+                       ,MKDN_STR_RTL_AMT                                        
+                       ,MKUP_RTL_AMT                                            
+                       ,XFER_IN_RTL_AMT                                         
+                       ,XFER_OUT_RTL_AMT                                        
+                       ,RCPT_RTL_AMT                                            
+                       ,RCPT_NET_COST_AMT                                       
+                       ,PADJ_RTL_AMT                                            
+                       ,PADJ_NET_COST_AMT                                       
+                       ,PADJ_FRGT_COST_AMT                                      
+                       ,INV_ADJ_RTL_AMT                                         
+                  INTO :WKDPTC-SLS-RTL-AMT                                      
+                      ,:WKDPTC-MKDN-PLU-RTL-AMT                                 
+                      ,:WKDPTC-MKDN-RGST-RTL-AMT                                
+                      ,:WKDPTC-MKDN-UMTCH-RTL-AMT                               
+                      ,:WKDPTC-MKDN-BYR-RTL-AMT                                 
+                      ,:WKDPTC-MKDN-STR-RTL-AMT                                 
+                      ,:WKDPTC-MKUP-RTL-AMT                                     
+                      ,:WKDPTC-XFER-IN-RTL-AMT                                  
+                      ,:WKDPTC-XFER-OUT-RTL-AMT                                 
+                      ,:WKDPTC-RCPT-RTL-AMT                                     
+                      ,:WKDPTC-RCPT-NET-COST-AMT                                
+                      ,:WKDPTC-PADJ-RTL-AMT                                     
+                      ,:WKDPTC-PADJ-NET-COST-AMT                                
+                      ,:WKDPTC-PADJ-FRGT-COST-AMT                               
+                      ,:WKDPTC-INV-ADJ-RTL-AMT                                  
+                  FROM TWKDPTC                                                  
+W26603           WHERE FSCL_WK_NBR     = :WKDPTC-FSCL-WK-NBR                    
+W26603             AND FSCL_WK_END_DTE = :WKDPTC-FSCL-WK-END-DTE                
+W26603             AND DEPT_NBR        = :WKDPTC-DEPT-NBR                       
+W26603             AND CHNL_CDE        = :WKDPTC-CHNL-CDE                       
+W26603          WITH UR                                                         
+           END-EXEC                                                             
+      *                                                                         
+           EVALUATE SQLCODE                                                     
+               WHEN +0                                                          
+                   CONTINUE                                                     
+               WHEN +100                                                        
+                 SET PS-CURR-WEEK-ROW-NOT-FOUND    TO TRUE                      
+               WHEN OTHER                                                       
+                   MOVE '7300-SELECT-CURRENT'  TO PV-PARAGRAPH-NAME             
+                   MOVE PE-MSG-04              TO PV-OPERATION-ATTEMPTED        
+                   PERFORM 9999-SQL-ABEND                                       
+             END-EVALUATE.                                                      
+      *                                                                         
+      ******************************************************************        
+      * RETRIEVE LAST WEEK'S ENDING INVENTORY RETAIL/COST                       
+      *     THIS IS ALSO THE BEGINNING INVENTORY FOR THIS WEEK                  
+      ******************************************************************        
+       7350-SELECT-PREV-WEEK-END-INV.                                           
+      *                                                                         
+W26603     MOVE PV-HOLD-PFW-WK-NBR       TO WKDPTC-FSCL-WK-NBR.                 
+W26603     MOVE PV-HOLD-PFW-END-DTE      TO WKDPTC-FSCL-WK-END-DTE.             
+W26603     MOVE PV-HOLD-DEPT-NBR         TO WKDPTC-DEPT-NBR.                    
+W26603     MOVE PV-HOLD-CHNL-CDE         TO WKDPTC-CHNL-CDE.                    
+      *                                                                         
+           EXEC SQL                                                             
+                SELECT  END_INV_RTL_AMT                                         
+                      , END_INV_COST_AMT                                        
+                  INTO  :PV-PREV-WEEK-END-INV-RTL                               
+                       ,:PV-PREV-WEEK-END-INV-COST                              
+                  FROM  TWKDPTC                                                 
+W26603           WHERE FSCL_WK_NBR     = :WKDPTC-FSCL-WK-NBR                    
+W26603             AND FSCL_WK_END_DTE = :WKDPTC-FSCL-WK-END-DTE                
+W26603             AND DEPT_NBR        = :WKDPTC-DEPT-NBR                       
+W26603             AND CHNL_CDE        = :WKDPTC-CHNL-CDE                       
+W26603          WITH UR                                                         
+           END-EXEC.                                                            
+      *                                                                         
+           EVALUATE SQLCODE                                                     
+               WHEN 0                                                           
+                   IF ((PV-PREV-WEEK-END-INV-RTL   NOT = 0) OR                  
+                       (PV-PREV-WEEK-END-INV-COST NOT = 0))                     
+                       SET PS-PFM-INV-DOLLARS-FOUND TO TRUE                     
+                   END-IF                                                       
+               WHEN +100                                                        
+                   SET PS-PREV-WEEK-ROW-NOT-FOUND TO TRUE                       
+                   MOVE ZEROES TO PV-PREV-WEEK-END-INV-RTL                      
+                                  PV-PREV-WEEK-END-INV-COST                     
+               WHEN OTHER                                                       
+                   MOVE PE-MSG-02            TO PV-OPERATION-ATTEMPTED          
+                   MOVE  '7350-SELECT-PREV-WEEK-END-INV'                        
+                                             TO PV-PARAGRAPH-NAME               
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+      *                                                                         
+      ******************************************************************        
+      * 7400-PREV-SEASON-END-INV SELECTS THE ENDING INVENTORY COST &   *        
+      *      RETAIL FROM THE LAST DAY OF THE PREVIOUS FISCAL SEASON    *        
+      ******************************************************************        
+       7400-PREV-SEASON-END-INV.                                                
+      *                                                                         
+           MOVE 'N'    TO PS-PREV-SEASON-INV-SW.                                
+W26603     MOVE PV-HOLD-PREV-SEA-WK-NBR  TO WKDPTC-FSCL-WK-NBR.                 
+W26603     MOVE PV-HOLD-PREV-SEA-END-DTE TO WKDPTC-FSCL-WK-END-DTE.             
+W26603     MOVE PV-HOLD-DEPT-NBR         TO WKDPTC-DEPT-NBR.                    
+W26603     MOVE PV-HOLD-CHNL-CDE         TO WKDPTC-CHNL-CDE.                    
+      *                                                                         
+           EXEC SQL                                                             
+                SELECT  END_INV_RTL_AMT                                         
+                       ,END_INV_COST_AMT                                        
+                  INTO  :WKDPTC-END-INV-RTL-AMT                                 
+                       ,:WKDPTC-END-INV-COST-AMT                                
+                  FROM  TWKDPTC                                                 
+W26603           WHERE FSCL_WK_NBR     = :WKDPTC-FSCL-WK-NBR                    
+W26603             AND FSCL_WK_END_DTE = :WKDPTC-FSCL-WK-END-DTE                
+W26603             AND DEPT_NBR        = :WKDPTC-DEPT-NBR                       
+W26603             AND CHNL_CDE        = :WKDPTC-CHNL-CDE                       
+W26603          WITH UR                                                         
+           END-EXEC.                                                            
+      *                                                                         
+           EVALUATE SQLCODE                                                     
+               WHEN 0                                                           
+                   CONTINUE                                                     
+               WHEN +100                                                        
+                   SET PS-NO-PREV-SEASONAL-INV       TO TRUE                    
+               WHEN OTHER                                                       
+                   MOVE PE-MSG-02            TO PV-OPERATION-ATTEMPTED          
+                   MOVE  '7400-PREV-SEASON-END-INV'                             
+                                             TO PV-PARAGRAPH-NAME               
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      * 7450-GET-SEASONAL-WEEK WILL RETRIEVE ALL ROWS WITH AN ENDING            
+      * INVENTORY AMOUNT FOR EACH WEEK END DATE FOR THE CURRENT SEASON.         
+      ******************************************************************        
+       7450-GET-SEASONAL-WEEK.                                                  
+                                                                                
+           IF DT-SEA-WK-DTE (PV-SUB1, PV-SEA-SUB) NOT EQUAL SPACES              
+               MOVE DT-SEA-WK-DTE (PV-SUB1, PV-SEA-SUB)                         
+                     TO PV-SEA-WK-DTE-DB2                                       
+               MOVE DT-SEA-WK-NBR (PV-SUB1, PV-SEA-SUB)                         
+                     TO PV-SEA-WK-NBR-DB2                                       
+           ELSE                                                                 
+               SET PS-SEASON-WK-NOT-FOUND TO TRUE                               
+               SET PS-END-OF-CURR-SEASON-WKS TO TRUE.                           
+                                                                                
+           IF PS-NOT-END-OF-CURR-SEASON-WKS                                     
+W26603         MOVE PV-SEA-WK-NBR-DB2   TO WKDPTC-FSCL-WK-NBR                   
+W26603         MOVE PV-SEA-WK-DTE-DB2   TO WKDPTC-FSCL-WK-END-DTE               
+W26603         MOVE PV-HOLD-DEPT-NBR    TO WKDPTC-DEPT-NBR                      
+W26603         MOVE PV-HOLD-CHNL-CDE    TO WKDPTC-CHNL-CDE                      
+                                                                                
+               EXEC SQL                                                         
+               SELECT  XFER_IN_RTL_AMT                                          
+                       ,XFER_OUT_RTL_AMT                                        
+                       ,RCPT_RTL_AMT                                            
+                       ,RCPT_NET_COST_AMT                                       
+                       ,PADJ_RTL_AMT                                            
+                       ,PADJ_NET_COST_AMT                                       
+                       ,MKUP_RTL_AMT                                            
+                 INTO  :WKDPTC-XFER-IN-RTL-AMT                                  
+                      ,:WKDPTC-XFER-OUT-RTL-AMT                                 
+                      ,:WKDPTC-RCPT-RTL-AMT                                     
+                      ,:WKDPTC-RCPT-NET-COST-AMT                                
+                      ,:WKDPTC-PADJ-RTL-AMT                                     
+                      ,:WKDPTC-PADJ-NET-COST-AMT                                
+                      ,:WKDPTC-MKUP-RTL-AMT                                     
+                 FROM  TWKDPTC                                                  
+W26603           WHERE FSCL_WK_NBR     = :WKDPTC-FSCL-WK-NBR                    
+W26603             AND FSCL_WK_END_DTE = :WKDPTC-FSCL-WK-END-DTE                
+W26603             AND DEPT_NBR        = :WKDPTC-DEPT-NBR                       
+W26603             AND CHNL_CDE        = :WKDPTC-CHNL-CDE                       
+W26603          WITH UR                                                         
+               END-EXEC                                                         
+                                                                                
+               EVALUATE SQLCODE                                                 
+                    WHEN 0                                                      
+                        SET PS-SEASON-WK-FOUND TO TRUE                          
+                    WHEN +100                                                   
+                        SET PS-SEASON-WK-NOT-FOUND TO TRUE                      
+                    WHEN OTHER                                                  
+                        MOVE PE-MSG-04      TO PV-OPERATION-ATTEMPTED           
+                        MOVE '7450-GET-SEASONAL-WEEK'                           
+                                                   TO PV-PARAGRAPH-NAME         
+                        PERFORM 9999-SQL-ABEND                                  
+               END-EVALUATE                                                     
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 7460-GET-WEEK-PURCH.                                                    
+      ******************************************************************        
+W02151*7460-GET-WEEK-PURCH.                                                     
+   |  *                                                                         
+   |  *        EXEC SQL                                                         
+   |  *        SELECT   XFER_IN_RTL_AMT                                         
+   |  *                ,XFER_OUT_RTL_AMT                                        
+   |  *                ,RCPT_RTL_AMT                                            
+   |  *                ,RCPT_NET_COST_AMT                                       
+   |  *                ,PADJ_RTL_AMT                                            
+   |  *                ,PADJ_NET_COST_AMT                                       
+   |  *                ,MKUP_RTL_AMT                                            
+   |  *          INTO  :WKDPTC-XFER-IN-RTL-AMT                                  
+   |  *               ,:WKDPTC-XFER-OUT-RTL-AMT                                 
+   |  *               ,:WKDPTC-RCPT-RTL-AMT                                     
+   |  *               ,:WKDPTC-RCPT-NET-COST-AMT                                
+   |  *               ,:WKDPTC-PADJ-RTL-AMT                                     
+   |  *               ,:WKDPTC-PADJ-NET-COST-AMT                                
+   |  *               ,:WKDPTC-MKUP-RTL-AMT                                     
+   |  *          FROM  TWKMCLC                                                  
+   |  *          WHERE (FSCL_WK_NBR =     :PV-HOLD-FSCL-WK-NBR)                 
+   |  *            AND (FSCL_WK_END_DTE = :PV-HOLD-OPN-WK-END-DTE)              
+   |  *            AND (DEPT_NBR   =      :PV-HOLD-DEPT-NBR)                    
+   |  *            AND (MAJ_CL_NBR =      :PV-HOLD-MAJ-CL-NBR)                  
+   |  *            AND (CHNL_CDE   =      :PV-HOLD-CHNL-CDE)                    
+   |  *        END-EXEC                                                         
+   |  *                                                                         
+   |  *        EVALUATE SQLCODE                                                 
+   |  *             WHEN 0                                                      
+   |  *                 CONTINUE                                                
+   |  *             WHEN +100                                                   
+   |***                 SET PS-NO-WEEKLY-DATA-FOUND TO TRUE                     
+   |  *                 MOVE 0 TO WKDPTC-XFER-IN-RTL-AMT                        
+   |  *                           WKDPTC-XFER-OUT-RTL-AMT                       
+   |  *                           WKDPTC-RCPT-RTL-AMT                           
+   |  *                           WKDPTC-RCPT-NET-COST-AMT                      
+   |  *                           WKDPTC-PADJ-RTL-AMT                           
+   |  *                           WKDPTC-PADJ-NET-COST-AMT                      
+   |  *                           WKDPTC-MKUP-RTL-AMT                           
+   |  *             WHEN OTHER                                                  
+   |  *                 MOVE PE-MSG-04      TO PV-OPERATION-ATTEMPTED           
+   |  *                 MOVE '7460-GET-WEEK-PURCH'                              
+   |  *                                            TO PV-PARAGRAPH-NAME         
+   |  *                 PERFORM 9999-SQL-ABEND                                  
+   |  *        END-EVALUATE.                                                    
+W02151*                                                                         
+      ******************************************************************        
+      * 7475-CURR-SEASON-COST SELECTS THE ENDING INVENTORY COST &      *        
+      *      RETAIL FROM THE LAST DAY OF THE PREVIOUS FISCAL SEASON    *        
+      ******************************************************************        
+       7475-CURR-SEASON-COST.                                                   
+                                                                                
+           MOVE 'N'    TO PS-CURRENT-PURCH-COST-SW.                             
+W26603     MOVE PV-HOLD-FSCL-WK-NBR    TO WKDPTC-FSCL-WK-NBR.                   
+W26603     MOVE PV-HOLD-OPN-WK-END-DTE TO WKDPTC-FSCL-WK-END-DTE.               
+W26603     MOVE PV-HOLD-DEPT-NBR       TO WKDPTC-DEPT-NBR.                      
+W26603     MOVE PV-HOLD-CHNL-CDE       TO WKDPTC-CHNL-CDE.                      
+      *                                                                         
+           EXEC SQL                                                             
+                SELECT  RCPT_NET_COST_AMT                                       
+                       ,PADJ_NET_COST_AMT                                       
+                  INTO  :PV-CURR-WEEK-RCPT-NET-COST                             
+                       ,:PV-CURR-WEEK-PADJ-NET-COST                             
+                  FROM  TWKDPTC                                                 
+W26603           WHERE FSCL_WK_NBR     = :WKDPTC-FSCL-WK-NBR                    
+W26603             AND FSCL_WK_END_DTE = :WKDPTC-FSCL-WK-END-DTE                
+W26603             AND DEPT_NBR        = :WKDPTC-DEPT-NBR                       
+W26603             AND CHNL_CDE        = :WKDPTC-CHNL-CDE                       
+W26603          WITH UR                                                         
+           END-EXEC.                                                            
+      *                                                                         
+           EVALUATE SQLCODE                                                     
+               WHEN 0                                                           
+                   CONTINUE                                                     
+               WHEN +100                                                        
+                   SET PS-NO-CURRENT-PURCH-COSTS     TO TRUE                    
+               WHEN OTHER                                                       
+                   MOVE PE-MSG-02            TO PV-OPERATION-ATTEMPTED          
+                   MOVE  '7475-CURRENT-SEASON-COST'                             
+                                             TO PV-PARAGRAPH-NAME               
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+      *                                                                         
+      ******************************************************************        
+      * UPDATE COLUMNS WITH VALUES JUST CALCULATED FOR THIS DEPARTMENT          
+      ******************************************************************        
+       7500-UPDATE-PROCESSING.                                                  
+      *                                                                         
+W26603     MOVE PV-HOLD-FSCL-WK-NBR    TO WKDPTC-FSCL-WK-NBR.                   
+W26603     MOVE PV-HOLD-OPN-WK-END-DTE TO WKDPTC-FSCL-WK-END-DTE.               
+W26603     MOVE PV-HOLD-DEPT-NBR       TO WKDPTC-DEPT-NBR.                      
+W26603     MOVE PV-HOLD-CHNL-CDE       TO WKDPTC-CHNL-CDE.                      
+      *                                                                         
+           EXEC SQL                                                             
+               UPDATE TWKDPTC                                                   
+                  SET  SHNK_RTL_AMT     = :PV-SHNK-RTL-AMT                      
+                      ,END_INV_RTL_AMT  = :PV-END-INV-RTL-AMT                   
+                      ,CUM_MKUP_PCT     = :PV-CUM-MKUP-PCT                      
+                      ,END_INV_COST_AMT = :PV-END-INV-COST-AMT                  
+                      ,SLS_COST_AMT     = :PV-SLS-COST-AMT                      
+                      ,GRO_MRGN_AMT     = :PV-GRO-MRGN-AMT                      
+W26603           WHERE FSCL_WK_NBR      = :WKDPTC-FSCL-WK-NBR                   
+W26603             AND FSCL_WK_END_DTE  = :WKDPTC-FSCL-WK-END-DTE               
+W26603             AND DEPT_NBR         = :WKDPTC-DEPT-NBR                      
+W26603             AND CHNL_CDE         = :WKDPTC-CHNL-CDE                      
+           END-EXEC                                                             
+                                                                                
+           EVALUATE SQLCODE                                                     
+               WHEN 0                                                           
+                    ADD 1                TO PA-UPDATE-COUNT                     
+               WHEN OTHER                                                       
+                    DISPLAY '*************************************'             
+                    DISPLAY 'ROW IN PROCESS : ', PV-HOLD-ROW                    
+                    DISPLAY 'WEEK-END-DATE  : ',                                
+                                              PV-HOLD-OPN-WK-END-DTE            
+                    DISPLAY 'FISCAL WEEK NBR: ',                                
+                                                 PV-HOLD-FSCL-WK-NBR            
+                    MOVE PE-MSG-06        TO PV-OPERATION-ATTEMPTED             
+                    MOVE '7500-UPDATE-PROCESSING'                               
+                                          TO PV-PARAGRAPH-NAME                  
+                    PERFORM 9999-SQL-ABEND                                      
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      * 7600-GET-COMMIT-TIMESTAMP.                                     *        
+      *   GET THE TIMESTAMP FROM THE CHECKPOINT TABLE FOR NEXT COMMIT  *        
+      ******************************************************************        
+       7600-GET-COMMIT-TIMESTAMP.                                               
+      *                                                                         
+           EXEC SQL                                                             
+             SELECT (CURRENT TIMESTAMP + CKPT_FRQNCY_QTY SECONDS)               
+               INTO :PV-COMMIT-TIMESTAMP                                        
+               FROM TCKRSTCNTL                                                  
+              WHERE JOB_NAME  = :PC-JOB-NAME                                    
+                AND PLAN_NAME = :PC-PROGRAM-NAME                                
+           END-EXEC.                                                            
+      *                                                                         
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = 0                                                 
+                   CONTINUE                                                     
+               WHEN SQLCODE NOT EQUAL ZERO                                      
+                   MOVE '7600-GET-COMMIT-TIMESTAMP' TO PV-PARAGRAPH-NAME        
+                   MOVE PE-MSG-07             TO PV-OPERATION-ATTEMPTED         
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+      *                                                                         
+      ******************************************************************        
+      * 7650-INIT-CHECKPOINT-SELECT                                    *        
+      * CHECK STATUS CODE TO SEE IF THIS IS A RESTART CONDITION        *        
+      ******************************************************************        
+       7650-INIT-CHECKPOINT-SELECT.                                             
+      *                                                                         
+           EXEC SQL                                                             
+             SELECT  CKPT_STAT_CODE                                             
+                    ,CKPT_FRQNCY_QTY                                            
+               INTO  :TCKRSTCNTL-CKPT-STAT-CODE                                 
+                    ,:TCKRSTCNTL-CKPT-FRQNCY-QTY                                
+               FROM  TCKRSTCNTL                                                 
+              WHERE  JOB_NAME  = :PC-JOB-NAME                                   
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                               
+           END-EXEC.                                                            
+      *                                                                         
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE '7650-INIT-CHECKPOINT-SELECT' TO PV-PARAGRAPH-NAME          
+               MOVE PE-MSG-07             TO PV-OPERATION-ATTEMPTED             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      * 7700-SELECT-RESTART-INFO                                       *        
+      * OBTAIN INFORMATION REGARDING WHERE TO RESTART TABLE PROCESSING *        
+      ******************************************************************        
+       7700-SELECT-RESTART-INFO.                                                
+      *                                                                         
+           EXEC SQL                                                             
+             SELECT  WORK_STRG_DESC                                             
+               INTO  :TCKRSTINF-WORK-STRG-DESC                                  
+               FROM  TCKRSTINF                                                  
+              WHERE  JOB_NAME  = :PC-JOB-NAME                                   
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                               
+           END-EXEC.                                                            
+      *                                                                         
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE '*7700-SELECT-RESTART-INFO*' TO PV-PARAGRAPH-NAME           
+               MOVE PE-MSG-11             TO PV-OPERATION-ATTEMPTED             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      * 7750-SET-CURRENT-TIMESTAMP.                                    *        
+      * CURRENT TIMESTAMP SET TO BE COMPARED TO COMMIT TIMESTAMP       *        
+      ******************************************************************        
+       7750-SET-CURRENT-TIMESTAMP.                                              
+      *                                                                         
+           EXEC SQL                                                             
+                SET :PV-CURRENT-TIMESTAMP = CURRENT TIMESTAMP                   
+           END-EXEC.                                                            
+      *                                                                         
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE PE-MSG-12             TO PV-OPERATION-ATTEMPTED             
+               MOVE '*7750-SET-CURRENT-TIMESTAMP*' TO PV-PARAGRAPH-NAME         
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      * 7800-COMMIT-PROCESSING.                                        *        
+      * COMPARE COMMIT TIMESTAMP TO CURRENT TO DETERMINE IF COMMIT REQD*        
+      ******************************************************************        
+       7800-COMMIT-PROCESSING.                                                  
+           MOVE '*7800-COMMIT-PROCESSING*'    TO PV-PARAGRAPH-NAME.             
+      *                                                                         
+           PERFORM 7750-SET-CURRENT-TIMESTAMP.                                  
+      *                                                                         
+           IF (PV-CURRENT-TIMESTAMP > PV-COMMIT-TIMESTAMP)  OR                  
+              (PS-EOF-EXTR-FILE)                                                
+      * PREPARE COMMIT RECORD FOR UPDATE                                        
+               ADD 1                          TO PA-COMMIT-COUNT                
+               MOVE PV-HOLD-OPN-WK-END-DTE    TO CR-FISCAL-WK-END-DTE           
+               MOVE PV-HOLD-FSCL-WK-NBR       TO CR-FISCAL-WK-NBR               
+               MOVE PV-HOLD-DEPT-NBR          TO CR-DEPT-NBR                    
+               MOVE PV-HOLD-CHNL-CDE          TO CR-CHNL-CDE                    
+               MOVE PA-EXTRACT-RECS-READ      TO CR-TWKDPTC-INPUT-COUNT         
+               MOVE PA-UPDATE-COUNT           TO CR-TWKDPTC-UPDATE-COUNT        
+               MOVE PA-INSERT-COUNT           TO CR-TWKDPTC-INSERT-COUNT        
+               MOVE PA-COMMIT-COUNT           TO CR-TWKDPTC-COMMIT-COUNT        
+      * MOVE COMMIT INFO TO WORKING STORAGE ROW                                 
+               MOVE CR-CHECKPOINT-RESTART-AREA TO                               
+                                                TCKRSTINF-WORK-STRG-DESC        
+               MOVE 'Y' TO PS-COMMIT-TAKEN-SW                                   
+               IF PS-FIRST-COMMIT                                               
+                   MOVE '9' TO TCKRSTCNTL-CKPT-STAT-CODE                        
+                   PERFORM 7900-UPDATE-CHECKPOINT-STATUS                        
+                   MOVE 'N' TO PS-FIRST-COMMIT-SW                               
+               END-IF                                                           
+      *                                                                         
+               PERFORM 7850-COMMIT-CHANGES                                      
+      *                                                                         
+               PERFORM 7600-GET-COMMIT-TIMESTAMP                                
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      * 7850-COMMIT-CHANGES.                                                    
+      * UPDATE CHECKPOINT INFORMATION TABLE. TAKE A COMMIT.                     
+      ******************************************************************        
+       7850-COMMIT-CHANGES.                                                     
+      *                                                                         
+           EXEC SQL                                                             
+             UPDATE TCKRSTINF                                                   
+                SET WORK_STRG_DESC = :TCKRSTINF-WORK-STRG-DESC                  
+              WHERE JOB_NAME       = :PC-JOB-NAME                               
+                AND PLAN_NAME      = :PC-PROGRAM-NAME                           
+           END-EXEC.                                                            
+      *                                                                         
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE PE-MSG-08                  TO PV-OPERATION-ATTEMPTED        
+               MOVE  '* 7850-COMMIT-CHANGES *' TO PV-PARAGRAPH-NAME             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+           EXEC SQL                                                             
+               COMMIT                                                           
+           END-EXEC.                                                            
+      *                                                                         
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE PE-MSG-09                  TO PV-OPERATION-ATTEMPTED        
+               MOVE  '* 7850-COMMIT-CHANGES *' TO PV-PARAGRAPH-NAME             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      * UPDATE CHECKPOINT STATUS                                                
+      ******************************************************************        
+       7900-UPDATE-CHECKPOINT-STATUS.                                           
+      *                                                                         
+           EXEC SQL                                                             
+             UPDATE  TCKRSTCNTL                                                 
+                SET  CKPT_STAT_CODE = :TCKRSTCNTL-CKPT-STAT-CODE                
+              WHERE  JOB_NAME  = :PC-JOB-NAME                                   
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                               
+           END-EXEC.                                                            
+      *                                                                         
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE '7900-UPDATE-CHECKPOINT-STATUS' TO PV-PARAGRAPH-NAME        
+               MOVE PE-MSG-10                  TO PV-OPERATION-ATTEMPTED        
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+           EJECT                                                                
+      *                                                                         
+      ******************************************************************        
+      * 7950-INSERT-CARRY-FWD-ROW                                               
+      * PERFORMED IF NO ROW IS FOUND ON DB2 (FOR THIS PROCESSING WEEK)          
+      * BUT INVENTORY DOLLARS (COST AND/OR RETAIL) FOUND FOR LAST WEEK          
+      ******************************************************************        
+       7950-INSERT-CARRY-FWD-ROW.                                               
+      *                                                                         
+W26603     MOVE PV-HOLD-FSCL-WK-NBR    TO WKDPTC-FSCL-WK-NBR.                   
+W26603     MOVE PV-HOLD-OPN-WK-END-DTE TO WKDPTC-FSCL-WK-END-DTE.               
+W26603     MOVE PV-HOLD-DEPT-NBR       TO WKDPTC-DEPT-NBR.                      
+W26603     MOVE PV-HOLD-CHNL-CDE       TO WKDPTC-CHNL-CDE.                      
+W26603     MOVE PV-PREV-WEEK-END-INV-RTL TO WKDPTC-END-INV-RTL-AMT.             
+W26603     MOVE PV-PREV-WEEK-END-INV-COST TO WKDPTC-END-INV-COST-AMT.           
+      *                                                                         
+           EXEC SQL                                                             
+               INSERT INTO TWKDPTC                                              
+                   ( FSCL_WK_NBR                                                
+                    ,FSCL_WK_END_DTE                                            
+                    ,DEPT_NBR                                                   
+                    ,CHNL_CDE                                                   
+                    ,SLS_RTL_AMT                                                
+                    ,MKDN_PLU_RTL_AMT                                           
+                    ,MKDN_RGST_RTL_AMT                                          
+                    ,MKDN_UMTCH_RTL_AMT                                         
+                    ,MKDN_BYR_RTL_AMT                                           
+                    ,MKDN_STR_RTL_AMT                                           
+                    ,MKUP_RTL_AMT                                               
+                    ,XFER_IN_RTL_AMT                                            
+                    ,XFER_OUT_RTL_AMT                                           
+                    ,RCPT_RTL_AMT                                               
+                    ,RCPT_NET_COST_AMT                                          
+                    ,PADJ_RTL_AMT                                               
+                    ,PADJ_NET_COST_AMT                                          
+                    ,PADJ_FRGT_COST_AMT                                         
+                    ,INV_ADJ_RTL_AMT                                            
+                    ,SHNK_RTL_AMT                                               
+                    ,END_INV_RTL_AMT                                            
+                    ,CUM_MKUP_PCT                                               
+                    ,END_INV_COST_AMT                                           
+                    ,SLS_COST_AMT                                               
+                    ,GRO_MRGN_AMT )                                             
+W26603         VALUES (:WKDPTC-FSCL-WK-NBR                                      
+W26603                ,:WKDPTC-FSCL-WK-END-DTE                                  
+W26603                ,:WKDPTC-DEPT-NBR                                         
+W26603                ,:WKDPTC-CHNL-CDE                                         
+                      ,0.                                                       
+                      ,0.                                                       
+                      ,0.                                                       
+                      ,0.                                                       
+                      ,0.                                                       
+                      ,0.                                                       
+                      ,0.                                                       
+                      ,0.                                                       
+                      ,0.                                                       
+                      ,0.                                                       
+                      ,0.                                                       
+                      ,0.                                                       
+                      ,0.                                                       
+                      ,0.                                                       
+                      ,0.                                                       
+                      ,0.                                                       
+W26603                ,:WKDPTC-END-INV-RTL-AMT                                  
+                      ,0.                                                       
+W26603                ,:WKDPTC-END-INV-COST-AMT                                 
+                      ,0.                                                       
+                      ,0. )                                                     
+           END-EXEC                                                             
+      *                                                                         
+           IF SQLCODE = 0                                                       
+               ADD 1                      TO PA-INSERT-COUNT                    
+           ELSE                                                                 
+               MOVE '7950-INSERT-CARRY-FWD-ROW' TO PV-PARAGRAPH-NAME            
+               MOVE PE-MSG-14             TO PV-OPERATION-ATTEMPTED             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      *  FIND RESTART RECORD AND CKPT RESTART AT POINT OF LAST COMMIT. *        
+      *  RESET STATUS CODE, DISPLAY FINAL COUNTS , CLOSE INPUT FILE    *        
+      ******************************************************************        
+       8000-EOJ-ROUTINE.                                                        
+      *                                                                         
+      *    COMMIT ANY FINAL CHANGES THAT MAY HAVE BEEN MADE                     
+                                                                                
+           PERFORM 7800-COMMIT-PROCESSING                                       
+                                                                                
+           MOVE '0' TO TCKRSTCNTL-CKPT-STAT-CODE.                               
+           PERFORM 7900-UPDATE-CHECKPOINT-STATUS.                               
+           CLOSE WKDPTC-EXTR-FILE.                                              
+      *                                                                         
+           DISPLAY '                                             '.             
+           DISPLAY '******* END OF JOB STATISTICS ********'.                    
+           DISPLAY '                                             '.             
+           DISPLAY 'INPUT EXTRACT RECORDS READ ' PA-EXTRACT-RECS-READ.          
+           DISPLAY '  TWKDPTC ROWS UPDATED   ', PA-UPDATE-COUNT.                
+           DISPLAY '  TWKDPTC ROWS INSERTED  ', PA-INSERT-COUNT.                
+           DISPLAY '                                             '.             
+           DISPLAY '  COMMITS TAKEN         ', PA-COMMIT-COUNT.                 
+           DISPLAY '                                             '.             
+           DISPLAY 'EOJ EOJ EOJ EOJ EOJ EOJ EOJ EOJ EOJ EOJ EOJ EOJ '.          
+                                                                                
+      *****************************************************************         
+      * 8100-GET-CHANNEL-AND-ACCUM.                                             
+      *****************************************************************         
+       8100-GET-CHANNEL-AND-ACCUM.                                              
+                                                                                
+W31475***  MOVE WKSHNK-STR-NBR TO WS-EDIT-STORE-NUM.                            
+  |   *    IF PV-HOLD-CHNL-CDE IS NOT EQUAL TO 'P' AND 'V'                      
+  |   *        ADD WKSHNK-SHNK-RTL-AMT TO PV-SHNK-RTL-AMT-P                     
+  |   *    ELSE                                                                 
+  |   *                                                                         
+  |   *        MOVE WKSHNK-STR-NBR TO PV-STR-NDX                                
+  |   *                                                                         
+  |   *        EVALUATE TRUE                                                    
+  |   *          WHEN (PV-HOLD-CHNL-CDE IS EQUAL TO 'V' AND                     
+  |   *                WS-E-BUS-LOC-IND (PV-STR-NDX) EQUAL 'Y')                 
+  |   *            ADD WKSHNK-SHNK-RTL-AMT TO PV-SHNK-RTL-AMT-V                 
+  |   *          WHEN (PV-HOLD-CHNL-CDE IS EQUAL TO 'P' AND                     
+  |   *                WS-E-BUS-LOC-IND (PV-STR-NDX) EQUAL 'N')                 
+  |   *            ADD WKSHNK-SHNK-RTL-AMT TO PV-SHNK-RTL-AMT-P                 
+  |   *        END-EVALUATE                                                     
+  |   *    END-IF.                                                              
+  |        IF PV-HOLD-CHNL-CDE IS NOT EQUAL TO 'P' AND 'V'                      
+  |            PERFORM VARYING ROW-ID FROM 1 BY 1                               
+  |              UNTIL ROW-ID > SQLERRD (3)                                     
+  |                ADD HV-WKSHNK-SHNK-RTL-AMT (ROW-ID)                          
+  |                 TO PV-SHNK-RTL-AMT-P                                        
+  |            END-PERFORM                                                      
+  |        ELSE                                                                 
+  |            PERFORM VARYING ROW-ID FROM 1 BY 1                               
+  |              UNTIL ROW-ID > SQLERRD (3)                                     
+  |              MOVE HV-WKSHNK-STR-NBR (ROW-ID)                                
+  |                TO PV-STR-NDX                                                
+  |                                                                             
+  |              EVALUATE TRUE                                                  
+  |                WHEN (PV-HOLD-CHNL-CDE IS EQUAL TO 'V' AND                   
+  |                      WS-E-BUS-LOC-IND (PV-STR-NDX) EQUAL 'Y')               
+  |                  ADD HV-WKSHNK-SHNK-RTL-AMT (ROW-ID)                        
+  |                   TO PV-SHNK-RTL-AMT-V                                      
+  |                                                                             
+  |                WHEN (PV-HOLD-CHNL-CDE IS EQUAL TO 'P' AND                   
+  |                      WS-E-BUS-LOC-IND (PV-STR-NDX) EQUAL 'N')               
+  |                  ADD HV-WKSHNK-SHNK-RTL-AMT (ROW-ID)                        
+  |                   TO PV-SHNK-RTL-AMT-P                                      
+  |              END-EVALUATE                                                   
+  |            END-PERFORM                                                      
+W31475     END-IF.                                                              
+                                                                                
+W09051*****************************************************************         
+W26603* 8200-OPEN-XMTLOC.                                                       
+  |   *****************************************************************         
+  |    8200-OPEN-XMTLOC.                                                        
+  |                                                                             
+  |        EXEC SQL                                                             
+W26603         OPEN XMTLOC_CURSOR                                               
+  |        END-EXEC.                                                            
+  |                                                                             
+  |        EVALUATE TRUE                                                        
+  |          WHEN SQLCODE IS EQUAL TO ZERO                                      
+  |            CONTINUE                                                         
+  |          WHEN SQLWARN IS NOT EQUAL TO SPACES                                
+  |          WHEN SQLCODE IS NOT EQUAL TO ZERO                                  
+W26603        MOVE '8200-OPEN-XMTLOC' TO PV-PARAGRAPH-NAME                      
+  |           MOVE PE-MSG-03           TO PV-OPERATION-ATTEMPTED                
+W26603        MOVE 'Y'                 TO PS-XMTLOC-DONE-SW                     
+  |           PERFORM 9999-SQL-ABEND                                            
+  |        END-EVALUATE.                                                        
+  |                                                                             
+  |   *****************************************************************         
+  |   * 8300-LOAD-STORE-TABLE.                                                  
+  |   *****************************************************************         
+  |    8300-LOAD-STORE-TABLE.                                                   
+  |                                                                             
+  |        EXEC SQL                                                             
+W26603         FETCH XMTLOC_CURSOR                                              
+W26603         INTO :XMT00001-LOC-NBR,                                          
+W26603              :XMT00001-E-BUS-IND                                         
+  |        END-EXEC.                                                            
+  |                                                                             
+  |        EVALUATE TRUE                                                        
+  |          WHEN SQLCODE IS EQUAL TO ZERO                                      
+W26603         MOVE XMT00001-LOC-NBR TO PV-STR-NDX                              
+W26603         MOVE XMT00001-E-BUS-IND                                          
+  |                            TO WS-E-BUS-LOC-IND (PV-STR-NDX)                 
+  |          WHEN SQLCODE IS EQUAL TO +100                                      
+W26603         MOVE 'Y' TO PS-XMTLOC-DONE-SW                                    
+  |          WHEN SQLWARN IS NOT EQUAL TO SPACES                                
+  |          WHEN SQLCODE IS NOT EQUAL TO ZERO                                  
+  |            MOVE '8300-LOAD-STORE-TABLE' TO PV-PARAGRAPH-NAME                
+  |            MOVE PE-MSG-02  TO PV-OPERATION-ATTEMPTED                        
+W26603         MOVE 'Y'        TO PS-XMTLOC-DONE-SW                             
+  |            PERFORM 9999-SQL-ABEND                                           
+  |        END-EVALUATE.                                                        
+  |                                                                             
+  |   *****************************************************************         
+W26603* 8400-CLOSE-XMTLOC.                                                      
+  |   *****************************************************************         
+W26603 8400-CLOSE-XMTLOC.                                                       
+  |                                                                             
+  |        EXEC SQL                                                             
+W26603         CLOSE XMTLOC_CURSOR                                              
+  |        END-EXEC.                                                            
+  |                                                                             
+   |       EVALUATE TRUE                                                        
+   |         WHEN SQLCODE IS EQUAL TO ZERO                                      
+   |           CONTINUE                                                         
+   |         WHEN SQLWARN IS NOT EQUAL TO SPACES                                
+   |         WHEN SQLCODE IS NOT EQUAL TO ZERO                                  
+W26603        MOVE '8400-CLOSE-XMTLOC' TO PV-PARAGRAPH-NAME                     
+   |          MOVE PE-MSG-05            TO PV-OPERATION-ATTEMPTED               
+W26603        MOVE 'Y'                 TO PS-XMTLOC-DONE-SW                     
+   |          PERFORM 9999-SQL-ABEND                                            
+   |       END-EVALUATE.                                                        
+W09051                                                                          
+      ******************************************************************00000100
+      *  THIS ROUTINE FORCES AN ABEND DUE TO A NON-DB2 RELATED PROBLEM. 00000200
+      ******************************************************************00000300
+       9999-ABEND.                                                      00000400
+                                                                        00000500
+           DISPLAY '**  ABEND     **'.                                  00000700
+           DISPLAY '**  PROGRAM   **  = ' PC-PROGRAM-NAME.                      
+           DISPLAY '**  PARAGRAPH **  = ' PV-PARAGRAPH-NAME.            00000900
+           DISPLAY '**'                                                 00001100
+           DISPLAY '**'                                                 00001200
+           DISPLAY '**********************************'                 00001300
+           CALL 'ILBOABN0'  USING ABEND-CODE.                           00002000
+                                                                        00010000
+      ******************************************************************        
+      *  STANDARD DB2 ERROR ABEND ROUTINE                                       
+      *  THIS ROUTINE FORCES AN ABEND DUE TO A DB2 PROBLEM.                     
+      ******************************************************************        
+       9999-SQL-ABEND.                                                          
+                                                                                
+           MOVE +4013                 TO ABEND-CODE.                            
+           DISPLAY '**  ABEND     **'.                                          
+           DISPLAY '**  PROGRAM   ** => ' PC-PROGRAM-NAME.                      
+           DISPLAY '**  PARAGRAPH **  = ' PV-PARAGRAPH-NAME.                    
+           DISPLAY '**  OPERATION **  = ' PV-OPERATION-ATTEMPTED.               
+                                                                                
+      *    THE FOLLOWING COPYBOOK UTILIZES THE DB2 ABEND MODULE                 
+      *    DSNTIAR TO CONVERT SQLCA INTO UNDERSTANDABLE VERBAGE.                
+                                                                                
+           COPY DPPD004.                                                        
+           CALL 'ILBOABN0'  USING ABEND-CODE.                                   
+      *                                                                         

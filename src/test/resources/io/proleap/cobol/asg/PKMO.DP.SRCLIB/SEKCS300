@@ -1,0 +1,497 @@
+       IDENTIFICATION DIVISION.                                                 
+       PROGRAM-ID.                SEKCS300.                                     
+       AUTHOR.                    MICHAEL OLSON (OTI).                          
+       INSTALLATION.              KOHLS.                                        
+       DATE-WRITTEN.              SEPTEMBER 1998.                               
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *  CICS PROGRAM                                                  *        
+      *      THIS PROGRAM is the CICS component of the enterprise      *        
+      *      password sychronization project.  This program operating  *        
+      *      via the CICS WEB interface validates the users password   *        
+      *      against RACF.                                             *        
+      *                                                                *        
+      *  This program is a stateless server and operates without a     *        
+      *  token from DPKCS230.  This program and SEKCS301 heve special  *        
+      *  handling in dpkcs230 bypassing the token handling, not reqd.  *        
+      *  All input for a password change or check operation is passed  *        
+      *  in a single request and the results passed completely.  Each  *        
+      *  interaction with the server is a fresh request.               *        
+      *                                                                *        
+      *  The requestor passes a command string of type get with a      *        
+      *  command token followed by formatted input of the form:        *        
+      *      ../SEKCS300?cmd=XXTOKENXXUUUUUUUUOOOOOOOONNNNNNNN         *        
+      *  where xxtokenxx is a 10 char literal representing the command *        
+      *  UUUUUUUU 8 char userid padded with spaces                     *        
+      *  OOOOOOOO 8 char old/current password padded with spaces       *        
+      *  NNNNNNNN 8 char new password padded with spaces.              *        
+      *      Note: spaces from browser/app should be %20               *        
+      *                                                                *        
+      *----------------------------------------------------------------*        
+      *  08/01/2000  Jeff Roubik                                       *        
+      *              Modified to pass only a -110 return code if       *        
+      *              check or change failes.  This is so that outside  *        
+      *              hackers can't narrow down what the problem is and *        
+      *              make better guesses at breaking into the system.  *        
+      *----------------------------------------------------------------*        
+      *  10/16/2000  Jeff Roubik                                       *        
+      *              Pass certain return codes back if they don't      *        
+      *              present a security risk.                          *        
+      ******************************************************************        
+207210*  07/05/2018  Jim Hunter    (CHG0207210)                        *        
+207210*              For Mainframe Refactoring:                        *        
+207210*              In the EXEC CICS VERIFY and CHANGE calls, specify *        
+207210*              the password before the user id. (Find 207210)    *        
+207210******************************************************************        
+       ENVIRONMENT DIVISION.                                                    
+       DATA DIVISION.                                                           
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-LOG-QUEUE-RESOURCE    PIC  X(04)   VALUE 'CSSL'.              
+           05  PC-LOG-QUEUE             PIC  X(04)   VALUE 'CSSL'.              
+       01  PL-PROGRAM-LOG-VARIABLES.                                            
+           05  PL-LOG-SUB       PIC  9(02)  VALUE ZERO.                         
+           05  PL-LOG-LINE      PIC  X(100) VALUE SPACE.                        
+           05  PL-LOG-LINES-TABLE.                                              
+               10  FILLER       PIC  X(11)  VALUE ' SEKCS300: '.                
+               10  FILLER       PIC  X(14)  VALUE 'An attempt to '.             
+               10  PL-ACTION    PIC  X(06)  VALUE SPACES.                       
+               10  FILLER       PIC  X(18)  VALUE ' the password for '.         
+               10  PL-USERID    PIC  X(08)  VALUE SPACE.                        
+               10  FILLER       PIC  X(43)  VALUE 'failed.'.                    
+                                                                                
+               10  FILLER       PIC  X(11)  VALUE SPACES.                       
+               10  FILLER       PIC  X(05)  VALUE 'RESP='.                      
+               10  PL-RESP      PIC  9(04)  VALUE ZERO.                         
+               10  FILLER       PIC  X(08)  VALUE '  RESP2='.                   
+               10  PL-RESP2     PIC  9(04)  VALUE ZERO.                         
+               10  FILLER       PIC  X(15)  VALUE '  occurred in  '.            
+               10  PL-PARAGRAPH PIC  X(53)  VALUE SPACE.                        
+                                                                                
+               10  FILLER       PIC  X(11)  VALUE SPACES.                       
+               10  PL-MESSAGE   PIC  X(89)  VALUE SPACE.                        
+           05  PL-LOG-LINES  REDEFINES PL-LOG-LINES-TABLE                       
+               OCCURS 3 TIMES   PIC  X(100).                                    
+       01  WS-VARIABLES.                                                        
+           05  WS-COUNTER         PIC 9(05).                                    
+           05  WS-PGMID           PIC X(08) VALUE 'SEKCS300'.                   
+           05  WS-PWDCHK          PIC X(10) VALUE 'XXPWDCHKXX'.                 
+           05  WS-PWDCHG          PIC X(10) VALUE 'XXPWDCHGXX'.                 
+           05  WS-KEYWORD         PIC X(10) VALUE SPACES.                       
+           05  WS-RESP            PIC S9(8) COMP.                               
+           05  WS-RESP2           PIC S9(8) COMP.                               
+           05  WS-USER-STATUS     PIC X.                                        
+               88  WS-USERID-FOUND          VALUE 'Y'.                          
+           05  WS-KEYWORD-STATUS  PIC X.                                        
+               88  WS-KEYWORD-FOUND         VALUE 'Y'.                          
+           05  WS-USERID          PIC  X(08).                                   
+           05  WS-PASSWORD        PIC  X(08).                                   
+           05  WS-NEWPASSWORD     PIC  X(08).                                   
+           05  WS-CHANGE-TIME     PIC S9(15) COMP-3.                            
+           05  WS-EXPIRY-TIME     PIC S9(15) COMP-3.                            
+           05  WS-LAST-USE-TIME   PIC S9(15) COMP-3.                            
+           05  WS-INVALID-COUNT   PIC S9(04) COMP.                              
+           05  WS-DAYS-LEFT       PIC S9(04) COMP.                              
+       01  EM-ERROR-MESSAGE-LIST.                                               
+            05 EM-MESSAGE0                  PIC X(71) VALUE                     
+            'New passwords not equal.  Please reenter.'.                        
+            05 EM-MESSAGE1                  PIC X(71) VALUE                     
+            'Userid not found on system.'.                                      
+            05 EM-MESSAGE2                  PIC X(71) VALUE                     
+            'Password as entered is invalid.  Please try again.'.               
+            05 EM-MESSAGE2A                 PIC X(71) VALUE                     
+            'Old password as entered is invalid.  Please try again.'.           
+            05 EM-MESSAGE3                  PIC X(71) VALUE                     
+            'Your password has expired.  Please enter new password.'.           
+            05 EM-MESSAGE4                  PIC X(71) VALUE                     
+            'New password as entered is invalid.'.                              
+            05 EM-MESSAGE13                 PIC X(71) VALUE                     
+            'Unknown return code from external security manager.'.              
+            05 EM-MESSAGE18                 PIC X(71) VALUE                     
+            'The external security manager is not initialized'.                 
+            05 EM-MESSAGE19                 PIC X(71) VALUE                     
+            'Your userid has been revoked. Please call help desk.'.             
+            05 EM-MESSAGE22                 PIC X(71) VALUE                     
+            'The change password request failed in SECLABEL proc.'.             
+            05 EM-MESSAGE29                 PIC X(71) VALUE                     
+            'The external security manager is not responding.'.                 
+            05 EM-MESSAGE31                 PIC X(71) VALUE                     
+            'Userid is revoked in the connection to the default group.'.        
+            05 EM-MESSAGE32                 PIC X(71) VALUE                     
+            'Invalid userid entered.'.                                          
+            05 EM-MESSAGEOK                 PIC X(71) VALUE                     
+            'Action Successful.'.                                               
+            05 EM-MESSAGE-CHECK-FAILED      PIC X(71) VALUE                     
+            'Password Check Failed.'.                                           
+            05 EM-MESSAGE-CHANGE-FAILED     PIC X(71) VALUE                     
+            'Password Change Failed.'.                                          
+            05 EM-MESSAGE-INTERNAL-ERR      PIC X(71) VALUE                     
+            'Internal Error.  Please call help desk'.                           
+            05 EM-MESSAGE-NO-KEYWORD        PIC X(71) VALUE                     
+            'A valid keyword was not supplied.'.                                
+            05 EM-MESSAGE-NO-COMMAREA       PIC X(71) VALUE                     
+            'A commarea was not supplied.'.                                     
+                                                                                
+       01  EM-ERROR-MESSAGE.                                                    
+           05  EM-LENGTH1                 PIC 9(8) COMP                         
+            VALUE 179.                                                          
+           05  EM-RESP                    PIC X(15)                             
+            VALUE 'HTTP/1.0 200 OK'.                                            
+           05  EM-CRLF1                   PIC X(2)                              
+            VALUE X'0D25'.                                                      
+           05  EM-HDR1                    PIC X(23)                             
+            VALUE 'CONTENT-TYPE: text/html'.                                    
+           05  EM-CRLF2                   PIC X(4)                              
+            VALUE X'0D250D25'.                                                  
+           05  EM-LINE2                   PIC X(51)                             
+            VALUE '<HTML><HEAD><TITLE>CICS PASSWORD SYNC WEB INTERFACE'.        
+           05  EM-LINE3                   PIC X(15)                             
+            VALUE '</title></head>'.                                            
+           05  EM-CRLF2                   PIC X(2)                              
+            VALUE X'0D25'.                                                      
+           05  EM-LINE4                   PIC X(47)                             
+            VALUE '<BODY><H1>Failure in SECKS300             </H1>'.            
+           05  EM-CRLF3                   PIC X(2)                              
+            VALUE X'0D25'.                                                      
+           05  EM-LINE24                  PIC X(14)                             
+            VALUE '</body></html>'.                                             
+       01  P1-PAGE-INFO1.                                                       
+           05  P1-INFO1-LENGTH1           PIC 9(8) COMP                         
+            VALUE 320.                                                          
+           05  P1-RESP                    PIC X(15)                             
+            VALUE 'HTTP/1.0 200 OK'.                                            
+           05  P1-CRLF1                   PIC X(2)                              
+            VALUE X'0D25'.                                                      
+           05  P1-HDR1                    PIC X(23)                             
+            VALUE 'CONTENT-TYPE: text/html'.                                    
+           05  P1-CRLF2                   PIC X(4)                              
+            VALUE X'0D250D25'.                                                  
+           05  P1-LINE2                   PIC X(51)                             
+           VALUE '<HTML><HEAD><TITLE>CICS PASSWORD SYNC WEB INTERFACE'.         
+           05  P1-LINE3                   PIC X(15)                             
+            VALUE '</title></head>'.                                            
+           05  P1-CRLF2                   PIC X(2)                              
+            VALUE X'0D25'.                                                      
+           05  P1-LINE4                   PIC X(42)                             
+            VALUE '<BODY><H1>CICS PASSWORD SYNC RESPONSE</H1>'.                 
+           05  P1-CRLF3                   PIC X(2)                              
+            VALUE X'0D25'.                                                      
+           05  P1-LINE5                   PIC X(3)                              
+            VALUE '<P>'.                                                        
+           05  P1-COMMAND                 PIC X(10)                             
+            VALUE SPACES.                                                       
+           05  P1-RETURNCODE              PIC X(04)                             
+            VALUE SPACES.                                                       
+           05  P1-USERID                  PIC X(08)                             
+            VALUE SPACES.                                                       
+           05  P1-PASSWORD-EXPIRES        PIC X(08)                             
+            VALUE SPACES.                                                       
+           05  P1-PASSWORD-CHANGED        PIC X(08)                             
+            VALUE SPACES.                                                       
+           05  P1-LAST-USE                PIC X(08)                             
+            VALUE SPACES.                                                       
+           05  P1-INVALID-COUNT           PIC X(4)                              
+            VALUE SPACES.                                                       
+           05  P1-DAYS-LEFT               PIC X(4)                              
+            VALUE SPACES.                                                       
+           05  P1-MESSAGE                 PIC X(71)                             
+            VALUE SPACES.                                                       
+           05  P1-CRLF4                   PIC X(2)                              
+            VALUE X'0D25'.                                                      
+           05  P1-LINE6                   PIC X(4)                              
+           VALUE '</P>'.                                                        
+           05  P1-CRLF11                  PIC X(2)                              
+            VALUE X'0D25'.                                                      
+           05  P1-LINE7                   PIC X(14)                             
+            VALUE '</body></html>'.                                             
+           05  P1-BUFFER                  PIC X(100)                            
+            VALUE SPACES.                                                       
+                                                                                
+       01  CA-COMMAREA                    PIC X(1000).                          
+                                                                                
+                                                                                
+       LINKAGE SECTION.                                                         
+       01  DFHCOMMAREA.                                                         
+           05  LS-OUTPUT                  PIC X(1000).                          
+                                                                                
+                                                                                
+       PROCEDURE DIVISION.                                                      
+       0000-MAINLINE.                                                           
+           PERFORM 1000-SETUP.                                                  
+           PERFORM 2000-CHECK-REQUEST.                                          
+           PERFORM 3000-LOAD-COMMAREA.                                          
+           EXEC CICS RETURN                                                     
+           END-EXEC.                                                            
+                                                                                
+                                                                                
+      ******************************************************************        
+      * INITIALIZE ALL TABLES PRIOR TO PROCESSING                      *        
+      ******************************************************************        
+       1000-SETUP.                                                              
+           MOVE DFHCOMMAREA TO CA-COMMAREA.                                     
+           INSPECT CA-COMMAREA REPLACING ALL '@' BY ' '.                        
+           MOVE SPACES TO WS-USERID, WS-PASSWORD, WS-NEWPASSWORD.               
+           IF EIBCALEN = ZERO                                                   
+               MOVE EM-MESSAGE-NO-COMMAREA TO PL-MESSAGE                        
+               MOVE '??????'               TO PL-ACTION                         
+               MOVE '???????'              TO WS-USERID                         
+               MOVE '1000-SETUP'           TO PL-PARAGRAPH                      
+               PERFORM 9000-LOG-ERROR-MESSAGE                                   
+               EXEC CICS RETURN                                                 
+               END-EXEC.                                                        
+                                                                                
+                                                                                
+      ******************************************************************        
+      * CHECK THE INCOMING REQUEST FOR THE PROPER COMMAND              *        
+      * EXTRACT THE DATA FROM THE INCOMING REQUEST AND THE PROCESS     *        
+      * THE COMMAND.                                                   *        
+      ******************************************************************        
+       2000-CHECK-REQUEST.                                                      
+           MOVE 'N' TO WS-KEYWORD-STATUS.                                       
+           MOVE ZEROES TO WS-COUNTER.                                           
+           INSPECT CA-COMMAREA                                                  
+                   TALLYING WS-COUNTER                                          
+                   FOR ALL WS-PWDCHK.                                           
+           IF WS-COUNTER > 0                                                    
+              MOVE 'Y' TO WS-KEYWORD-STATUS                                     
+              MOVE WS-PWDCHK TO WS-KEYWORD                                      
+              PERFORM 4000-FIND-USERID-PASSWORD                                 
+              PERFORM 6000-SIGNON.                                              
+      *  NOW CHECK FOR PASSWORD CHANGE COMMAND                         *        
+           MOVE ZEROES TO WS-COUNTER.                                           
+           INSPECT CA-COMMAREA                                                  
+                   TALLYING WS-COUNTER                                          
+                   FOR ALL WS-PWDCHG.                                           
+           IF WS-COUNTER > 0                                                    
+              MOVE 'Y' TO WS-KEYWORD-STATUS                                     
+              MOVE WS-PWDCHG TO WS-KEYWORD                                      
+              PERFORM 4000-FIND-USERID-PASSWORD                                 
+              PERFORM 7000-LOAD-NEWPASSWORD                                     
+              PERFORM 8000-CHANGE-PASSWORD.                                     
+           MOVE WS-KEYWORD TO P1-COMMAND.                                       
+                                                                                
+                                                                                
+      ******************************************************************        
+      * MOVE THE HTML TO THE OUTPUT COMMAREA                                    
+      ******************************************************************        
+       3000-LOAD-COMMAREA.                                                      
+           IF WS-KEYWORD-FOUND                                                  
+               MOVE P1-PAGE-INFO1         TO LS-OUTPUT                          
+           ELSE                                                                 
+               MOVE EM-MESSAGE-NO-KEYWORD TO PL-MESSAGE                         
+               MOVE '??????'              TO PL-ACTION                          
+               MOVE '???????'             TO WS-USERID                          
+               MOVE '3000-LOAD-COMMAREA'  TO PL-PARAGRAPH                       
+               PERFORM 9000-LOG-ERROR-MESSAGE                                   
+               MOVE EM-ERROR-MESSAGE      TO LS-OUTPUT.                         
+                                                                                
+                                                                                
+      ******************************************************************        
+      * LOCATE THE USERID & PASSWORD IN THE INCOMING COMMAREA                   
+      ******************************************************************        
+       4000-FIND-USERID-PASSWORD.                                               
+           MOVE ZEROES TO WS-COUNTER.                                           
+           INSPECT CA-COMMAREA                                                  
+                   TALLYING WS-COUNTER                                          
+                   FOR CHARACTERS BEFORE WS-KEYWORD.                            
+           IF WS-COUNTER > 0                                                    
+               SET WS-USERID-FOUND TO TRUE                                      
+               MOVE FUNCTION UPPER-CASE (CA-COMMAREA(WS-COUNTER + 11:8))        
+                 TO WS-USERID                                                   
+                    P1-USERID                                                   
+               MOVE FUNCTION UPPER-CASE (CA-COMMAREA(WS-COUNTER + 19:8))        
+                 TO WS-PASSWORD                                                 
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      * EXECUTE A SIGNON                                                        
+      ******************************************************************        
+       6000-SIGNON.                                                             
+           EXEC CICS VERIFY                                                     
+207210         PASSWORD(WS-PASSWORD)                                            
+207210         USERID(WS-USERID)                                                
+               CHANGETIME(WS-CHANGE-TIME)                                       
+               EXPIRYTIME(WS-EXPIRY-TIME)                                       
+               LASTUSETIME(WS-LAST-USE-TIME)                                    
+               INVALIDCOUNT(WS-INVALID-COUNT)                                   
+               DAYSLEFT(WS-DAYS-LEFT)                                           
+               RESP(WS-RESP)                                                    
+               RESP2(WS-RESP2)                                                  
+           END-EXEC.                                                            
+           EVALUATE TRUE                                                        
+               WHEN WS-RESP = DFHRESP(USERIDERR)                                
+                   MOVE EM-MESSAGE1             TO PL-MESSAGE                   
+                   MOVE EM-MESSAGE-CHECK-FAILED TO P1-MESSAGE                   
+               WHEN WS-RESP2 = 2                                                
+                   MOVE EM-MESSAGE2             TO PL-MESSAGE                   
+                   MOVE EM-MESSAGE-CHECK-FAILED TO P1-MESSAGE                   
+               WHEN WS-RESP2 = 3                                                
+                   MOVE EM-MESSAGE3             TO PL-MESSAGE                   
+                                                   P1-MESSAGE                   
+               WHEN WS-RESP2 = 13                                               
+                   MOVE EM-MESSAGE13            TO PL-MESSAGE                   
+                   MOVE EM-MESSAGE-INTERNAL-ERR TO P1-MESSAGE                   
+               WHEN WS-RESP2 = 18                                               
+                   MOVE EM-MESSAGE18            TO PL-MESSAGE                   
+                   MOVE EM-MESSAGE-INTERNAL-ERR TO P1-MESSAGE                   
+               WHEN WS-RESP2 = 19                                               
+                   MOVE EM-MESSAGE19            TO PL-MESSAGE                   
+                                                   P1-MESSAGE                   
+               WHEN WS-RESP2 = 29                                               
+                   MOVE EM-MESSAGE29            TO PL-MESSAGE                   
+                   MOVE EM-MESSAGE-INTERNAL-ERR TO P1-MESSAGE                   
+               WHEN WS-RESP2 = 32                                               
+                   MOVE EM-MESSAGE32            TO PL-MESSAGE                   
+                   MOVE EM-MESSAGE-CHECK-FAILED TO P1-MESSAGE                   
+               WHEN WS-RESP = 0                                                 
+                   MOVE EM-MESSAGEOK            TO PL-MESSAGE                   
+                                                   P1-MESSAGE                   
+           END-EVALUATE.                                                        
+                                                                                
+           IF WS-RESP = 0                                                       
+               MOVE '0000'                      TO P1-RETURNCODE                
+               PERFORM 6100-PROCESS-VALIDATE                                    
+           ELSE                                                                 
+               MOVE '-110'                      TO P1-RETURNCODE                
+               MOVE 'VERIFY'                    TO PL-ACTION                    
+               MOVE '6000-SIGNON'               TO PL-PARAGRAPH                 
+               PERFORM 9000-LOG-ERROR-MESSAGE.                                  
+                                                                                
+                                                                                
+      ******************************************************************        
+      * BUILD AND FORMAT RESPONSE TO REQUEST                                    
+      ******************************************************************        
+       6100-PROCESS-VALIDATE.                                                   
+           IF WS-CHANGE-TIME = -1                                               
+              MOVE 'NOEXPIRE' TO P1-PASSWORD-CHANGED                            
+           ELSE                                                                 
+              EXEC CICS FORMATTIME                                              
+                  ABSTIME(WS-CHANGE-TIME)                                       
+                  YYYYMMDD(P1-PASSWORD-CHANGED)                                 
+              END-EXEC.                                                         
+           IF WS-EXPIRY-TIME = -1                                               
+              MOVE 'NOEXPIRE' TO P1-PASSWORD-EXPIRES                            
+           ELSE                                                                 
+              EXEC CICS FORMATTIME                                              
+                  ABSTIME(WS-EXPIRY-TIME)                                       
+                  YYYYMMDD(P1-PASSWORD-EXPIRES)                                 
+              END-EXEC.                                                         
+           IF WS-LAST-USE-TIME = -1                                             
+              MOVE 'NOEXPIRE' TO P1-LAST-USE                                    
+           ELSE                                                                 
+              EXEC CICS FORMATTIME                                              
+                  ABSTIME(WS-LAST-USE-TIME)                                     
+                  YYYYMMDD(P1-LAST-USE)                                         
+              END-EXEC.                                                         
+           MOVE WS-INVALID-COUNT TO P1-INVALID-COUNT.                           
+           MOVE WS-DAYS-LEFT TO P1-DAYS-LEFT.                                   
+                                                                                
+                                                                                
+      ******************************************************************        
+      * IF PASSWORD CHANGE THEN MOVE NEW PASSWORD                               
+      ******************************************************************        
+       7000-LOAD-NEWPASSWORD.                                                   
+           MOVE FUNCTION UPPER-CASE (CA-COMMAREA(WS-COUNTER + 27:8))            
+             TO WS-NEWPASSWORD.                                                 
+                                                                                
+                                                                                
+      ******************************************************************        
+      * EXECUTE CHANGE PASSWORD                                                 
+      ******************************************************************        
+       8000-CHANGE-PASSWORD.                                                    
+           EXEC CICS CHANGE                                                     
+207210         PASSWORD(WS-PASSWORD)                                            
+207210         NEWPASSWORD(WS-NEWPASSWORD)                                      
+207210         USERID(WS-USERID)                                                
+               RESP(WS-RESP)                                                    
+               RESP2(WS-RESP2)                                                  
+           END-EXEC.                                                            
+           EVALUATE TRUE                                                        
+               WHEN WS-RESP = DFHRESP(USERIDERR)                                
+                   MOVE EM-MESSAGE1              TO PL-MESSAGE                  
+                   MOVE EM-MESSAGE-CHANGE-FAILED TO P1-MESSAGE                  
+               WHEN WS-RESP2 = 2                                                
+                   MOVE EM-MESSAGE2A             TO PL-MESSAGE                  
+                   MOVE EM-MESSAGE-CHANGE-FAILED TO P1-MESSAGE                  
+               WHEN WS-RESP2 = 4                                                
+                   MOVE EM-MESSAGE4              TO PL-MESSAGE                  
+                                                    P1-MESSAGE                  
+               WHEN WS-RESP2 = 13                                               
+                   MOVE EM-MESSAGE13             TO PL-MESSAGE                  
+                   MOVE EM-MESSAGE-INTERNAL-ERR  TO P1-MESSAGE                  
+               WHEN WS-RESP2 = 18                                               
+                   MOVE EM-MESSAGE18             TO PL-MESSAGE                  
+                   MOVE EM-MESSAGE-INTERNAL-ERR  TO P1-MESSAGE                  
+               WHEN WS-RESP2 = 19                                               
+                   MOVE EM-MESSAGE19             TO PL-MESSAGE                  
+                                                    P1-MESSAGE                  
+               WHEN WS-RESP2 = 22                                               
+                   MOVE EM-MESSAGE22             TO PL-MESSAGE                  
+                   MOVE EM-MESSAGE-CHANGE-FAILED TO P1-MESSAGE                  
+               WHEN WS-RESP2 = 29                                               
+                   MOVE EM-MESSAGE29             TO PL-MESSAGE                  
+                   MOVE EM-MESSAGE-INTERNAL-ERR  TO P1-MESSAGE                  
+               WHEN WS-RESP2 = 31                                               
+                   MOVE EM-MESSAGE31             TO PL-MESSAGE                  
+                                                    P1-MESSAGE                  
+               WHEN WS-RESP2 = 32                                               
+                   MOVE EM-MESSAGE32             TO PL-MESSAGE                  
+                   MOVE EM-MESSAGE-CHANGE-FAILED TO P1-MESSAGE                  
+               WHEN WS-RESP = 0                                                 
+                   MOVE EM-MESSAGEOK             TO PL-MESSAGE                  
+                                                    P1-MESSAGE                  
+           END-EVALUATE.                                                        
+                                                                                
+           IF WS-RESP = 0                                                       
+               MOVE '0000'                       TO P1-RETURNCODE               
+           ELSE                                                                 
+               MOVE '-110'                       TO P1-RETURNCODE               
+               MOVE 'change'                     TO PL-ACTION                   
+               MOVE '8000-CHANGE-PASSWORD'       TO PL-PARAGRAPH                
+               PERFORM 9000-LOG-ERROR-MESSAGE.                                  
+                                                                                
+                                                                                
+      ******************************************************************        
+      * SEND ERROR MESSAGE TO THE LOG                                           
+      ******************************************************************        
+       9000-LOG-ERROR-MESSAGE.                                                  
+           MOVE WS-USERID  TO PL-USERID.                                        
+           MOVE WS-RESP    TO PL-RESP.                                          
+           MOVE WS-RESP2   TO PL-RESP2.                                         
+                                                                                
+           PERFORM 9010-ENQUEUE.                                                
+           PERFORM 9020-WRITEQ-TD                                               
+             VARYING PL-LOG-SUB FROM 1 BY 1                                     
+               UNTIL PL-LOG-SUB > 3.                                            
+           PERFORM 9030-DEQUEUE.                                                
+                                                                                
+                                                                                
+       9010-ENQUEUE.                                                            
+           EXEC CICS ENQ                                                        
+               RESOURCE (PC-LOG-QUEUE-RESOURCE)                                 
+           END-EXEC.                                                            
+                                                                                
+                                                                                
+       9020-WRITEQ-TD.                                                          
+           MOVE PL-LOG-LINES (PL-LOG-SUB) TO PL-LOG-LINE.                       
+                                                                                
+           EXEC CICS WRITEQ TD                                                  
+               QUEUE (PC-LOG-QUEUE)                                             
+               FROM  (PL-LOG-LINE)                                              
+               RESP  (WS-RESP)                                                  
+           END-EXEC.                                                            
+                                                                                
+      **** IF  WS-RESP = DFHRESP(NORMAL)                                        
+      ****     CONTINUE                                                         
+      **** ELSE                                                                 
+      ****     It is not feasable to notify somebody that this failed.          
+      **** END-IF.                                                              
+                                                                                
+                                                                                
+       9030-DEQUEUE.                                                            
+           EXEC CICS DEQ                                                        
+               RESOURCE (PC-LOG-QUEUE-RESOURCE)                                 
+           END-EXEC.                                                            

@@ -1,0 +1,688 @@
+       IDENTIFICATION DIVISION.                                                 
+                                                                                
+       PROGRAM-ID.    INKUP190.                                                 
+       AUTHOR.        JULIE SEIDLER.                                            
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+       DATE-WRITTEN.  07/24/00.                                                 
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *    THIS PROGRAM READS THE TADJDTL AND "BACKS OUT" "SA" ADJUST           
+      *    RECORDS FOR A SELECTED CONTROL-CARD STORE                            
+      *    .. AS EACH RECORD IS RETRIEVED, THE SIGN ON THE ADJ-QTY FIELD        
+      *       WILL BE REVERSED AND WRITTEN TO 2 OUTPUT FILES.                   
+      *           1 - FASHION ON-HAND ADJUSTMENT FILE                           
+      *               (WHEN FASHION SALES PROCESSES THIS FILE, A                
+      *                VARIANCE UPDATE FILE WILL BE CREATED FOR THE DW)         
+      *           2 - SALES ADJUSTMENT REVERSAL FILE                            
+      *               (THIS FILE WILL GO TO THE SALES ADJUSTMENT UPDATE         
+      *                PROCESS)                                                 
+      *    .. A SORT CONTROL CARD WILL BE WRITTEN, WHICH WILL BE USED TO        
+      *       REMOVE STORE DATA FROM THE CUMULATIVE SALES ADJUSTMENT            
+      *       FILE AND FROM THE CUTOFF TIMESTAMP FILE                           
+      *    .. SET SLS-COMPL-IND ON TINVPAR BACK TO 'N'                          
+      ******************************************************************        
+W21732* 11/19/2002        CHANGED BY SUDHARSHAN,IGSI WR# W21732        *        
+W21732* CHANGED THE PROGRAM TO IMPLEMENT NON-INTELLIGENT SKU LOGIC.    *        
+W21732* COPYBOOK KDC1801 IS REPLACED WITH FSRD035. ONE NEW OUTPUT FILE *        
+W21732* IS WRITTEN WITH DETAILS OF THE RECORD WHEN THERE WAS NO RECORD *        
+W21732* FOUND FOR THE GIVEN SKU IN TUPC AND TMDARVS TABLES.            *        
+W21732******************************************************************        
+W26600* 06/22/2004        CHANGED BY D. THEEL        WR# W26600        *        
+W26600* STORE EXPANSION CHANGES.                                       *        
+P28545*W28545  03-24-2006 ROD JANSSEN CYCLE INVENTORY PRICE MODULE SETUP        
+W26600******************************************************************        
+W33304* CHANGED 11/13/2008    BY THERESE RAMSEYER WR#  W33304                   
+W33304*                       HILO - HOLD INVENTORY LEDGER OPEN                 
+W33304*                     --> ADD TINCNTL                                     
+W33304*                     --> DELETE UNUSED COMMENTED CODE                    
+W33304*                     --> ADD SELECTION CRITERIA TO THE WHERE             
+W33304*                         CLAUSE OF S180-SELECT-TINVPAR :                 
+W33304*                         AND LOC_INV_STAT_CDE = :PC-INITIAL              
+W33304*                         AND ACTV_IND         = :PC-ACTIVE               
+W33304*                         AND A.INV_ID         = B.INV_ID                 
+W33304*                         (AND JOIN TO TINCNTL)                           
+W33304*                      --> ADD SELECTION CRITERIA TO THE WHERE            
+W33304*                          CLAUSE OF S200-UPDATE-TINVPAR :                
+W33304*                          AND  INV_ID           = :INVPAR-INV-ID         
+W33304*                      --> EXPAND SALES-ADJUSTMENT-REV-REC TO             
+W33304*                          100 BYTES TO ACCOMMODATE EXPANSION             
+W33304*                          OF INRD019 COPYBOOK.                           
+W33304*                                                                         
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+       CONFIGURATION SECTION.                                                   
+       SOURCE-COMPUTER. IBM-3090.                                               
+       OBJECT-COMPUTER. IBM-3090.                                               
+       INPUT-OUTPUT SECTION.                                                    
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT STORE-CONTROL-CARD                                            
+               ASSIGN TO INP01.                                                 
+                                                                                
+           SELECT FASHION-ADJUSTMENTS                                           
+               ASSIGN TO OUT01.                                                 
+                                                                                
+           SELECT SALES-ADJUSTMENT-REVERSALS                                    
+               ASSIGN TO OUT02.                                                 
+                                                                                
+           SELECT SLS-ADJ-SORT-OMIT-CARDS                                       
+               ASSIGN TO OUT03.                                                 
+                                                                                
+W21732     SELECT MISSED-PHYSICAL-CNT-FILE                                      
+W21732         ASSIGN TO OUT04.                                                 
+                                                                                
+       DATA DIVISION.                                                           
+       FILE SECTION.                                                            
+                                                                                
+       FD  STORE-CONTROL-CARD                                                   
+           RECORDING MODE IS F                                          INKUT115
+           BLOCK CONTAINS 0 CHARACTERS                                  INKUT115
+           LABEL RECORDS ARE STANDARD.                                  INKUT115
+                                                                        INKUT115
+       01  STORE-CONTROL-CARD-REC        PIC X(80).                        CL*12
+                                                                        INKUT115
+                                                                        INKUT115
+       FD  FASHION-ADJUSTMENTS                                          INKUT115
+           RECORDING MODE IS F                                          INKUT115
+           BLOCK CONTAINS 0 CHARACTERS                                  INKUT115
+           LABEL RECORDS ARE STANDARD.                                  INKUT115
+                                                                        INKUT115
+W21732 01  FASHION-ADJUSTMENTS-RECORD    PIC X(200).                       CL*12
+                                                                        INKUT115
+                                                                        INKUT115
+       FD  SALES-ADJUSTMENT-REVERSALS                                   INKUT115
+           RECORDING MODE IS F                                          INKUT115
+           BLOCK CONTAINS 0 RECORDS                                             
+           LABEL RECORDS ARE STANDARD.                                  INKUT115
+                                                                        INKUT115
+W33304 01  SALES-ADJUSTMENT-REV-REC      PIC X(100).                       CL*12
+                                                                        INKUT115
+                                                                                
+       FD  SLS-ADJ-SORT-OMIT-CARDS                                              
+           RECORDING MODE IS F                                          INKUT115
+           BLOCK CONTAINS 0 CHARACTERS                                  INKUT115
+           LABEL RECORDS ARE STANDARD.                                  INKUT115
+                                                                        INKUT115
+       01  SLS-ADJ-SORT-OMIT-CARDS-REC         PIC X(80).                  CL*12
+                                                                        INKUT115
+W21732 FD  MISSED-PHYSICAL-CNT-FILE                                             
+W21732     RECORDING MODE IS F                                                  
+W21732     BLOCK CONTAINS 0 RECORDS                                             
+W21732     LABEL RECORDS ARE STANDARD.                                          
+W21732                                                                          
+W26600 01  MISSED-PHYSICAL-CNT-RECORD          PIC X(60).                       
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  PC-PROGRAM-COUNTERS.                                                 
+           05  PC-RECORD-IN-COUNT               PIC 9(09)  VALUE ZEROES.        
+           05  PC-RECORD-OUT-COUNT              PIC 9(09)  VALUE ZEROES.        
+           05  PC-TTL-SLS-ADJ-QTY-ORIG          PIC S9(06) VALUE ZERO.          
+           05  PC-TTL-SLS-ADJ-QTY-BO            PIC S9(06) VALUE ZERO.          
+           05  PC-TTL-SLS-ADJ-QTY-FS            PIC S9(06) VALUE ZERO.          
+           05  PC-TTL-SLS-ADJ-RTL-AMT-ORIG      PIC S9(9)V99 VALUE ZERO.        
+           05  PC-TTL-SLS-ADJ-RTL-AMT-BO        PIC S9(9)V99 VALUE ZERO.        
+           05  PC-TTL-SLS-ADJ-RTL-AMT-FS        PIC S9(9)V99 VALUE ZERO.        
+                                                                                
+       01  PT-PRINT-TOTALS.                                                     
+           05  PT-TTL-SLS-ADJ-QTY-ORIG        PIC ZZZ,ZZ9- VALUE ZERO.          
+           05  PT-TTL-SLS-ADJ-QTY-BO          PIC ZZZ,ZZ9- VALUE ZERO.          
+           05  PT-TTL-SLS-ADJ-QTY-FS          PIC ZZZ,ZZ9- VALUE ZERO.          
+           05  PT-TTL-SLS-ADJ-RTL-AMT-ORIG PIC $$$,$$$,$$9.99-                  
+                                                           VALUE ZERO.          
+           05  PT-TTL-SLS-ADJ-RTL-AMT-BO   PIC $$$,$$$,$$9.99-                  
+                                                           VALUE ZERO.          
+           05  PT-TTL-SLS-ADJ-RTL-AMT-FS   PIC $$$,$$$,$$9.99-                  
+                                                           VALUE ZERO.          
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+       01  ABEND-CODE               PIC S9(04)  VALUE ZERO                      
+                                                COMP SYNC.                      
+                                                                                
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-TADJADD-IN-EOF-SW             PIC X(01)  VALUE 'N'.           
+               88  PS-TADJADD-IN-EOF                       VALUE 'Y'.           
+           05  PS-MORE-TADJDTL-ROWS-SW   PIC X  VALUE 'Y'.                      
+               88  PS-MORE-TADJDTL-ROWS         VALUE 'Y'.                      
+               88  PS-NO-MORE-TADJDTL-ROWS      VALUE 'N'.                      
+           05  PS-MORE-TADADDL-ROWS-SW   PIC X  VALUE 'Y'.                      
+               88  PS-MORE-TADJADD-ROWS         VALUE 'Y'.                      
+               88  PS-NO-MORE-TADJADD-ROWS      VALUE 'N'.                      
+W21732     05  PS-MISSED-PHYSICAL-REC           PIC X(01)  VALUE 'N'.           
+W21732         88  PS-MISSED-PHY-REC-FOUND                 VALUE 'Y'.           
+W21732         88  PS-MISSED-PHY-REC-NOT-FOUND             VALUE 'N'.           
+                                                                                
+                                                                                
+W33304 01  PC-PROGRAM-CONSTANTS.                                                
+W33304     10  PC-INITIAL                PIC  X(02) VALUE 'IN'.            CL*12
+W33304     10  PC-ACTIVE                 PIC  X(01) VALUE 'Y'.             CL*12
+W33304                                                                          
+       01  PV-PROGRAM-VARIABLES.                                                
+W26600     10  PV-STORE-NUMBER           PIC S9(4) COMP VALUE +0.          CL*12
+W21732     10  PV-WORK-QTY               PIC 9(9).                         CL*17
+           10  PV-PARAGRAPH-NAME     PIC X(30)  VALUE SPACES.                   
+           10  PV-DB2-OPER-ATTEMPTED PIC X(30)  VALUE SPACES.                   
+           10  PV-STR055-TOTAL-ADJUST-PRICE  PIC  S9(5)V9(2) COMP-3             
+                                                             VALUE ZERO.        
+           10  PV-STR218-TOTAL-ADJUST-PRICE  PIC  S9(5)V9(2) COMP-3             
+                                                             VALUE ZERO.        
+           10  PV-TADJDTL-ADJ-QTY          PIC S9(9)   VALUE ZEROES.            
+           10  PV-TADJDTL-ADJ-QTY-GR       PIC S9(9)   VALUE ZEROES.            
+           10  PV-TADJDTL-ADJ-QTY-GR2      PIC S9(9)   VALUE ZEROES.            
+           10  PV-TADJADD-ADJ-QTY          PIC S9(9)   VALUE ZEROES.            
+W21732     10  PV-DEPT                     PIC 9(04) VALUE ZEROS.               
+W21732     10  PV-CLASS                    PIC 9(04) VALUE ZEROS.               
+W21732     10  PV-KOHLS-UPC-LOW.                                                
+W21732         15  FILLER                    PIC 9(04)  VALUE 0400.             
+W21732         15  PV-KOHLS-SKU-MIN          PIC 9(08)  VALUE ZEROS.            
+W21732         15  FILLER                    PIC 9(01)  VALUE 0.                
+W21732     10  PV-KOHLS-UPC-HIGH.                                               
+W21732         15  FILLER                    PIC 9(04)  VALUE 0400.             
+W21732         15  PV-KOHLS-SKU-MAX          PIC 9(08)  VALUE ZEROS.            
+W21732         15  FILLER                    PIC 9(01)  VALUE 9.                
+W21732     10  PV-KOHLS-SIGN-UPC.                                               
+W21732         15  PV-KOHLS-UPC-MIN-SIGNONLY     PIC S9(13).                    
+W21732         15  PV-KOHLS-UPC-MAX-SIGNONLY     PIC S9(13).                    
+W21732     10  PV-KOHLS-MDSEAR-UPC.                                             
+W21732         15  PV-KOHLS-UPC-MIN          PIC S9(13)V COMP-3.                
+W21732         15  PV-KOHLS-UPC-MAX          PIC S9(13)V COMP-3.                
+W21732     10  PV-SKU                        PIC 9(8).                     CL*17
+                                                                                
+W21732 01  PV-MISSED-PHYSICAL-CNT-RECORD.                                       
+W26600     05  PV-MISSED-STORE-NBR     PIC 9(04)  VALUE ZEROES.            CL*12
+W21732     05  FILLER                  PIC X(01)  VALUE SPACES.            CL*12
+W21732     05  PV-MISSED-AREA-NBR      PIC 9(09).                          CL*12
+W21732     05  FILLER                  PIC X(01)  VALUE SPACES.            CL*12
+W21732     05  PV-MISSED-SKU           PIC X(08).                          CL*12
+W21732     05  FILLER                  PIC X(01)  VALUE SPACES.            CL*12
+W21732     05  PV-MISSED-CRE-TMST      PIC X(26).                          CL*12
+W21732     05  FILLER                  PIC X(10)  VALUE SPACES.            CL*12
+00087 ***************************************************************** INKUT115
+00088 *    INPUT -- CONTROL CONTROL CARD                                INKUT115
+      *****************************************************************         
+00089 *                                                                 INKUT115
+       01  CC-CONTROL-CARD.                                                     
+           10 FILLER                        PIC   X(13) VALUE SPACES.           
+      *    "BACKOUT STR: "                                              INKUT115
+           10 CC-BACKOUT-STORE              PIC   9(4) VALUE ZEROES.            
+      *                                                                         
+00087 ***************************************************************** INKUT115
+00088 *    OUTPUT -- FASHION SALES ADJUSTMENT DATA STRUCTURE            INKUT115
+      *****************************************************************         
+00089 *                                                                 INKUT115
+W21732     COPY FSRD035.                                                   CL*12
+      *                                                                         
+00087 ***************************************************************** INKUT115
+00088 *    OUTPUT -- SALES ADJUSTMENT RECORD LAYOUT                     INKUT115
+      *****************************************************************         
+00089 *                                                                 INKUT115
+00090      COPY INRD019.                                                   CL*12
+      *                                                                         
+00087 ***************************************************************** INKUT115
+00088 *    OUTPUT -- SORT OMIT CONTROL CARD                             INKUT115
+00088 *              (BACKOUT STORE FROM THE CUMULATIVE SALES FILE)     INKUT115
+      *****************************************************************         
+       01  WS-SORT-OMIT-CARDS.                                                  
+           05  WS-SORT1                    PIC X(18)   VALUE                    
+               '  SORT FIELDS=COPY'.                                            
+           05  WS-SORT2.                                                        
+               10  FILLER                  PIC X(23)   VALUE                    
+W26600        '  OMIT COND=(1,2,BI,EQ,'.                                        
+               10  WS-SORT-OMIT-STR        PIC 9(04)   VALUE ZERO.              
+               10  FILLER                  PIC X(03)   VALUE ')'.               
+           05  WS-SORT3                    PIC X(05)   VALUE                    
+               '  END'.                                                         
+00089 *                                                                 INKUT115
+      *****************************************************************         
+      * ERROR MESSAGE AREA FOR DB2                                              
+      *****************************************************************         
+           COPY DPWS004.                                                        
+      *****************************************************************         
+      * TINVPAR DCLGEN                                                          
+      *****************************************************************         
+           EXEC SQL                                                             
+              INCLUDE TINVPAR                                                   
+           END-EXEC.                                                            
+                                                                                
+W33304*****************************************************************         
+W33304* TINCNTL DCLGEN                                                          
+W33304*****************************************************************         
+W33304     EXEC SQL                                                             
+W33304        INCLUDE TINCNTL                                                   
+W33304     END-EXEC.                                                            
+W33304                                                                          
+      *****************************************************************         
+      * TADJDTL DCLGEN                                                          
+      *****************************************************************         
+                                                                                
+           EXEC SQL                                                             
+              INCLUDE TADJDTL                                                   
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      * DB2 CURSOR.                                                             
+      *****************************************************************         
+           EXEC SQL                                                             
+              DECLARE TADJDTL_CURSOR CURSOR FOR                                 
+W26600          SELECT LOC_NBR,                                                 
+                       AREA_NBR,                                                
+W21732                 SKU_NBR,                                                 
+                       ADJ_UNIT_PR_AMT,                                         
+                       ADJ_QTY,                                                 
+                       ADJ_EXTD_AMT,                                            
+                       ADJ_TYPE_CDE,                                            
+                       DKEY_NBR,                                                
+                       CRE_TMST                                                 
+                FROM TADJDTL                                                    
+W26600          WHERE (LOC_NBR = :ADJDTL-LOC-NBR                                
+                 AND ADJ_TYPE_CDE = 'SA')                                       
+           END-EXEC.                                                            
+      *                                                                         
+      *                                                                         
+      *****************************************************************         
+      * SQL COMM AREA DCLGEN                                                    
+      *****************************************************************         
+                                                                                
+           EXEC SQL                                                             
+              INCLUDE SQLCA                                                     
+           END-EXEC.                                                            
+                                                                                
+P28545******************************************************************        
+P28545* COPYBOOK - PRICING MODULE                                               
+P28545******************************************************************        
+P28545     COPY INWS400.                                                        
+P28545                                                                          
+       PROCEDURE DIVISION.                                                      
+                                                                                
+      ******************************************************************        
+      *                                                                         
+      ******************************************************************        
+       0000-MAIN-MODULE.                                                        
+                                                                                
+           OPEN INPUT STORE-CONTROL-CARD                                        
+                OUTPUT FASHION-ADJUSTMENTS                                      
+                OUTPUT SALES-ADJUSTMENT-REVERSALS                               
+W21732          OUTPUT SLS-ADJ-SORT-OMIT-CARDS                                  
+W21732          OUTPUT MISSED-PHYSICAL-CNT-FILE.                                
+                                                                                
+           PERFORM A100-EDIT-CONTROL-CARD.                                      
+                                                                                
+           SET PS-MORE-TADJDTL-ROWS TO TRUE.                                    
+           PERFORM S100-OPEN-TADJDTL-CURSOR.                                    
+           PERFORM S110-FETCH-TADJDTL-ROW.                                      
+           IF PS-NO-MORE-TADJDTL-ROWS                                           
+               DISPLAY '****************************************'               
+               DISPLAY 'NO SALE ADJUSTMENT ROWS FOUND ON TADJDTL'               
+                       ' FOR STORE ' CC-BACKOUT-STORE                           
+               DISPLAY '****************************************'               
+               MOVE '0000-MAIN-MODULE' TO PV-PARAGRAPH-NAME             00000900
+               PERFORM 9999-ABEND                                       00000400
+           ELSE                                                                 
+               PERFORM C200-PROCESS-TADJDTL-ROWS                                
+                   UNTIL PS-NO-MORE-TADJDTL-ROWS                                
+               PERFORM S130-CLOSE-TADJDTL-CURSOR                                
+               PERFORM W300-WRITE-SORT-OMIT-CARD                                
+               PERFORM S200-UPDATE-TINVPAR                                      
+           END-IF.                                                              
+                                                                                
+           MOVE PC-TTL-SLS-ADJ-QTY-ORIG     TO PT-TTL-SLS-ADJ-QTY-ORIG.         
+           MOVE PC-TTL-SLS-ADJ-QTY-BO       TO PT-TTL-SLS-ADJ-QTY-BO.           
+           MOVE PC-TTL-SLS-ADJ-QTY-FS       TO PT-TTL-SLS-ADJ-QTY-FS.           
+           MOVE PC-TTL-SLS-ADJ-RTL-AMT-ORIG                                     
+                                         TO PT-TTL-SLS-ADJ-RTL-AMT-ORIG.        
+           MOVE PC-TTL-SLS-ADJ-RTL-AMT-BO                                       
+                                         TO PT-TTL-SLS-ADJ-RTL-AMT-BO.          
+           MOVE PC-TTL-SLS-ADJ-RTL-AMT-FS                                       
+                                         TO PT-TTL-SLS-ADJ-RTL-AMT-FS.          
+                                                                                
+           DISPLAY '*----------------------------------------------*'.          
+           DISPLAY 'BACKOUT STORE: '           CC-BACKOUT-STORE                 
+           DISPLAY 'ORIG-SLS ADJ UNITS     : ' PT-TTL-SLS-ADJ-QTY-ORIG          
+           '  ORIG-SLS ADJ RTL VALUE : '   PT-TTL-SLS-ADJ-RTL-AMT-ORIG          
+           DISPLAY 'BKOUT-SLS ADJ UNITS    : ' PT-TTL-SLS-ADJ-QTY-BO            
+           '  BKOUT-SLS ADJ RTL VALUE: '   PT-TTL-SLS-ADJ-RTL-AMT-BO            
+           DISPLAY '*----------------------------------------------*'.          
+           DISPLAY ' '.                                                         
+                                                                                
+           CLOSE STORE-CONTROL-CARD                                             
+                 FASHION-ADJUSTMENTS                                            
+                 SALES-ADJUSTMENT-REVERSALS                                     
+W21732           SLS-ADJ-SORT-OMIT-CARDS                                        
+W21732           MISSED-PHYSICAL-CNT-FILE.                                      
+                                                                                
+           STOP RUN.                                                            
+                                                                                
+      *                                                                         
+      ******************************************************************        
+      *                                                                         
+      ******************************************************************        
+        A100-EDIT-CONTROL-CARD.                                                 
+                                                                                
+           READ STORE-CONTROL-CARD INTO CC-CONTROL-CARD                         
+              AT END                                                            
+                 DISPLAY '*---------------------------------*'                  
+                 DISPLAY 'BACKOUT STORE CONTROL CARD IS EMPTY'                  
+                 DISPLAY '*---------------------------------*'                  
+                 MOVE +4019                  TO ABEND-CODE                      
+                 CALL 'ILBOABN0'  USING ABEND-CODE.                             
+                                                                                
+           DISPLAY CC-CONTROL-CARD.                                             
+                                                                                
+           IF CC-BACKOUT-STORE > 0                                              
+               CONTINUE                                                         
+           ELSE                                                                 
+               DISPLAY '*---------------------------------*'                    
+               DISPLAY 'INVALID STORE ON INPUT CONTROL CARD'                    
+               DISPLAY '*---------------------------------*'                    
+               MOVE +4019 TO ABEND-CODE                                         
+               CALL 'ILBOABN0'  USING ABEND-CODE                                
+           END-IF.                                                              
+                                                                                
+                                                                                
+       C200-PROCESS-TADJDTL-ROWS.                                               
+                                                                                
+W21732     MOVE ADJDTL-SKU-NBR    TO  PV-SKU.                                   
+W21732                                                                          
+W33304     PERFORM S150-GET-DEPT-CLASS                                          
+W21732                                                                          
+W21732     IF PS-MISSED-PHY-REC-NOT-FOUND                                       
+W21732         PERFORM W100-WRITE-SLS-ADJ-RECORD                                
+W21732         PERFORM W200-WRITE-FASHION                                  CL**2
+W21732     END-IF.                                                              
+W21732     SET PS-MISSED-PHY-REC-NOT-FOUND TO TRUE                              
+                                                                                
+           ADD IN019-SALES-ADJ-QTY TO PC-TTL-SLS-ADJ-QTY-BO.                    
+           ADD IN019-SALES-ADJ-EXT-RTL-AMT                                      
+                                   TO PC-TTL-SLS-ADJ-RTL-AMT-BO.                
+           ADD ADJDTL-ADJ-EXTD-AMT TO PC-TTL-SLS-ADJ-RTL-AMT-ORIG.              
+           ADD ADJDTL-ADJ-QTY      TO PC-TTL-SLS-ADJ-QTY-ORIG.                  
+                                                                                
+           PERFORM S110-FETCH-TADJDTL-ROW.                                      
+                                                                                
+      ******************************************************************        
+      *                                                                         
+      ******************************************************************        
+       S100-OPEN-TADJDTL-CURSOR.                                                
+                                                                                
+W26600     MOVE CC-BACKOUT-STORE  TO ADJDTL-LOC-NBR.                            
+                                                                                
+               EXEC SQL                                                         
+                   OPEN TADJDTL_CURSOR                                          
+               END-EXEC.                                                        
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = 0                                             
+                   WHEN SQLCODE = +100                                          
+                       CONTINUE                                                 
+                   WHEN SQLWARN NOT = SPACES                                    
+                   WHEN SQLCODE NOT = ZERO                                      
+                       MOVE 'S100-OPEN-TADJDTL-CURSOR'                          
+                                     TO  PV-PARAGRAPH-NAME                      
+                       MOVE 'OPEN ON TADJDTL CURSOR'                            
+                                     TO  PV-DB2-OPER-ATTEMPTED                  
+                       PERFORM Z900-SQL-ABEND                                   
+               END-EVALUATE.                                                    
+      *                                                                         
+      ******************************************************************        
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+       S110-FETCH-TADJDTL-ROW.                                                  
+                                                                                
+           EXEC SQL                                                             
+               FETCH TADJDTL_CURSOR                                             
+W26600         INTO  :ADJDTL-LOC-NBR,                                           
+                     :ADJDTL-AREA-NBR,                                          
+W21732               :ADJDTL-SKU-NBR,                                           
+                     :ADJDTL-ADJ-UNIT-PR-AMT,                                   
+                     :ADJDTL-ADJ-QTY,                                           
+                     :ADJDTL-ADJ-EXTD-AMT,                                      
+                     :ADJDTL-ADJ-TYPE-CDE,                                      
+                     :ADJDTL-DKEY-NBR,                                          
+                     :ADJDTL-CRE-TMST                                           
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = +100                                                    
+               SET PS-NO-MORE-TADJDTL-ROWS TO TRUE                              
+           ELSE                                                                 
+               IF SQLCODE NOT = 0                                               
+                    MOVE 'S110-FETCH-TADJDTL-ROW'                               
+                                             TO PV-PARAGRAPH-NAME               
+                    MOVE 'FETCH ROW FROM TADJDTL CURSOR'                        
+                                            TO PV-DB2-OPER-ATTEMPTED            
+                   PERFORM Z900-SQL-ABEND                                       
+               END-IF                                                           
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+       S130-CLOSE-TADJDTL-CURSOR.                                               
+                                                                                
+                                                                                
+               EXEC SQL                                                         
+                   CLOSE TADJDTL_CURSOR                                         
+               END-EXEC.                                                        
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -911                                          
+                   WHEN SQLCODE = 0                                             
+                   WHEN SQLCODE = +100                                          
+                       CONTINUE                                                 
+                   WHEN SQLWARN NOT = SPACES                                    
+                   WHEN SQLCODE NOT = ZERO                                      
+                       MOVE 'S130-CLOSE-TADJDTL-CURSOR'                         
+                                     TO  PV-PARAGRAPH-NAME                      
+                       MOVE 'CLOSE ON TADJDTL CURSOR'                           
+                                     TO  PV-DB2-OPER-ATTEMPTED                  
+                       PERFORM Z900-SQL-ABEND                                   
+               END-EVALUATE.                                                    
+                                                                                
+W21732******************************************************************        
+W21732* S150-GET-DEPT-CLASS.                                                    
+W21732******************************************************************        
+W21732 S150-GET-DEPT-CLASS.                                                     
+P28545                                                                          
+P28545     INITIALIZE IN400-PV-INPUT-AREA.                                      
+P28545                                                                          
+P28545     SET IN400-PV-SKU-ATTRIB-LOOK TO TRUE.                                
+P28545                                                                          
+P28545     MOVE ADJDTL-LOC-NBR      TO IN400-CONVERT-LOC.                       
+P28545     MOVE IN400-CONVERT-LOC   TO IN400-PV-LOC-IN.                         
+P28545                                                                          
+P28545     PERFORM S180-SELECT-TINVPAR.                                         
+D28545                                                                          
+P28545     MOVE ADJDTL-SKU-NBR      TO PV-SKU.                                  
+P28545     MOVE PV-SKU              TO IN400-PV-SKU-IN.                         
+P28545                                                                          
+P28545     PERFORM IN400-LOOKUP-RETAIL.                                         
+P28545                                                                          
+P28545     IF IN400-PS-ATTR-FOUND                                               
+P28545         MOVE IN400-ATT-DEPT-OUT     TO PV-DEPT                           
+P28545         MOVE PV-DEPT                TO IN019-DEPT-NBR                    
+P28545         MOVE IN400-ATT-SCL-OUT      TO PV-CLASS                          
+P28545         MOVE PV-CLASS               TO IN019-CL-NBR                      
+P28545         MOVE IN400-ATT-ITM-NBR-OUT  TO FS035-ITM-NBR                     
+P28545     ELSE                                                                 
+P28545         SET PS-MISSED-PHY-REC-FOUND TO TRUE                              
+P28545         PERFORM W250-WRITE-PHYSCNT-RECORD                                
+P28545         DISPLAY 'INVALID - ', PV-SKU,                                    
+P28545                 ' LOC - ', IN400-CONVERT-LOC,                            
+P28545                 ' PRC RTN - ', IN400-PV-RETURN-CDE,                      
+P28545                 ' ATT RTN - ', IN400-PV-ATT-RTNCDE,                      
+P28545                 ' PRC SQL - ', IN400-PV-PRC-SQLCDE,                      
+P28545                 ' ATT SQL - ', IN400-PV-ATT-SQLCDE,                      
+P28545         DISPLAY IN400-PV-RETURN-RSN                                      
+P28545         DISPLAY IN400-PV-PARAGRAPH                                       
+P28545     END-IF.                                                              
+P28545                                                                          
+P28545******************************************************************        
+P28545* S180-SELECT-TINVPAR.                                                    
+P28545******************************************************************        
+P28545 S180-SELECT-TINVPAR.                                                     
+P28545                                                                  07950000
+P28545     MOVE ADJDTL-LOC-NBR   TO INVPAR-LOC-NBR.                             
+P28545                                                                  07950000
+P28545     EXEC SQL                                                             
+P28545          SELECT PLND_INV_DTE                                             
+W33304               , A.INV_ID                                                 
+W33304               , FINCL_INV_STAT_CDE                                       
+P28545          INTO :INVPAR-PLND-INV-DTE                                       
+W33304              ,:INVPAR-INV-ID                                             
+W33304              ,:INVPAR-FINCL-INV-STAT-CDE                                 
+W33304          FROM TINVPAR A                                                  
+W33304              ,TINCNTL B                                                  
+P28545          WHERE LOC_NBR = :INVPAR-LOC-NBR                                 
+P28545            AND ACTL_FIN_BK_DTE  = '9999-09-09'                           
+W33304            AND LOC_INV_STAT_CDE = :PC-INITIAL                            
+W33304            AND ACTV_IND         = :PC-ACTIVE                             
+W33304            AND A.INV_ID         = B.INV_ID                               
+P28545     END-EXEC.                                                            
+P28545                                                                          
+P28545     IF SQLCODE = +0                                                      
+P28545        MOVE INVPAR-PLND-INV-DTE    TO IN400-PV-EFF-DTE-IN                
+P28545     ELSE                                                                 
+P28545        ACCEPT IN400-PV-EFF-DTE-IN  FROM DATE                             
+P28545        DISPLAY '** S180-SELECT-TINVPAR - USING SYSTEM DATE ',            
+P28545                'LOC:   ' ADJDTL-LOC-NBR                                  
+P28545     END-IF.                                                              
+P28545                                                                  07890000
+      ******************************************************************        
+      * S200-UPDATE-TINVPAR.                                                    
+      ******************************************************************        
+       S200-UPDATE-TINVPAR.                                                     
+      *                                                                 07950000
+W26600     MOVE CC-BACKOUT-STORE TO INVPAR-LOC-NBR.                             
+           EXEC SQL                                                             
+                UPDATE TINVPAR                                                  
+                SET    SLS_ADJ_CPLD_IND = 'N'                                   
+W26600          WHERE  LOC_NBR = :INVPAR-LOC-NBR                                
+W33304            AND  INV_ID           = :INVPAR-INV-ID                        
+                  AND  ACTL_FIN_BK_DTE  = '9999-09-09'                          
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = +0                                                      
+              DISPLAY '** TINVPAR SLS ADJ COMPL IND UPD BACK TO N'              
+                      ' ==> FOR STORE NUMBER: ' CC-BACKOUT-STORE                
+           ELSE                                                                 
+              MOVE 'S200-UPDATE-TINVPAR'  TO PV-PARAGRAPH-NAME                  
+              MOVE 'UPDATE TINVPAR'       TO  PV-DB2-OPER-ATTEMPTED             
+              PERFORM Z900-SQL-ABEND                                            
+           END-IF.                                                              
+      *                                                                 07890000
+      *                                                                         
+      ******************************************************************        
+      *                                                                         
+      ******************************************************************        
+       W200-WRITE-FASHION.                                                 CL**2
+                                                                        INKUT115
+W21732     MOVE 'INKUP190'             TO  FS035-ADJ-SRC-PGM-NM.           CL*12
+W26600     MOVE ADJDTL-LOC-NBR         TO  PV-STORE-NUMBER.                CL*12
+W21732     MOVE '123'                  TO  FS035-ADJ-TYP.                  CL*12
+W21732     MOVE ADJDTL-ADJ-QTY         TO  PV-WORK-QTY.                    CL*17
+W21732     MOVE PV-WORK-QTY            TO  FS035-ADJ-QTY.                  CL*17
+W21732     MOVE 'INOL'                 TO  FS035-BTCH-NBR.                 CL*12
+W21732     MOVE 'Y'                    TO  FS035-UNT-BKG-IND.              CL*17
+                                                                        INKUT115
+      *    TO 'BACKOUT' EXISTING SLS ADJ RECORDS, A 'REVERSAL'                  
+      *    SLS ADJ RECORDS WILL BE CREATED BY CHANGING THE 'SIGN'               
+      *    ON THE FIELD                                                         
+                                                                                
+           IF  ADJDTL-ADJ-QTY POSITIVE                                  INKCS012
+W21732         SET  FS035-ACTN-NEG  TO TRUE                             INKCS012
+           ELSE                                                         INKCS012
+W21732         SET  FS035-ACTN-PLS  TO TRUE                             INKCS012
+           END-IF.                                                      INKCS012
+                                                                        INKCS012
+                                                                        INKUT115
+W21732     WRITE FASHION-ADJUSTMENTS-RECORD FROM                           CL**2
+W21732                               FS035-ADJUSTMENT-RECORD.           INKUT115
+      *                                                                         
+      ******************************************************************        
+      *                                                                         
+      ******************************************************************        
+                                                                                
+       W100-WRITE-SLS-ADJ-RECORD.                                               
+                                                                                
+           MOVE ZERO TO IN019-SALES-ADJ-QTY.                                    
+           MOVE ZERO TO IN019-SALES-ADJ-EXT-RTL-AMT.                            
+                                                                                
+W26600     MOVE ADJDTL-LOC-NBR          TO  IN019-STR-NBR.                      
+           MOVE ADJDTL-AREA-NBR         TO  IN019-SCAN-AREA.                    
+W21732     MOVE ADJDTL-SKU-NBR          TO  IN019-SKU.                          
+           MOVE ADJDTL-ADJ-UNIT-PR-AMT  TO  IN019-UNIT-PRICE.                   
+           MOVE ADJDTL-DKEY-NBR         TO  IN019-DKEY-NBR.                     
+W33304     MOVE INVPAR-INV-ID           TO  IN019-INV-ID.                       
+W33304     MOVE INVPAR-FINCL-INV-STAT-CDE                                       
+W33304                                  TO IN019-FINCL-INV-STAT-CDE.            
+                                                                                
+      *    TO 'BACKOUT' EXISTING SLS ADJ RECORDS, A 'REVERSAL'                  
+      *    SLS ADJ RECORDS WILL BE CREATED BY CHANGING THE 'SIGN'               
+      *    ON THE FIELD                                                         
+                                                                                
+           COMPUTE IN019-SALES-ADJ-QTY = ADJDTL-ADJ-QTY * -1.                   
+           COMPUTE IN019-SALES-ADJ-EXT-RTL-AMT                                  
+                                  = ADJDTL-ADJ-EXTD-AMT * -1.                   
+                                                                                
+                                                                                
+           WRITE SALES-ADJUSTMENT-REV-REC FROM IN019-ITEM-REC.                  
+                                                                                
+W21732****************************************************************          
+W21732* WRITE MISSED OUTPUT RECORD                                              
+W21732****************************************************************          
+W21732 W250-WRITE-PHYSCNT-RECORD.                                               
+W21732     WRITE MISSED-PHYSICAL-CNT-RECORD                                     
+W21732         FROM PV-MISSED-PHYSICAL-CNT-RECORD.                              
+      *                                                                         
+      ******************************************************************        
+      *                                                                         
+      ******************************************************************        
+                                                                                
+       W300-WRITE-SORT-OMIT-CARD.                                               
+                                                                                
+           MOVE CC-BACKOUT-STORE TO WS-SORT-OMIT-STR.                           
+           WRITE SLS-ADJ-SORT-OMIT-CARDS-REC FROM WS-SORT1.                CL*12
+           WRITE SLS-ADJ-SORT-OMIT-CARDS-REC FROM WS-SORT2.                CL*12
+           WRITE SLS-ADJ-SORT-OMIT-CARDS-REC FROM WS-SORT3.                CL*12
+                                                                                
+      ******************************************************************00000100
+      *  THIS ROUTINE FORCES AN ABEND DUE TO A NON-DB2 RELATED PROBLEM. 00000200
+      ******************************************************************00000300
+       9999-ABEND.                                                      00000400
+                                                                        00000500
+           DISPLAY '*********'                                          00000600
+           DISPLAY '**  ABEND     **'.                                  00000700
+           DISPLAY '**  PROGRAM   **  =   INKUP190'                     00000800
+           DISPLAY '**  PARAGRAPH **  = ' PV-PARAGRAPH-NAME.            00000900
+           DISPLAY '**********************************'                 00001300
+           CALL 'ILBOABN0'  USING ABEND-CODE.                           00002000
+                                                                        00010000
+      ****************************************************************          
+      *    THIS ROUTINE FORCES AN ABEND DUE TO A DB2 PROBLEM.        *          
+      ****************************************************************          
+       Z900-SQL-ABEND.                                                          
+      *                                                                         
+           MOVE +4013                 TO ABEND-CODE.                            
+           DISPLAY '**  ABEND     **'.                                          
+           DISPLAY '**  PROGRAM   **  =  INKUP190'.                             
+           DISPLAY '**  PARAGRAPH **  = ' PV-PARAGRAPH-NAME.                    
+           DISPLAY '**  OPERATION **  = ' PV-DB2-OPER-ATTEMPTED.                
+      *                                                                         
+      *    THE FOLLOWING COPYBOOK UTILIZES THE DB2 ABEND MODULE                 
+      *    DSNTIAR TO CONVERT SQLCA INTO UNDERSTANDABLE VERBAGE.                
+      *                                                                         
+           COPY DPPD004.                                                        
+      *                                                                         
+           CALL 'ILBOABN0'  USING ABEND-CODE.                                   
+P28545******************************************************************        
+P28545*  PRICING MODULE.                                                        
+P28545******************************************************************        
+P28545     COPY INPD400.                                                        
+P28545                                                                          

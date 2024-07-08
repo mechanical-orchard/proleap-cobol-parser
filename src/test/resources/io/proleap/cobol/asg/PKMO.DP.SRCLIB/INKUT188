@@ -1,0 +1,710 @@
+       ID DIVISION.                                                             
+       PROGRAM-ID.      INKUT188.                                               
+       AUTHOR.          SCOTT JACKSON.                                          
+       DATE-WRITTEN     JUNE 15, 2000.                                          
+       DATE-COMPILED.                                                           
+      ******************************************************************        
+      *    INKUT188                                                    *        
+      *  - ADJUSTMENT PROCESS FOR PHYSICAL COUNTED / CLOSED STORES     *        
+      *  - UPDATE AND WRITE RECORDS TO THE SHORTAGE EXTRACT FILE       *        
+      *  - REPLACES INKUP167 - WHICH HAD PROCESSED 'ADJ' FOR NEW STRS  *        
+      *    BY UPDATING TADJADD  WITH AN OFFSETTING AMT EQUAL TO AMOUNT *        
+      *    FROM THE INPUT SHORTAGE FILE. INKUT188 NO LONGER CREATES    *        
+      *    TADJADD DETAIL ROWS.                                        *        
+      ******************************************************************        
+RB1001*  CHANGE LOG                                                             
+RB1001*  DATE     CHANGED BYDESC                                                
+RB1001*  ---------- ------------- --------------------------------------        
+RB1001*  10-01-2001 RONNA BUTZ    TRIM DOWN DB2 CALLS BY ONLY LOOKING           
+RB1001*                           UP MBS INFO WHEN ONLY THE DEPT CHAGNES        
+RB1001******************************************************************        
+SJ0402*  04-17-2002 S.JACKSON     WR 23511                                      
+SJ0402*                           ADD DISTRICT AND REGION TO OUTPUT             
+      ******************************************************************        
+W26600*  05-07-2004 M JOHNSON     W26600                                        
+W26600*                           STORE EXPANSION                               
+W20445* W20445  09-01-2004 ROD JANSSEN DETAILED INVNENTORY ADJUSTMENT           
+W26600******************************************************************        
+W26006*  02-24-2005 ERIN SEARL    W26006                                        
+W26006*                       REMOVE REFERENCES TO OBSOLETE STORE TABLE.        
+W26006******************************************************************        
+W28545*  04-04-2006 JILL LIN      W28545                                        
+W28545*                           ADD TERRITORY TO OUTPUT                       
+W28545******************************************************************        
+W33304*  11-28-2008 SATHISH/      W33304                                        
+W33304*             INFOSYS       HOLDING INVENTORY LEDGER OPEN                 
+W33304*                           ACROSS PERIODS                                
+W33304******************************************************************        
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+       CONFIGURATION SECTION.                                                   
+       SOURCE-COMPUTER.        IBM-3090.                                        
+       OBJECT-COMPUTER.        IBM-3090.                                        
+       INPUT-OUTPUT SECTION.                                                    
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT  IN-SHORTAGE-EXT-FILE ASSIGN TO INP01.                        
+                                                                                
+           SELECT  OUT-SHORTAGE-EXT-FILE ASSIGN TO OUT01.                       
+                                                                                
+       DATA DIVISION.                                                           
+                                                                                
+       FILE SECTION.                                                            
+                                                                                
+       FD  IN-SHORTAGE-EXT-FILE                                                 
+           RECORDING MODE F                                                     
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS  0 RECORDS                                            
+W33304     RECORD CONTAINS 170 CHARACTERS                                       
+           DATA RECORD IS IN-SHORTAGE-EXT-RECORD.                               
+                                                                                
+W33304 01  IN-SHORTAGE-EXT-RECORD    PIC X(170).                                
+                                                                                
+       FD  OUT-SHORTAGE-EXT-FILE                                                
+           RECORDING MODE F                                                     
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS  0 RECORDS                                            
+W33304     RECORD CONTAINS 170 CHARACTERS                                       
+           DATA RECORD IS OUT-SHORTAGE-EXT-RECORD.                              
+                                                                                
+W33304 01  OUT-SHORTAGE-EXT-RECORD   PIC X(170).                                
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  PA-PROGRAM-ACCUMULATORS.                                             
+           05  PA-SHORT-EXT-RECS     PIC S9(9)     COMP-3 VALUE +0.             
+           05  PA-STORE-SHORT-EXT-RECS                                          
+                                     PIC S9(09)    COMP-3 VALUE +0.             
+                                                                                
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-MAX-RETRIES        PIC S9(04)    COMP SYNC VALUE +2.          
+           05  PC-PROGRAM-ID         PIC X(08)     VALUE 'INKUT188'.            
+           05  PC-OPERCO-NBR         PIC X(02)     VALUE '03'.                  
+           05  PC-APLSYS-CDE         PIC X(02)     VALUE 'ML'.                  
+           05  PC-MDSELV-CDE         PIC X(03)     VALUE 'DPT'.                 
+           05  PC-RSPLVL-CDE-BYR     PIC X(03)     VALUE 'BYR'.                 
+                                                                                
+       01  PV-PROGRAM-VARIABLES.                                                
+           05  PV-RETRY-COUNT        PIC S9(04)   COMP SYNC   VALUE +0.         
+           05  PV-DB2-OPER-ATTEMPTED PIC  X(30)          VALUE SPACES.          
+           05  PV-DKEY-NBR           PIC S9(09)   COMP   VALUE +0.              
+           05  PV-MAX-RETRIES        PIC S9(05)   COMP-3 VALUE +3.              
+           05  PV-PARAGRAPH-NAME     PIC  X(30)          VALUE SPACES.          
+           05  PV-SQL-SUB            PIC S9(05)   COMP-3 VALUE +0.              
+           05  PV-HOLD-DEPT          PIC  X(03)          VALUE SPACES.          
+RB1001*    05  PV-HOLD-SUB-CL        PIC X(02)           VALUE SPACES.          
+           05  PV-HOLD-MDSEAR-GMA-NBR PIC X(02)          VALUE SPACES.          
+           05  PV-HOLD-BYR-NBR        PIC X(03)          VALUE SPACES.          
+           05  PV-HOLD-BYR-NAME       PIC X(20)          VALUE SPACES.          
+           05  PV-HOLD-DEPT-DESC      PIC X(20)          VALUE SPACES.          
+           05  PV-STORE-SUB           PIC S9(04)  COMP-3 VALUE +0.              
+                                                                                
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-END-OF-XMTLOC-CSR-SW PIC X      VALUE 'N'.                    
+               88  PS-PROCESS-XMTLOC-CSR          VALUE 'N'.                    
+               88  PS-END-OF-XMTLOC-CSR           VALUE 'Y'.                    
+           05  PS-SHORTAGE-EXT-EOF-SW PIC X        VALUE 'N'.                   
+               88  PS-PROCESS-SHORTAGE-EXT         VALUE 'N'.                   
+               88  PS-SHORTAGE-EXT-EOF             VALUE 'Y'.                   
+                                                                                
+       01  PT-TABLE-AREA.                                                       
+W26600     05  PT-STORE-TAB OCCURS 9999 TIMES.                                  
+               10  PT-STORE-TABLE.                                              
+W26600             15  PT-STORE-NBR      PIC X(04).                             
+                   15  PT-STORE-NAME     PIC X(10).                             
+W23511             15  PT-DISTRICT-NMBR  PIC X(04).                             
+W28545             15  PT-REGN-NBR       PIC X(04).                             
+W28545             15  PT-TERR-NBR       PIC X(04).                             
+                                                                                
+       01  ABEND-CODE                PIC S9(04)    VALUE +0 COMP SYNC.          
+           88  ABEND-4013-DB2-ERROR                VALUE +4013.                 
+                                                                                
+      ***************************************************************           
+      *    WORKING STORAGE AREA FOR THE NAME REFORMATTER                        
+      *    ROUTINE DPPD024.                                                     
+      ***************************************************************           
+                                                                                
+           COPY DPWS024.                                                        
+                                                                                
+      *************************************************************             
+      *    COPYBOOK FOR INVENTORY EXTRACT FILE                                  
+      *************************************************************             
+W28545     COPY INRD014.                                                        
+                                                                                
+      *************************************************************             
+      *    DCLGEN FOR XMT_LOC STORE TABLE                         *             
+      *************************************************************             
+W26600     EXEC SQL                                                             
+W26600         INCLUDE XMT00001                                                 
+W26600     END-EXEC.                                                            
+                                                                                
+      *************************************************************             
+      *    DCLGEN FOR DISTRICT TABLE                              *             
+      *************************************************************             
+W26600*    EXEC SQL                                                             
+W26000*        INCLUDE TDST000                                                  
+W26600*    END-EXEC.                                                            
+                                                                                
+      *************************************************************             
+      *    DCLGEN FOR XMT_DIST DISTRICT TABLE                     *             
+      *************************************************************             
+W26600     EXEC SQL                                                             
+W26600         INCLUDE XMT00006                                                 
+W26600     END-EXEC.                                                            
+                                                                                
+      *************************************************************             
+      *    DCLGEN FOR XMT_REGN REGION TABLE                       *             
+      *************************************************************             
+W28545     EXEC SQL                                                             
+W28545         INCLUDE XMT00007                                                 
+W28545     END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  SQL AND COBOL DECLARATIONS FOR THE                            *        
+      *  MERCHANDISE AREA TABLE (TMDSEAR)                              *        
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TMDSEAR                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  SQL AND COBOL DECLARATIONS FOR THE                            *        
+      *  RESPONSIBILITY AREA TABLE (TRSPBAR)                           *        
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TRSPBAR                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  SQL AND COBOL DECLARATIONS FOR THE                            *        
+      *  APPLICATION AVAILABILITY TABLE (TAPLAVL)                      *        
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TAPLAVL                                                  
+           END-EXEC.                                                            
+                                                                                
+      *************************************************************             
+      *    DB2 ERROR MESSAGE AREA                                 *             
+      *************************************************************             
+           COPY DPWS004.                                                        
+                                                                                
+W26000*************************************************************             
+W26000*    SELECT XMT_LOC DATA FOR ALL STORES                                   
+W26600*************************************************************             
+W26000                                                                          
+W26600      EXEC SQL                                                            
+W26600          DECLARE XMT_LOC_CSR CURSOR FOR                                  
+W28545          SELECT A.LOC_NBR,                                               
+W28545                 A.LOC_10_ABBR_NM,                                        
+W26600                 B.DIST_NBR,                                              
+W28545                 B.REGN_NBR,                                              
+W28545                 C.TERR_NBR                                               
+W26600          FROM XMT_LOC A,                                                 
+W28545               XMT_DIST B,                                                
+W28545               XMT_REGN C                                                 
+W26600          WHERE A.DIST_NBR = B.DIST_NBR                                   
+W28545            AND B.REGN_NBR = C.REGN_NBR                                   
+W26600          WITH UR                                                         
+W26600      END-EXEC.                                                           
+                                                                                
+      *************************************************************             
+      *    DB2 COMMUNICATION AREA                                 *             
+      *************************************************************             
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+       PROCEDURE DIVISION.                                                      
+                                                                                
+      *************************************************************             
+      * MAIN PROCESSING PARAGRAPH                                 *             
+      *************************************************************             
+       A000-MAINLINE.                                                           
+                                                                                
+            PERFORM B100-INITIALIZATION.                                        
+                                                                                
+            PERFORM Z600-READ-SHORTAGE-EXT.                                     
+            PERFORM B200-PROCESS-SHORTAGE-EXT                                   
+               UNTIL PS-SHORTAGE-EXT-EOF.                                       
+                                                                                
+            PERFORM B300-END-PROCESSING.                                        
+                                                                                
+            STOP RUN.                                                           
+                                                                                
+      ***************************************************************           
+      * OPEN FILES AND LOAD WS-STORE TABLE WITH STORE NAMES                     
+      ***************************************************************           
+       B100-INITIALIZATION.                                                     
+                                                                                
+            OPEN INPUT IN-SHORTAGE-EXT-FILE                                     
+                OUTPUT OUT-SHORTAGE-EXT-FILE.                                   
+                                                                                
+            MOVE +20  TO DP024-FLNAME-LENGTH.                                   
+                                                                                
+            INITIALIZE PT-TABLE-AREA.                                           
+            PERFORM Z150-OPEN-XMTLOC-CSR.                                       
+            SET PS-PROCESS-XMTLOC-CSR TO TRUE.                                  
+      *                                                                         
+            PERFORM B120-SELECT-STORE-NAME                                      
+                UNTIL PS-END-OF-XMTLOC-CSR.                                     
+            PERFORM Z160-CLOSE-XMTLOC-CSR.                                      
+                                                                                
+                                                                                
+      ***************************************************************           
+      * FETCH STORE ROWS                                                        
+      ***************************************************************           
+       B120-SELECT-STORE-NAME.                                                  
+                                                                                
+            PERFORM Z155-FETCH-XMTLOC-CSR.                                      
+                                                                                
+            IF PS-END-OF-XMTLOC-CSR                                             
+                CONTINUE                                                        
+            ELSE                                                                
+W26600          MOVE XMT00001-LOC-NBR   TO PV-STORE-SUB                         
+W26000          MOVE XMT00001-LOC-NBR   TO PT-STORE-NBR (PV-STORE-SUB)          
+W26600          MOVE XMT00001-LOC-10-ABBR-NM                                    
+W26600                                  TO PT-STORE-NAME (PV-STORE-SUB)         
+W26600          MOVE XMT00006-DIST-NBR  TO PT-DISTRICT-NMBR                     
+W26600                                     (PV-STORE-SUB)                       
+W26600          MOVE XMT00006-REGN-NBR  TO PT-REGN-NBR (PV-STORE-SUB)           
+W28545          MOVE XMT00007-TERR-NBR  TO PT-TERR-NBR (PV-STORE-SUB)           
+            END-IF.                                                             
+                                                                                
+      ***************************************************************           
+      *     WRITE AN UPDATED STORE SHORTAGE EXTRACT RECORD.         *           
+      ***************************************************************           
+       B200-PROCESS-SHORTAGE-EXT.                                               
+                                                                                
+                                                                                
+            IF    IN014-DEPT-NBR = PV-HOLD-DEPT                                 
+RB1001*       AND IN014-SUB-CL-NBR = PV-HOLD-SUB-CL                             
+                CONTINUE                                                        
+            ELSE                                                                
+                MOVE IN014-DEPT-NBR   TO PV-HOLD-DEPT                           
+RB1001*         MOVE IN014-SUB-CL-NBR TO PV-HOLD-SUB-CL                         
+                                                                                
+                PERFORM Z120-SELECT-GMA-BYR                                     
+                MOVE MDSEAR-GMA-NBR TO PV-HOLD-MDSEAR-GMA-NBR                   
+                MOVE MDSEAR-BYR-NBR TO PV-HOLD-BYR-NBR                          
+                                                                                
+                PERFORM Z125-SELECT-BUYER-NAME                                  
+                MOVE RSPBAR-WORKER-FIR-NAME   TO DP024-FNAME                    
+                MOVE RSPBAR-WORKER-LAST-NAME TO DP024-LNAME                     
+                PERFORM DP024-0000-FORMAT-NAME                                  
+                MOVE DP024-FLNAME TO PV-HOLD-BYR-NAME                           
+                                                                                
+                PERFORM Z130-SELECT-DEPT-DESC                                   
+                MOVE MDSEAR-DESC TO PV-HOLD-DEPT-DESC                           
+            END-IF.                                                             
+                                                                                
+            PERFORM C500-FORMAT-EXT-RECORDS.                                    
+                                                                                
+            MOVE IN014-STR-NBR TO PV-STORE-SUB.                                 
+                                                                                
+            PERFORM Z600-READ-SHORTAGE-EXT.                                     
+                                                                                
+      ***************************************************************           
+      *                                                             *           
+      ***************************************************************           
+       B300-END-PROCESSING.                                                     
+                                                                                
+            DISPLAY '*** TOTAL NBR OF STORE SHORT RECS WRITTEN    = '           
+                PA-STORE-SHORT-EXT-RECS.                                        
+            DISPLAY ' '.                                                        
+                                                                                
+            CLOSE IN-SHORTAGE-EXT-FILE                                          
+                  OUT-SHORTAGE-EXT-FILE.                                        
+                                                                                
+                                                                                
+      ***************************************************************           
+      *     FORMAT AND WRITE AN UPDATED SHORTAGE EXTRACT AND A     *            
+      *     STORE SHORTAGE EXTRACT RECORD.                          *           
+      ***************************************************************           
+                                                                                
+       C500-FORMAT-EXT-RECORDS.                                                 
+                                                                                
+            MOVE PV-HOLD-MDSEAR-GMA-NBR       TO IN014-GMA-NBR.                 
+            MOVE PV-HOLD-BYR-NBR              TO IN014-BYR-NBR.                 
+            MOVE PV-HOLD-BYR-NAME             TO IN014-BYR-NAME.                
+            MOVE PV-HOLD-DEPT-DESC            TO IN014-DEPT-MDSEAR-DESC.        
+            MOVE PT-STORE-NAME(IN014-STR-NBR) TO IN014-STR-NAME.                
+            MOVE PT-DISTRICT-NMBR(IN014-STR-NBR)                                
+W23511                                        TO IN014-DISTRICT-NMBR.           
+W23511      MOVE PT-REGN-NBR(IN014-STR-NBR)   TO IN014-REGION-NBR.              
+W28545      MOVE PT-TERR-NBR(IN014-STR-NBR)   TO IN014-TERRITORY-NBR.           
+      *                                                                         
+            COMPUTE IN014-TOTAL-BOOK-RTL-AMT                                    
+                  = IN014-BOOK-INV-RTL-AMT                                      
+                  + IN014-SHNK-RTL-AMT                                          
+                  + IN014-ESTIMATED-INV-ADJ-AMT.                                
+                                                                                
+            COMPUTE IN014-SHORTAGE-RTL-AMT                                      
+                = IN014-PHY-INV-RTL-AMT - IN014-TOTAL-BOOK-RTL-AMT.             
+                                                                                
+            PERFORM Z950-WRITE-STORE-SHORT-EXT.                                 
+                                                                                
+      *                                                                         
+      ******************************************************************        
+      *    SELECT GMA AND BUYER.                                                
+      ******************************************************************        
+                                                                                
+       Z120-SELECT-GMA-BYR.                                                     
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRY-COUNT FROM 1 BY 1                               
+               UNTIL ((PV-RETRY-COUNT > PC-MAX-RETRIES)                         
+                   OR (SQLCODE         = +000)                                  
+                   OR (SQLCODE         = +100))                                 
+                                                                                
+           EXEC SQL                                                             
+               SELECT                                                           
+                   GMA_NBR                                                      
+                  ,BYR_NBR                                                      
+               INTO                                                             
+                   :MDSEAR-GMA-NBR                                              
+                  ,:MDSEAR-BYR-NBR                                              
+               FROM                                                             
+                   TMDSEAR                                                      
+               WHERE DEPT_NBR  = :IN014-DEPT-NBR                                
+                 AND MDSELV_CDE  = :PC-MDSELV-CDE                               
+                 AND CURRENT DATE BETWEEN STRT_DTE AND END_DTE                  
+                                                                                
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE        = +000                                   
+                   WHEN SQLCODE        = -904                                   
+                   WHEN SQLCODE        = -911                                   
+                       CONTINUE                                                 
+                   WHEN SQLCODE        = +100                                   
+                       DISPLAY 'DEPT ' IN014-DEPT-NBR                           
+                           ' NOT FOUND  '                                       
+                       MOVE 'Z120-SELECT-GMA-BYR '                              
+                                       TO PV-PARAGRAPH-NAME                     
+                       MOVE 'SELECT ROW FROM TMDSEAR  '                         
+                                       TO PV-DB2-OPER-ATTEMPTED                 
+                       MOVE SPACES TO MDSEAR-GMA-NBR                            
+                                      MDSEAR-BYR-NBR                            
+                   WHEN OTHER                                                   
+                       DISPLAY 'DEPT ' IN014-DEPT-NBR                           
+                       MOVE 'Z120-SELECT GMA-BYR '                              
+                                       TO PV-PARAGRAPH-NAME                     
+                       MOVE 'SELECT ROW FROM TMDSEAR  '                         
+                                       TO PV-DB2-OPER-ATTEMPTED                 
+                       PERFORM         Z999-SQL-ABEND                           
+               END-EVALUATE                                                     
+                                                                                
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-RETRY-COUNT          > PC-MAX-RETRIES                         
+               MOVE                    'Z120-SELECT-GMA-BYR'                    
+                                       TO PV-PARAGRAPH-NAME                     
+               MOVE 'MAX RETRIES EXCEEDED ON TMDSEAR '                          
+                                       TO PV-DB2-OPER-ATTEMPTED                 
+               PERFORM                 Z999-SQL-ABEND                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      *    SELECT BUYER FROM THE MBS.                                           
+      ******************************************************************        
+                                                                                
+       Z125-SELECT-BUYER-NAME.                                                  
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRY-COUNT FROM 1 BY 1                               
+               UNTIL ((PV-RETRY-COUNT > PC-MAX-RETRIES)                         
+                   OR (SQLCODE         = +000)                                  
+                   OR (SQLCODE         = +100))                                 
+                                                                                
+               EXEC SQL                                                         
+                                                                                
+                    SELECT      DISTINCT                                        
+                                A.BYR_NBR                                       
+                         ,      B.WORKER_LAST_NAME                              
+                         ,      B.WORKER_FIR_NAME                               
+                      INTO     :MDSEAR-BYR-NBR                                  
+                         ,     :RSPBAR-WORKER-LAST-NAME                         
+                         ,     :RSPBAR-WORKER-FIR-NAME                          
+                      FROM      TMDSEAR A                                       
+                         ,      TRSPBAR B                                       
+                         ,      TAPLAVL C                                       
+                     WHERE     (A.BYR_NBR     = :PV-HOLD-BYR-NBR)               
+                       AND     (A.DEPT_NBR    = :PV-HOLD-DEPT)                  
+                       AND     (B.RSPLVL_CDE  = :PC-RSPLVL-CDE-BYR)             
+                       AND     (A.OPERCO_NBR  = :PC-OPERCO-NBR)                 
+                       AND     (C.APLSYS_CDE  = :PC-APLSYS-CDE)                 
+                       AND     (A.MDSEAR_DKEY =  B.MDSEAR_DKEY)                 
+                       AND     (A.MDSEAR_DKEY =  C.MDSEAR_DKEY)                 
+                       AND     (CURRENT DATE                                    
+                                BETWEEN CHAR(B.WORKER_STRT_DTE,ISO)             
+                                AND     CHAR(B.WORKER_END_DTE,ISO))             
+                       AND     (CURRENT DATE                                    
+                                BETWEEN CHAR(C.MDSEAR_STRT_DTE,ISO)             
+                                AND     CHAR(C.MDSEAR_END_DTE,ISO))             
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE        = +000                                   
+                   WHEN SQLCODE        = -904                                   
+                   WHEN SQLCODE        = -911                                   
+                       CONTINUE                                                 
+                   WHEN SQLCODE        = +100                                   
+                       DISPLAY 'BYR NUMBER ' PV-HOLD-BYR-NBR                    
+                           ' NOT FOUND  '                                       
+                       MOVE 'NOT FOUND' TO  RSPBAR-WORKER-FIR-NAME              
+                       MOVE SPACE       TO  RSPBAR-WORKER-LAST-NAME             
+                   WHEN OTHER                                                   
+                       MOVE           'Z125-SELECT-BUYER-NAME'                  
+                                       TO PV-PARAGRAPH-NAME                     
+                       MOVE 'SELECT ROW FROM TRSPBAR  '                         
+                                       TO PV-DB2-OPER-ATTEMPTED                 
+                       PERFORM         Z999-SQL-ABEND                           
+               END-EVALUATE                                                     
+                                                                                
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-RETRY-COUNT          > PC-MAX-RETRIES                         
+               MOVE                    'Z125-SELECT-BUYER-NAME'                 
+                                       TO PV-PARAGRAPH-NAME                     
+               MOVE 'MAX RETRIES EXCEEDED ON TRSPBAR '                          
+                                       TO PV-DB2-OPER-ATTEMPTED                 
+               PERFORM                 Z999-SQL-ABEND                           
+           END-IF.                                                              
+                                                                                
+       EJECT                                                                    
+                                                                                
+      ******************************************************************        
+      *  SELECT DEPARTMENT DESCRIPTION FROM TMDSEAR                    *        
+      ******************************************************************        
+       Z130-SELECT-DEPT-DESC.                                                   
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRY-COUNT FROM 1 BY 1                               
+               UNTIL ((PV-RETRY-COUNT > PC-MAX-RETRIES)                         
+                   OR (SQLCODE         = +000)                                  
+                   OR (SQLCODE         = +100))                                 
+                                                                                
+                   EXEC SQL                                                     
+                       SELECT     A.DEPT_NBR                                    
+                            ,     A.MDSEAR_DESC                                 
+                         INTO    :MDSEAR-DEPT-NBR                               
+                            ,    :MDSEAR-DESC                                   
+                         FROM     TMDSEAR A                                     
+                            ,     TAPLAVL B                                     
+                        WHERE    (A.DEPT_NBR    = :IN014-DEPT-NBR)              
+                          AND    (A.MDSELV_CDE  = :PC-MDSELV-CDE)               
+                          AND    (A.OPERCO_NBR  = :PC-OPERCO-NBR)               
+                          AND    (B.APLSYS_CDE  = :PC-APLSYS-CDE)               
+                          AND    (A.MDSEAR_DKEY =  B.MDSEAR_DKEY)               
+                          AND    (CURRENT DATE     BETWEEN                      
+                                  CHAR(B.MDSEAR_STRT_DTE,ISO)  AND              
+                                  CHAR(B.MDSEAR_END_DTE,ISO))                   
+                          AND    (CURRENT DATE     BETWEEN                      
+                                  CHAR(A.STRT_DTE,ISO)         AND              
+                                  CHAR(A.END_DTE,ISO))                          
+                   END-EXEC                                                     
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE        = +000                                   
+                   WHEN SQLCODE        = -904                                   
+                   WHEN SQLCODE        = -911                                   
+                       CONTINUE                                                 
+                   WHEN SQLCODE        = +100                                   
+                       DISPLAY 'DEPT NUMBER ' IN014-DEPT-NBR                    
+                           ' NOT FOUND  '                                       
+                       MOVE IN014-DEPT-NBR  TO MDSEAR-DEPT-NBR                  
+                       MOVE 'NOT FOUND' TO MDSEAR-DESC                          
+                   WHEN OTHER                                                   
+                       MOVE           'Z130-SELECT-DEPT'                        
+                                       TO PV-PARAGRAPH-NAME                     
+                       MOVE 'SELECT DEPARTMENT ROW ON TMDSEAR'                  
+                                       TO PV-DB2-OPER-ATTEMPTED                 
+                       DISPLAY 'DEPT-NBR = ' IN014-DEPT-NBR                     
+                       PERFORM         Z999-SQL-ABEND                           
+               END-EVALUATE                                                     
+                                                                                
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-RETRY-COUNT          > PC-MAX-RETRIES                         
+               MOVE                    'Z130-SELECT-DEPT'                       
+                                       TO PV-PARAGRAPH-NAME                     
+               MOVE 'MAX RETRIES EXCEEDED ON TMDSEAR '                          
+                                       TO PV-DB2-OPER-ATTEMPTED                 
+               PERFORM                 Z999-SQL-ABEND                           
+           END-IF.                                                              
+                                                                                
+      ***************************************************************           
+      *    OPEN THE XMTLOC CURSOR                                               
+      ***************************************************************           
+       Z150-OPEN-XMTLOC-CSR.                                                    
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-SQL-SUB                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-SQL-SUB > PV-MAX-RETRIES) OR                           
+                   (SQLCODE = +100) OR                                          
+                   (SQLCODE = 0)                                                
+                                                                                
+W26600                 EXEC SQL                                                 
+W26600                     OPEN XMT_LOC_CSR                                     
+W26600                 END-EXEC                                                 
+                                                                                
+                       EVALUATE TRUE                                            
+                           WHEN SQLCODE        = +000                           
+                           WHEN SQLCODE        = -904                           
+                           WHEN SQLCODE        = -911                           
+                              CONTINUE                                          
+                           WHEN OTHER                                           
+                               MOVE 'Z150-OPEN-XMTLOC-CSR'                      
+                                   TO PV-PARAGRAPH-NAME                         
+W26600                         MOVE 'OPEN XMT-LOC-CSR'                          
+                                   TO PV-DB2-OPER-ATTEMPTED                     
+                               PERFORM Z999-SQL-ABEND                           
+                       END-EVALUATE                                             
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-SQL-SUB GREATER PV-MAX-RETRIES                                 
+               MOVE 'Z150-OPEN-XMTLOC-CSR' TO PV-PARAGRAPH-NAME                 
+               MOVE 'EXCEEDED MAX RETRIES' TO PV-DB2-OPER-ATTEMPTED             
+               PERFORM Z999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ***************************************************************           
+      *    FETCH THE XMTLOC CURSOR                                              
+      ***************************************************************           
+                                                                                
+       Z155-FETCH-XMTLOC-CSR.                                                   
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-SQL-SUB                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-SQL-SUB > PV-MAX-RETRIES) OR                           
+                   (SQLCODE = +100) OR                                          
+                   (SQLCODE = 0)                                                
+                                                                                
+W26600                 EXEC SQL                                                 
+W26600                     FETCH XMT_LOC_CSR                                    
+W26600                     INTO :XMT00001-LOC-NBR,                              
+W26600                          :XMT00001-LOC-10-ABBR-NM,                       
+W26600                          :XMT00006-DIST-NBR,                             
+W28545                          :XMT00006-REGN-NBR,                             
+W28545                          :XMT00007-TERR-NBR                              
+W26600                 END-EXEC                                                 
+                                                                                
+                       EVALUATE TRUE                                            
+                           WHEN SQLCODE        = +000                           
+                           WHEN SQLCODE        = -904                           
+                           WHEN SQLCODE        = -911                           
+                              CONTINUE                                          
+                           WHEN SQLCODE = +100                                  
+                               SET PS-END-OF-XMTLOC-CSR TO TRUE                 
+                           WHEN SQLCODE = -904                                  
+                           WHEN SQLWARN0 NOT = SPACES                           
+                           WHEN SQLCODE NOT = ZERO                              
+                               MOVE 'Z155-FETCH-XMTLOC-CSR'                     
+                                   TO PV-PARAGRAPH-NAME                         
+W26600                         MOVE 'FETCH XMT-LOC-CSR'                         
+                                   TO PV-DB2-OPER-ATTEMPTED                     
+                               PERFORM Z999-SQL-ABEND                           
+                       END-EVALUATE                                             
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-SQL-SUB GREATER PV-MAX-RETRIES                                 
+               MOVE 'Z150-FETCH-XMTLOC-CSR' TO PV-PARAGRAPH-NAME                
+               MOVE 'EXCEEDED MAX RETRIES' TO PV-DB2-OPER-ATTEMPTED             
+               PERFORM Z999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ***************************************************************           
+      *    CLOSE XMTLOC CURSOR                                                  
+      ***************************************************************           
+       Z160-CLOSE-XMTLOC-CSR.                                                   
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-SQL-SUB                                               
+               FROM 1 BY 1                                                      
+               UNTIL (PV-SQL-SUB > PV-MAX-RETRIES) OR                           
+                   (SQLCODE = +100) OR                                          
+                   (SQLCODE = 0)                                                
+                                                                                
+W26600                 EXEC SQL                                                 
+W26600                     CLOSE XMT_LOC_CSR                                    
+W26600                 END-EXEC                                                 
+                                                                                
+                       EVALUATE TRUE                                            
+                           WHEN SQLCODE = +100                                  
+                           WHEN SQLCODE = -904                                  
+                           WHEN SQLCODE = -911                                  
+                           WHEN SQLCODE = +0                                    
+                               CONTINUE                                         
+                           WHEN SQLWARN0 NOT = SPACES                           
+                           WHEN SQLCODE LESS ZERO                               
+                           WHEN SQLCODE GREATER ZERO                            
+                               MOVE 'Z160-CLOSE-XMTLOC-CSR'                     
+                                   TO PV-PARAGRAPH-NAME                         
+W26600                         MOVE 'CLOSE OF XMT LOC TABLE'                    
+                                   TO PV-DB2-OPER-ATTEMPTED                     
+                               PERFORM Z999-SQL-ABEND                           
+                       END-EVALUATE                                             
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-SQL-SUB GREATER PV-MAX-RETRIES                                 
+               MOVE 'Z160-CLOSE-XMTLOC-CSR' TO PV-PARAGRAPH-NAME                
+               MOVE 'EXCEEDED MAX RETRIES' TO PV-DB2-OPER-ATTEMPTED             
+               PERFORM Z999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ***************************************************************           
+      *   READ A RECORD FOR PROCESSING                              *           
+      ***************************************************************           
+                                                                                
+       Z600-READ-SHORTAGE-EXT.                                                  
+                                                                                
+           READ IN-SHORTAGE-EXT-FILE INTO IN014-SHORTAGE-EXTR-REC               
+               AT END                                                           
+                  SET PS-SHORTAGE-EXT-EOF TO TRUE.                              
+                                                                                
+           IF PS-PROCESS-SHORTAGE-EXT                                           
+               ADD +1 TO PA-SHORT-EXT-RECS.                                     
+                                                                                
+                                                                                
+      ***************************************************************           
+      *   READ A RECORD FOR PROCESSING                              *           
+      ***************************************************************           
+                                                                                
+       Z950-WRITE-STORE-SHORT-EXT.                                              
+                                                                                
+           WRITE OUT-SHORTAGE-EXT-RECORD FROM IN014-SHORTAGE-EXTR-REC.          
+           ADD +1 TO PA-STORE-SHORT-EXT-RECS.                                   
+                                                                                
+                                                                                
+      ***************************************************************           
+      *    SQL ABEND PROCESSING                                     *           
+      ***************************************************************           
+       Z999-SQL-ABEND.                                                          
+                                                                                
+           DISPLAY '** ABEND     **'.                                           
+           DISPLAY '** PROGRAM   = ' PC-PROGRAM-ID.                             
+           DISPLAY '** PARAGRAPH = ' PV-PARAGRAPH-NAME.                         
+           DISPLAY '** OPERATION = ' PV-DB2-OPER-ATTEMPTED.                     
+                                                                                
+           COPY DPPD004.                                                        
+                                                                                
+           CALL 'ILBOABN0'  USING ABEND-CODE.                                   
+                                                                                
+      ******************************************************************        
+      *    NAME REFORMATTER ROUTINE.                                            
+      ******************************************************************        
+           COPY DPPD024.                                                        
+                                                                                
+                                                                                

@@ -1,0 +1,869 @@
+000100 IDENTIFICATION DIVISION.                                         00010099
+000200                                                                  00020099
+000300 PROGRAM-ID.    MLKUT403                                          00030099
+000400 AUTHOR.        SCOTT JACKSON.                                    00040099
+000500 INSTALLATION.  KOHLS DEPARTMENT STORES.                          00050099
+000600 DATE-WRITTEN.  04-10-98.                                         00060099
+000700 DATE-COMPILED.                                                   00070099
+000800                                                                  00080099
+000900******************************************************************00090099
+001000*           MLKUT403 - CREATE MTD PURCHASE FILE                   00100099
+001100*                                                                 00110099
+001200* THIS PROGRAM IS A REWRITE OF PROGRAMS KDM2053 AND MLKUP002.     00120099
+001300*    ALL IMS CALLS AND INTERNAL SORTS HAVE BEEN ELIMINATED.       00130099
+001400*                                                                 00140099
+001500* THIS PROGRAM WILL PROCESS THE CURRENT WEEK'S PURCHASE FILE AND  00150099
+001500* FORMAT DATA FOR REPORTING MTD TRANSACTION FINANCIAL INFO.       00160099
+001500* THE FOLLOWING RECORD TYPES ARE PROCESSED                        00170099
+001500* '  ' HEADER     '30' TRANSFER FROM  '40' MARKDOWNS              00180099
+001500* '10' PURCHASES  '31' TRANSFER TO    '50' MARKONS   '80' INV ADJ 00190099
+001600***********                                                       00200099
+001700* - FILE IS READ TO HOLD AREA TO EXTRACT TRAN CODE AND DEPT NBR   00210099
+001800* - TRAN CODE (D115-CODE-XX) DETERMINES WHICH RECORD LAYOUT FROM  00220099
+001900*   KDM2809 THE RECORD IS TO BE WRITTEN TO (PURCH,SALES,TRFX,MKDN)00230099
+002000* - INPUT RECS THEN MOVED FIELD BY FIELD TO THE OUTPUT LAYOUT.    00240099
+002000* - PURCHASE RECS WITH TRANS-CD = 2 OR 8 ARE DEBIT REVERSALS AND  00250099
+002100*   ARE TO HAVE THEIR SIGNS REVERSED BEFORE PROCESSING.           00260099
+002100*                                                                 00270099
+002200* - DEPT FROM INPUT REC IS USED TO EXTRACT DB2 DATA & BUILD TABLE.00280099
+002300* - CURSOR 'DEPT_CSR' IS USED TO SELECT GMM, DMM, BUYER AND DEPT  00290099
+002400*   FROM DB2 TABLE TMDSEAR. THESE FIELDS ARE USED TO FIND MATCH   00300099
+002500*   WHERE INPUT DEPT = CURSOR DEPT. DB2 FIELDS ARE THEN ADDED TO  00310099
+002600*   THE OUTPUT RECORD FIELD CORRESPONDING FIELDS (GMM,DMM,BUYER)  00320099
+      *                                                                 00330099
+      * DATE      PITS #/WR #  DESCRIPTION                              00340099
+      * --------  -----------  ---------------------------------------- 00350099
+      * 03/12/02   23511       MARKDOWN/MARKUP TRUNCATION               00360099
+207210* 08/24/18  CHG0207210   RENAME KDM2809 TO MLWS050 AND            00370099
+207210*                               KDM2810 TO MLWS051.               00380099
+      *                                                                 00390099
+      ******************************************************************00400099
+002800 ENVIRONMENT DIVISION.                                            00410099
+002900                                                                  00420099
+003000 CONFIGURATION SECTION.                                           00430099
+003100 SOURCE-COMPUTER.        IBM-3090.                                00440099
+003200 OBJECT-COMPUTER.        IBM-3090.                                00450099
+003300                                                                  00460099
+003400 INPUT-OUTPUT SECTION.                                            00470099
+003500 FILE-CONTROL.                                                    00480099
+003600     SELECT WEEKLY-EDIT-DATA        ASSIGN TO INP01.              00490099
+003700     SELECT CONTROL-CARD            ASSIGN TO INP02.              00500099
+003800     SELECT MTD-PURCH-FILE          ASSIGN TO OUT01.              00510099
+003900*                                                                 00520099
+004000*                                                                 00530099
+004100 DATA DIVISION.                                                   00540099
+004200 FILE SECTION.                                                    00550099
+004300*                                                                 00560099
+004400 FD  WEEKLY-EDIT-DATA                                             00570099
+004500     RECORDING  MODE IS F.                                        00580099
+23511  01  EDIT-DATA-RECORD               PIC X(125).                   00590099
+004700*                                                                 00600099
+004800 FD  CONTROL-CARD                                                 00610099
+004900     RECORDING  MODE IS F.                                        00620099
+005000 01  CONTROL-CARD-RECORD            PIC X(80).                    00630099
+005100*                                                                 00640099
+005200 FD  MTD-PURCH-FILE                                               00650099
+005300     RECORDING  MODE IS F.                                        00660099
+005400 01  OUTPUT-RECORD                  PIC X(100).                   00670099
+005500*                                                                 00680099
+005600*                                                                 00690099
+005700 WORKING-STORAGE SECTION.                                         00700099
+005800*                                                                 00710099
+005900*                                                                 00720099
+006000 01  PV-PROGRAM-VARIABLES.                                        00730099
+006100     05  PV-PARAGRAPH-NAME        PIC  X(30)   VALUE SPACES.      00740099
+006200     05  PV-DB2-OPERATION         PIC  X(30)   VALUE SPACES.      00750099
+006200     05  PV-OPERATION-ATTEMPTED   PIC  X(30)   VALUE SPACES.      00760099
+006300     05  PV-ABEND-MESSAGE         PIC  X(30)   VALUE SPACES.      00770099
+006400     05  PV-RETRY-CNT             PIC  9(01)   VALUE ZEROES.      00780099
+006500     05  PV-FISCAL-WEEK           PIC  9(02)   VALUE ZEROES.      00790099
+006600     05  PV-ABEND-CODE            PIC S9(04)   VALUE +0 COMP SYNC.00800099
+038400     05  PV-DEBIT-FIELDS.                                         00810099
+23511          10  PV-MERCH-AMT         PIC S9(07)V99  COMP-3  VALUE 0. 00820099
+23511          10  PV-DISC-AMT          PIC S9(07)V99  COMP-3  VALUE 0. 00830099
+23511          10  PV-FREIGHT-AMT       PIC S9(07)V99  COMP-3  VALUE 0. 00840099
+23511          10  PV-NET-COST-AMT      PIC S9(07)V99  COMP-3  VALUE 0. 00850099
+23511          10  PV-RETAIL-AMT        PIC S9(07)V99  COMP-3  VALUE 0. 00860099
+006700*                                                                 00870099
+006000 01  PC-PROGRAM-CONSTANTS.                                        00880099
+007500     05  PC-MAX-RETRIES           PIC S9(01)   VALUE +3.          00890099
+006100     05  PC-PROGRAM-NAME          PIC  X(08)   VALUE 'MLKUT403'.  00900099
+006100     05  PC-HEADER-INPUT          PIC  X(08)   VALUE 'DSAIC40U'.  00910099
+006100     05  PC-HEADER-OUTPUT         PIC  X(08)   VALUE 'DSAIC85S'.  00920099
+006100     05  PC-REVERSAL              PIC S9(01)   VALUE -1.          00930099
+006700*                                                                 00940099
+011100 01  PV-CODE-STATUS.                                              00950099
+011200     05  PV-CODE-TYPE        PIC X(2)    VALUE SPACES.            00960099
+011300         88  PV-HEADER                   VALUE '  '.              00970099
+011400         88  PV-PURCHASE                 VALUE '10'.              00980099
+011500         88  PV-TRANSFER-FROM            VALUE '30'.              00990099
+011600         88  PV-TRANSFER-TO              VALUE '31'.              01000099
+011700         88  PV-MARKDOWN                 VALUE '40'.              01010099
+011800         88  PV-MARKON                   VALUE '50'.              01020099
+011900         88  PV-ADJ                      VALUE '80'.              01030099
+012000                                                                  01040099
+006800     05  PV-DEPT-NBR-X                   PIC X(03).               01050099
+006900     05  FILLER  REDEFINES  PV-DEPT-NBR-X.                        01060099
+007000         10  PV-DEPT-NBR-9               PIC 9(03).               01070099
+007300*                                                                 01080099
+007700 01  PROGRAM-ERROR-MESSAGES.                                      01090099
+007800    05  PE-MSG-01                    PIC X(16)      VALUE         01100099
+007900         'OPEN DEPT CURSOR'.                                      01110099
+008000    05  PE-MSG-02                    PIC X(14)      VALUE         01120099
+008100         'FETCH DEPT ROW'.                                        01130099
+008200    05  PE-MSG-03                    PIC X(17)      VALUE         01140099
+008300         'CLOSE DEPT CURSOR'.                                     01150099
+008400    05  PE-MSG-04                    PIC X(20)      VALUE         01160099
+008500         'MAX RETRIES EXCEEDED'.                                  01170099
+008800    05  PE-MSG-05                    PIC X(18)      VALUE         01180099
+008900         'CONTROL CARD EMPTY'.                                    01190099
+009200*                                                                 01200099
+009300 01  PROGRAM-SWITCHES.                                            01210099
+009400     05  PS-FIRST-RECORD-SW          PIC X(01)     VALUE 'N'.     01220099
+009500         88  FIRST-DATA-RECORD                     VALUE 'Y'.     01230099
+009600     05  PS-MORE-DATA-RECORDS-SW     PIC X(01)     VALUE 'N'.     01240099
+009700         88  MORE-DATA-RECORDS                     VALUE 'N'.     01250099
+009800         88  END-OF-DATA                           VALUE 'Y'.     01260099
+009900     05  PS-DEPT-FOUND-SW            PIC X(01)     VALUE 'N'.     01270099
+010000         88  DEPT-NOT-FOUND                        VALUE 'N'.     01280099
+010100         88  DEPT-FOUND                            VALUE 'Y'.     01290099
+010200     05  PS-END-OF-DEPT-CSR-SW       PIC X(01)     VALUE 'N'.     01300099
+010300         88  END-OF-DEPT-CSR                       VALUE 'Y'.     01310099
+010400         88  NOT-END-OF-DEPT-CSR                   VALUE 'N'.     01320099
+010500     05  PS-TABLE-LOADED-SW          PIC X(01)     VALUE 'N'.     01330099
+010600         88  TABLE-LOADED                          VALUE 'Y'.     01340099
+010700         88  TABLE-NOT-LOADED                      VALUE 'N'.     01350099
+010800     05  PS-VALID-DEPT-SW            PIC X(01)     VALUE 'N'.     01360099
+010900         88  VALID-DEPT                            VALUE 'Y'.     01370099
+012300*                                                                 01380099
+012400 01  PA-PROGRAM-ACCUM-INPUT.                                      01390099
+012500     05  PA-PURCHASE-COUNT-IN        PIC 9(09)     VALUE ZEROES.  01400099
+012600     05  PA-TRANSFER-FROM-COUNT-IN   PIC 9(09)     VALUE ZEROES.  01410099
+012700     05  PA-TRANSFER-TO-COUNT-IN     PIC 9(09)     VALUE ZEROES.  01420099
+012800     05  PA-MARKDOWN-COUNT-IN        PIC 9(09)     VALUE ZEROES.  01430099
+012900     05  PA-MARKON-COUNT-IN          PIC 9(09)     VALUE ZEROES.  01440099
+013000     05  PA-INVEN-ADJUSTMT-COUNT-IN  PIC 9(09)     VALUE ZEROES.  01450099
+013100     05  PA-INPUT-RECORDS-COUNT-IN   PIC 9(09)     VALUE ZEROES.  01460099
+013200     05  PA-ERROR-RECORDS-COUNT-IN   PIC 9(09)     VALUE ZEROES.  01470099
+013300     05  PA-HEADER-RECORD-COUNT-IN   PIC 9(03)     VALUE ZEROES.  01480099
+013400*                                                                 01490099
+013500 01  PA-PROGRAM-ACCUM-OUTPUT.                                     01500099
+013600     05  PA-PURCHASE-COUNT-OUT        PIC 9(09)    VALUE ZEROES.  01510099
+013700     05  PA-TRANSFER-FROM-COUNT-OUT   PIC 9(09)    VALUE ZEROES.  01520099
+013800     05  PA-TRANSFER-TO-COUNT-OUT     PIC 9(09)    VALUE ZEROES.  01530099
+013900     05  PA-MARKDOWN-COUNT-OUT        PIC 9(09)    VALUE ZEROES.  01540099
+014000     05  PA-MARKON-COUNT-OUT          PIC 9(09)    VALUE ZEROES.  01550099
+014100     05  PA-INVEN-ADJUSTMT-COUNT-OUT  PIC 9(09)    VALUE ZEROES.  01560099
+014200     05  PA-OUTPUT-RECORD-COUNT-OUT   PIC 9(09)    VALUE ZEROES.  01570099
+014300     05  PA-VARIANCE                  PIC 9(09)    VALUE ZEROES.  01580099
+014400     05  PA-HEADER-RECORD-COUNT-OUT   PIC 9(03)    VALUE ZEROES.  01590099
+014500*                                                                 01600099
+014600 01  CC-CONTROL-REC.                                              01610099
+014700     05  CC-CALENDAR-TYPE         PIC X(02)        VALUE SPACES.  01620099
+014800     05  FILLER                   PIC X(01)        VALUE SPACES.  01630099
+014900     05  CC-CONTROL-DATE          PIC X(10)        VALUE SPACES.  01640099
+015000     05  CC-CONTROL-DATE-RED  REDEFINES                           01650099
+015100         CC-CONTROL-DATE.                                         01660099
+015200         10  CC-CONTROL-CC        PIC X(02).                      01670099
+015300         10  CC-CONTROL-YY        PIC X(02).                      01680099
+015400         10  FILLER               PIC X(01).                      01690099
+015500         10  CC-CONTROL-MM        PIC X(02).                      01700099
+015600         10  FILLER               PIC X(01).                      01710099
+015700         10  CC-CONTROL-DD        PIC X(02).                      01720099
+015800     05  FILLER                   PIC X(67)        VALUE SPACES.  01730099
+015900*                                                                 01740099
+016000 01  HEADER-RECORD.                                               01750099
+016100     05  FILLER                   PIC X(02) VALUE SPACES.         01760099
+016200     05  HD-HEADER-REC            PIC X(08) VALUE SPACES.         01770099
+016300     05  FILLER                   PIC X(01) VALUE SPACES.         01780099
+016400     05  HD-FISCAL-PERIOD-NBR     PIC 9(02) VALUE ZEROES.         01790099
+016500     05  FILLER                   PIC X(01) VALUE SPACES.         01800099
+016600     05  HD-NBR-FISCAL-WEEKS      PIC 9(01) VALUE ZEROES.         01810099
+016700     05  FILLER                   PIC X(01) VALUE SPACES.         01820099
+016800     05  HD-FISCAL-PERIOD-WEEK    PIC 9(01) VALUE ZEROES.         01830099
+016900     05  FILLER                   PIC X(81) VALUE SPACES.         01840099
+016900     05  HD-FISCAL-WEEK           PIC 9(02) VALUE ZEROES.         01850099
+017000*                                                                 01860099
+017100* EDIT FILE READ TO HOLD RECORD TO EXTRACT TRAN CODE,DEPT,HEADER  01870099
+017200*                                                                 01880099
+017300 01  HOLD-RECORD.                                                 01890099
+017400     05  HR-INPUT-TRANS-CODE      PIC X(02) VALUE SPACES.         01900099
+017500     05  FILLER                   PIC X(09) VALUE SPACES.         01910099
+017600     05  HR-INPUT-DEPT            PIC X(03) VALUE SPACES.         01920099
+017700     05  FILLER                   PIC X(06) VALUE SPACES.         01930099
+017800     05  HR-HEADER-REC            PIC X(08) VALUE SPACES.         01940099
+23511      05  FILLER                   PIC X(97) VALUE SPACES.         01950099
+018000*                                                                 01960099
+018100 01  DEPT-TABLE-VARIABLES.                                        01970099
+018200     05  DT-DEPT-TABLE.                                           01980099
+018300         10  DT-DEPT-TBL OCCURS 999 TIMES INDEXED BY DEPT-NUMBER. 01990099
+018400             15  DT-DEPT-NBR               PIC X(03).             02000099
+018500             15  DT-GMA-NBR                PIC X(02).             02010099
+018600             15  DT-DMA-NBR                PIC X(02).             02020099
+018700             15  DT-BYR-NBR                PIC X(03).             02030099
+018800*                                                                 02040099
+018900 01  FORMAT-DATA-FIELDS.                                          02050099
+019000     05  FMT-PURCH-BATCH-DATA.                                    02060099
+019100         10  FMT-BATCH-ALPHA-4.                                   02070099
+019200             15  FMT-BATCH-X          PIC X(04)    VALUE SPACES.  02080099
+019300         10  FMT-BATCH-NUMERIC   REDEFINES FMT-BATCH-ALPHA-4.     02090099
+019400             15  FMT-BATCH-9          PIC 9(03).                  02100099
+019500             15  FILLER               PIC X(01).                  02110099
+019600*                                                                 02120099
+019700***************************************************************** 02130099
+019800*  SQL ABEND ROUTINE WORKING STORAGE                              02140099
+019900***************************************************************** 02150099
+020000     COPY DPWS004.                                                02160099
+020100*                                                                 02170099
+020200******************************************************************02180099
+020300*    SQL COMMUNICATIONS AREA DCLGEN                               02190099
+020400******************************************************************02200099
+020500     EXEC SQL                                                     02210099
+020600         INCLUDE SQLCA                                            02220099
+020700     END-EXEC.                                                    02230099
+020800*                                                                 02240099
+020900******************************************************************02250099
+021000*  EXTENSION TO THE SQL COMMUNICATIONS AREA FOR EDITING           02260099
+021100*  SQL CODES FOR DISPLAY                                          02270099
+021200******************************************************************02280099
+021300     COPY SQLCA2.                                                 02290099
+021400*                                                                 02300099
+021500******************************************************************02310099
+021600*  MERCHANDISE AREA TABLE                                         02320099
+021700******************************************************************02330099
+021800     EXEC SQL                                                     02340099
+021900         INCLUDE TMDSEAR                                          02350099
+022000     END-EXEC.                                                    02360099
+022100*                                                                 02370099
+022200*************************************************************     02380099
+022300* CURSOR RETRIEVES ALL CURRENT DEPARTMENTS FOR KOHLS              02390099
+022400*************************************************************     02400099
+022500     EXEC SQL                                                     02410099
+022600        DECLARE DEPT_CSR CURSOR FOR                               02420099
+022700        SELECT DEPT_NBR                                           02430099
+022800               ,GMA_NBR                                           02440099
+022900               ,DMA_NBR                                           02450099
+023000               ,BYR_NBR                                           02460099
+023100          FROM TMDSEAR                                            02470099
+023200         WHERE OPERCO_NBR = '03'                                  02480099
+023300           AND MDSELV_CDE = 'DPT'                                 02490099
+023400           AND :CC-CONTROL-DATE BETWEEN STRT_DTE AND END_DTE      02500099
+023500         ORDER BY DEPT_NBR                                        02510099
+023600     END-EXEC.                                                    02520099
+023700*                                                                 02530099
+023800***************************************************************** 02540099
+023900*  WORK AREA PASSED IN CALL TO DPKUT500                          *02550099
+024000***************************************************************** 02560099
+024100     COPY DPWS500.                                                02570099
+024200***************************************************************** 02580099
+024300*  INPUT RECORD FORMAT                                          * 02590099
+024400***************************************************************** 02600099
+207210     COPY MLWS050.                                                02610099
+024600***************************************************************** 02620099
+024700*  OUTPUT RECORD FORMAT                                         * 02630099
+024800***************************************************************** 02640099
+207210     COPY MLWS051.                                                02650099
+025000*                                                                 02660099
+025100*                                                                 02670099
+025200 PROCEDURE DIVISION.                                              02680099
+025300*                                                                 02690099
+025400     PERFORM 1000-INITIALIZATION-RTN.                             02700099
+025500     PERFORM 7000-PROCESS-DEPT-CURSOR.                            02710099
+025600     PERFORM 2000-PROCESS-EDIT-FILE                               02720099
+025700         UNTIL END-OF-DATA.                                       02730099
+025800     PERFORM 8000-EOJ-ROUTINE.                                    02740099
+025900     STOP RUN.                                                    02750099
+026000*                                                                 02760099
+026100*                                                                 02770099
+026200***************************************************************** 02780099
+026300* OPEN FILES, READ CONTROL FILE, FIND FISCAL WEEK FORM CALENDAR   02790099
+026400***************************************************************** 02800099
+026500*                                                                 02810099
+026600 1000-INITIALIZATION-RTN.                                         02820099
+026700                                                                  02830099
+026800     OPEN INPUT CONTROL-CARD                                      02840099
+026900                WEEKLY-EDIT-DATA                                  02850099
+027000         OUTPUT MTD-PURCH-FILE.                                   02860099
+028100*                                                                 02870099
+028200     PERFORM 4000-PROCESS-CONTROL-CARD.                           02880099
+028300*                                                                 02890099
+028400     PERFORM 4100-READ-EDIT-FILE.                                 02900099
+028500*                                                                 02910099
+028600*                                                                 02920099
+028700******************************************************************02930099
+028800*  MAIN PROCESSING ROUTINE                                        02940099
+028900******************************************************************02950099
+029000*                                                                 02960099
+029100 2000-PROCESS-EDIT-FILE.                                          02970099
+029200*                                                                 02980099
+029700*                                                                 02990099
+029800     MOVE SPACES                   TO OUTPUT-RECORD.              03000099
+029900*                                                                 03010099
+030000     MOVE HR-INPUT-TRANS-CODE      TO PV-CODE-TYPE.               03020099
+030100*                                                                 03030099
+030200     EVALUATE TRUE                                                03040099
+030300         WHEN PV-PURCHASE                                         03050099
+030500             PERFORM 2100-PROCESS-PURCHASE-RECORD                 03060099
+030600         WHEN PV-TRANSFER-FROM                                    03070099
+030800             PERFORM 2200-PROCESS-TRANS-FROM-RECORD               03080099
+030900         WHEN PV-TRANSFER-TO                                      03090099
+031100             PERFORM 2300-PROCESS-TRANS-TO-RECORD                 03100099
+031200         WHEN PV-MARKDOWN                                         03110099
+031400             PERFORM 2400-PROCESS-MARKDOWN-RECORD                 03120099
+031500         WHEN PV-MARKON                                           03130099
+031700             PERFORM 2500-PROCESS-MARKON-RECORD                   03140099
+031800         WHEN PV-ADJ                                              03150099
+032000             PERFORM 2600-PROCESS-ADJ-RECORD                      03160099
+032300         WHEN PV-HEADER                                           03170099
+032400             IF HR-HEADER-REC = PC-HEADER-INPUT                   03180099
+032500                 ADD 1 TO PA-HEADER-RECORD-COUNT-IN               03190099
+032600                 PERFORM 5100-WRITE-HEADER-REC                    03200099
+033200             ELSE                                                 03210099
+033300                 ADD 1 TO PA-ERROR-RECORDS-COUNT-IN               03220099
+033400                 DISPLAY 'INV TRANCODE ', HOLD-RECORD             03230099
+033600             END-IF                                               03240099
+033700         WHEN OTHER                                               03250099
+033800             ADD 1 TO  PA-ERROR-RECORDS-COUNT-IN                  03260099
+033900             DISPLAY 'INV TRANCODE', HOLD-RECORD                  03270099
+034000     END-EVALUATE.                                                03280099
+034100*                                                                 03290099
+034300     PERFORM 4100-READ-EDIT-FILE.                                 03300099
+034400*                                                                 03310099
+034500*                                                                 03320099
+034600******************************************************************03330099
+034700*  MOVE PURCHASE RECORD TO INPUT & FORMATTED OUTPUT LAYOUT        03340099
+034800******************************************************************03350099
+034900*                                                                 03360099
+035000 2100-PROCESS-PURCHASE-RECORD.                                    03370099
+035100*                                                                 03380099
+030400     ADD 1                        TO PA-PURCHASE-COUNT-IN.        03390099
+035400     MOVE HOLD-RECORD             TO D115-PURCH-JOURNAL-REC.      03400099
+035500* TO EXTRACT CORRECT DEPT-NUMBER FROM TABLE                       03410099
+035700     SET DEPT-NUMBER              TO D115-DEPT-10.                03420099
+035500*                                                                 03430099
+037200     MOVE D115-CODE-10            TO D090-CODE-10                 03440099
+037300     MOVE D115-CLASS-10           TO D090-CLASS-10                03450099
+037400     MOVE D115-DOC-NO-10          TO D090-DOCNO-10                03460099
+037500     MOVE D115-DOC-DATE           TO D090-PURCH-DATE              03470099
+037600     MOVE D115-VEND-NO-10         TO D090-VENDNO-10               03480099
+037700     MOVE D115-PO-NO              TO D090-PURCHNO-10              03490099
+037800     MOVE D115-ACCT-NO            TO D090-ACCTNO                  03500099
+037900     MOVE D115-KOHLS-MM           TO D090-KOHLS-MO-10             03510099
+038600     MOVE D115-STORE-10           TO D090-STORE-10                03520099
+038700     MOVE D115-BATCH-NO           TO D090-BATCHNO                 03530099
+038500     MOVE D115-TRANS-CD           TO D090-TR-CODE                 03540099
+038500* IF D115-TRANS-CD = '02' OR '08' (THIS IS A DEBIT) THE FINANCIAL 03550099
+038500* FIELDS MUST BE HAVE THEIR SIGNS REVERSED (IE. FIELD * -01)      03560099
+038500     IF  (D115-TRANS-CD = '02' OR D115-TRANS-CD = '08')           03570099
+038000         COMPUTE PV-MERCH-AMT    = (D115-MERCH-AMT * PC-REVERSAL) 03580099
+038100         COMPUTE PV-DISC-AMT     = (D115-DISCT-AMT * PC-REVERSAL) 03590099
+038200         COMPUTE PV-FREIGHT-AMT  = (D115-FRGHT-AMT * PC-REVERSAL) 03600099
+038000         COMPUTE PV-NET-COST-AMT = (D115-NET-COST  * PC-REVERSAL) 03610099
+038200         COMPUTE PV-RETAIL-AMT   = (D115-RETAIL-AMT * PC-REVERSAL)03620099
+038000*      MOVE REVERSED FIELD TO OUTPUT                              03630099
+038000         MOVE PV-MERCH-AMT        TO D090-MERCH-AMT               03640099
+038000         MOVE PV-DISC-AMT         TO D090-DISC-AMT                03650099
+038000         MOVE PV-FREIGHT-AMT      TO D090-FREIGHT-AMT             03660099
+038000         MOVE PV-NET-COST-AMT     TO D090-NET-COST-AMT            03670099
+038000         MOVE PV-RETAIL-AMT       TO D090-RETAIL-AMT              03680099
+038400     ELSE                                                         03690099
+038400         MOVE D115-MERCH-AMT       TO D090-MERCH-AMT              03700099
+038400         MOVE D115-DISCT-AMT       TO D090-DISC-AMT               03710099
+038400         MOVE D115-FRGHT-AMT       TO D090-FREIGHT-AMT            03720099
+038400         MOVE D115-NET-COST        TO D090-NET-COST-AMT           03730099
+038400         MOVE D115-RETAIL-AMT      TO D090-RETAIL-AMT             03740099
+038400     END-IF                                                       03750099
+038800* FORMAT BATCH NMBR TO MATCH OUTPUT SORT DATA FORMAT              03760099
+060000     MOVE D115-BATCH-NO           TO FMT-BATCH-ALPHA-4            03770099
+039000     MOVE FMT-BATCH-9             TO D090-SORT-BATCH-NBR-10       03780099
+039100* POPULATE REMAINING FIELDS FROM TMDSEAR TABLE FETCH              03790099
+039200     MOVE DT-DEPT-NBR(DEPT-NUMBER)     TO D090-DEPT-10            03800099
+039300     MOVE DT-GMA-NBR(DEPT-NUMBER)      TO D090-DIV-10             03810099
+039400     MOVE DT-DMA-NBR(DEPT-NUMBER)      TO D090-MERCH-MGR-10       03820099
+039500     MOVE DT-BYR-NBR(DEPT-NUMBER)      TO D090-BUYER-10           03830099
+039600*                                                                 03840099
+039700     MOVE PV-FISCAL-WEEK               TO D090-FISCAL-WEEK-10     03850099
+039800*                                                                 03860099
+039900     PERFORM 5000-WRITE-OUTPUT-RECORD.                            03870099
+040100*                                                                 03880099
+040200******************************************************************03890099
+040300*  MOVE TRANSFER-FROM RECORD TO INPUT & FORMATTED OUTPUT LAYOUT   03900099
+040400******************************************************************03910099
+040500*                                                                 03920099
+040600 2200-PROCESS-TRANS-FROM-RECORD.                                  03930099
+040700*                                                                 03940099
+030700     ADD 1                        TO PA-TRANSFER-FROM-COUNT-IN.   03950099
+040900     MOVE HOLD-RECORD             TO D115-TRANSFER-FROM-REC.      03960099
+041000* TO EXTRACT CORRECT DEPT-NUMBER FROM TABLE                       03970099
+041100     SET DEPT-NUMBER              TO D115-DEPT-30.                03980099
+041200                                                                  03990099
+041300     MOVE D115-CODE-30            TO D090-CODE-30.                04000099
+041400     MOVE D115-TRANSFER-FROM      TO D090-TRANSFER-FROM.          04010099
+041500     MOVE D115-DEPT-30X           TO D090-DEPT-30.                04020099
+041600     MOVE D115-CLASS-30X          TO D090-CLASS-30.               04030099
+041700     MOVE D115-DOC-NO-30          TO D090-DOC-NO-30.              04040099
+041800     MOVE D115-TRANSFER-DATE      TO D090-TRANSFER-DATE.          04050099
+041900     MOVE D115-TRANSFER-TO        TO D090-TRANSFER-TO.            04060099
+042000     MOVE D115-KOHLS-MM-30        TO D090-KOHLS-MM-30.            04070099
+042100     MOVE D115-TRANS-UNITS        TO D090-TRANS-UNITS.            04080099
+042200     MOVE D115-TRANS-UNITSX       TO D090-TRANS-UNITSX.           04090099
+042300     MOVE D115-RETAIL-PER-UN      TO D090-RETAIL-PER-UN.          04100099
+042400     MOVE D115-RETAIL-PER-UNX     TO D090-RETAIL-PER-UNX.         04110099
+042500     MOVE D115-TRANS-BATCH        TO D090-TRANS-BATCH             04120099
+042600                                     D090-SORT-BATCH-NBR-30.      04130099
+042700     MOVE D115-TRANS-SCAN-NO      TO D090-TRANS-SCAN-NO.          04140099
+042800* POPULATE FIELDS FROM TMDSEAR TABLE FETCH                        04150099
+042900     MOVE DT-DEPT-NBR(DEPT-NUMBER)     TO D090-DEPT-30.           04160099
+043000     MOVE DT-GMA-NBR(DEPT-NUMBER)      TO D090-DIV-30.            04170099
+043100     MOVE DT-DMA-NBR(DEPT-NUMBER)      TO D090-MERCH-MGR-30.      04180099
+043200     MOVE DT-BYR-NBR(DEPT-NUMBER)      TO D090-BUYER-30.          04190099
+043300*                                                                 04200099
+043400     MOVE PV-FISCAL-WEEK          TO D090-FISCAL-WEEK-30          04210099
+043500*                                                                 04220099
+043600     PERFORM 5000-WRITE-OUTPUT-RECORD.                            04230099
+043700*                                                                 04240099
+043800*                                                                 04250099
+043900******************************************************************04260099
+044000*  MOVE TRANSFER-TO RECORD TO INPUT & FORMATTED OUTPUT LAYOUT     04270099
+044100******************************************************************04280099
+044300 2300-PROCESS-TRANS-TO-RECORD.                                    04290099
+044400*                                                                 04300099
+031000     ADD 1                        TO PA-TRANSFER-TO-COUNT-IN.     04310099
+044600     MOVE HOLD-RECORD             TO D115-TRANSFER-TO-REC.        04320099
+044700* TO EXTRACT CORRECT DEPT-NUMBER FROM TABLE                       04330099
+044800     SET DEPT-NUMBER              TO D115-DEPT-31.                04340099
+044900                                                                  04350099
+045000     MOVE D115-CODE-31            TO D090-CODE-31.                04360099
+045100     MOVE D115-TRANSFER-TO31      TO D090-TRANSFER-TO31.          04370099
+045200     MOVE D115-CLASS-31           TO D090-CLASS-31.               04380099
+045300     MOVE D115-DOC-NO-31          TO D090-DOC-NO-31.              04390099
+045400     MOVE D115-TRANSFER-DATE-31   TO D090-TRANSFER-DATE-31.       04400099
+045500     MOVE D115-TRANSFER-FROM-31   TO D090-TRANSFER-FROM-31.       04410099
+045600     MOVE D115-KOHLS-MM-31        TO D090-KOHLS-MM-31.            04420099
+045700     MOVE D115-UNITS-TRANSFER     TO D090-UNITS-TRANSFER.         04430099
+045800     MOVE D115-RETAIL-PER         TO D090-RETAIL-PER.             04440099
+045900     MOVE D115-TRANS-BATCH-31     TO D090-TRANS-BATCH-31          04450099
+046000                                     D090-SORT-BATCH-NBR-31.      04460099
+046100     MOVE D115-TRANS-SCAN-NO      TO D090-TRANS-SCAN-NO.          04470099
+046200* POPULATE FIELDS FROM TMDSEAR TABLE FETCH                        04480099
+046300     MOVE DT-DEPT-NBR(DEPT-NUMBER)  TO D090-DEPT-31.              04490099
+046400     MOVE DT-GMA-NBR(DEPT-NUMBER)   TO D090-DIV-31.               04500099
+046500     MOVE DT-DMA-NBR(DEPT-NUMBER)   TO D090-MERCH-MGR-31.         04510099
+046600     MOVE DT-BYR-NBR(DEPT-NUMBER)   TO D090-BUYER-31.             04520099
+046700*                                                                 04530099
+046800     MOVE PV-FISCAL-WEEK          TO D090-FISCAL-WEEK-31.         04540099
+046900*                                                                 04550099
+047000     PERFORM 5000-WRITE-OUTPUT-RECORD.                            04560099
+047100*                                                                 04570099
+047200*                                                                 04580099
+047300******************************************************************04590099
+047400*  MOVE MARK DOWN RECORD TO INPUT & FORMATTED OUTPUT LAYOUT       04600099
+047500******************************************************************04610099
+047700 2400-PROCESS-MARKDOWN-RECORD.                                    04620099
+047800*                                                                 04630099
+031300     ADD 1                        TO PA-MARKDOWN-COUNT-IN.        04640099
+048000     MOVE HOLD-RECORD             TO D115-MKDWN-REC.              04650099
+048100* TO EXTRACT CORRECT DEPT-NUMBER FROM TABLE                       04660099
+048200     SET DEPT-NUMBER              TO D115-DEPT-40.                04670099
+048300*                                                                 04680099
+048400     MOVE D115-CODE-40            TO D090-CODE-40.                04690099
+048500     MOVE D115-BATCH-NO-40        TO D090-BATCH-NO-40.            04700099
+048600     MOVE D115-STORE-40           TO D090-STORE-40.               04710099
+048700     MOVE D115-DEPT-40X           TO D090-DEPT-40.                04720099
+048800     MOVE D115-CLASS-40X          TO D090-CLASS-40.               04730099
+048900     MOVE D115-DOC-NO-40          TO D090-DOC-NO-40.              04740099
+049000     MOVE D115-MKDWN-DATE         TO D090-MKDWN-DATE.             04750099
+049100     MOVE D115-KOHLS-MM-40        TO D090-KOHLS-MM-40.            04760099
+049200     MOVE D115-VEND-NO-40         TO D090-VEND-NO-40.             04770099
+049300     MOVE D115-MKDWN-REASON       TO D090-MKDWN-REASON.           04780099
+049400     MOVE D115-MKDWN-OPRICE       TO D090-MKDWN-OPRICE.           04790099
+049500     MOVE D115-MKDWN-NPRICE       TO D090-MKDWN-NPRICE.           04800099
+049600     MOVE D115-MKDWN-QTY          TO D090-MKDWN-QTY.              04810099
+049700     MOVE D115-CATEGORY-40        TO D090-CATEGORY-40.            04820099
+049800     MOVE D115-7-DIGIT-DOCUMENT-NMBR-40                           04830099
+049900                                  TO D090-7-DIGIT-DOCUMENT-NMBR-4004840099
+050000     MOVE D115-MKDWN-MKDN-MKUP-RSN-CDE                            04850099
+050100                                  TO D090-MKDWN-MKDN-MKUP-RSN-CDE.04860099
+050400     MOVE D115-BATCH-NO-40        TO D090-SORT-BATCH-NBR-40.      04870099
+050500* POPULATE FIELDS FROM TMDSEAR TABLE FETCH                        04880099
+050600     MOVE DT-DEPT-NBR(DEPT-NUMBER)  TO D090-DEPT-40.              04890099
+050700     MOVE DT-GMA-NBR(DEPT-NUMBER)   TO D090-DIV-40.               04900099
+050800     MOVE DT-DMA-NBR(DEPT-NUMBER)   TO D090-MERCH-MGR-40.         04910099
+050900     MOVE DT-BYR-NBR(DEPT-NUMBER)   TO D090-BUYER-40.             04920099
+051000*                                                                 04930099
+051100     MOVE PV-FISCAL-WEEK          TO D090-FISCAL-WEEK-40.         04940099
+051200*                                                                 04950099
+051300     PERFORM 5000-WRITE-OUTPUT-RECORD.                            04960099
+051400*                                                                 04970099
+051500*                                                                 04980099
+051600******************************************************************04990099
+051700*  MOVE MARK ON RECORD TO INPUT & FORMATTED OUTPUT LAYOUT         05000099
+051800******************************************************************05010099
+052000 2500-PROCESS-MARKON-RECORD.                                      05020099
+052100*                                                                 05030099
+031600     ADD 1                        TO PA-MARKON-COUNT-IN           05040099
+052300     MOVE HOLD-RECORD             TO D115-MARKON-REC.             05050099
+052400* TO EXTRACT CORRECT DEPT-NUMBER FROM TABLE                       05060099
+052500     SET DEPT-NUMBER              TO D115-DEPT-50.                05070099
+052600                                                                  05080099
+052700     MOVE D115-CODE-50            TO D090-CODE-50.                05090099
+052800     MOVE D115-BATCH-NO-50        TO D090-BATCH-NO-50.            05100099
+052900     MOVE D115-STORE-50           TO D090-STORE-50.               05110099
+053000     MOVE D115-DEPT-50            TO D090-DEPT-50.                05120099
+053100     MOVE D115-CLASS-50           TO D090-CLASS-50.               05130099
+053200     MOVE D115-DOC-NO-50          TO D090-DOCNO-50.               05140099
+053300     MOVE D115-MARKON-DATE        TO D090-MARKON-DATE.            05150099
+053400     MOVE D115-KOHLS-MM-50        TO D090-KOHLS-MO-50.            05160099
+053500     MOVE D115-VEND-NO-50         TO D090-VENDOR-50.              05170099
+053600     MOVE D115-MARKON-REASON      TO D090-MKON-REASON.            05180099
+053700     MOVE D115-MARKON-OPRICE      TO D090-OLD-PRICE.              05190099
+053800     MOVE D115-MARKON-NPRICE      TO D090-NEW-PRICE.              05200099
+053900     MOVE D115-MARKON-QTY         TO D090-MKON-QTY.               05210099
+054000     MOVE D115-CATEGORY-50        TO D090-CATEGORY-50.            05220099
+054100     MOVE D115-7-DIGIT-DOCUMENT-NMBR-50                           05230099
+054200                                  TO D090-7-DIGIT-DOCUMENT-NMBR-5005240099
+054300     MOVE D115-MARKON-MKDN-MKUP-RSN-CDE                           05250099
+054400                                  TO D090-MKON-MKDN-MKUP-RSN-CDE  05260099
+054700     MOVE D115-BATCH-NO-50        TO D090-SORT-BATCH-NBR-50       05270099
+054800* POPULATE FIELDS FROM TMDSEAR TABLE FETCH                        05280099
+054900     MOVE DT-DEPT-NBR(DEPT-NUMBER) TO D090-DEPT-50.               05290099
+055000     MOVE DT-GMA-NBR(DEPT-NUMBER)  TO D090-DIV-50.                05300099
+055100     MOVE DT-DMA-NBR(DEPT-NUMBER)  TO D090-MERCH-MGR-50.          05310099
+055200     MOVE DT-BYR-NBR(DEPT-NUMBER)  TO D090-BUYER-50.              05320099
+055300*                                                                 05330099
+055400     MOVE PV-FISCAL-WEEK          TO D090-FISCAL-WEEK-50.         05340099
+055500*                                                                 05350099
+055600     PERFORM 5000-WRITE-OUTPUT-RECORD.                            05360099
+055700*                                                                 05370099
+055800*                                                                 05380099
+055900******************************************************************05390099
+056000*  MOVE ADJUSTMENT RECORD TO INPUT & FORMATTED OUTPUT LAYOUT      05400099
+056100******************************************************************05410099
+056300 2600-PROCESS-ADJ-RECORD.                                         05420099
+056400*                                                                 05430099
+031900     ADD 1                        TO PA-INVEN-ADJUSTMT-COUNT-IN   05440099
+056600     MOVE HOLD-RECORD             TO D115-ADJ-REC.                05450099
+056700* TO EXTRACT CORRECT DEPT-NUMBER FROM TABLE                       05460099
+056800     SET DEPT-NUMBER              TO D115-DEPT-80.                05470099
+056900                                                                  05480099
+057000     MOVE D115-CODE-80            TO D090-CODE-80.                05490099
+057100     MOVE D115-STORE-80           TO D090-STORE-80.               05500099
+057200     MOVE D115-DEPT-80X           TO D090-DEPT-80.                05510099
+057300     MOVE D115-CLASS-80X          TO D090-CLASS-80.               05520099
+057400     MOVE D115-ADJ-DATE           TO D090-ADJ-DATE.               05530099
+057500     MOVE D115-KOHLS-MM-80        TO D090-KOHLS-MM-80.            05540099
+057600     MOVE D115-AT-RETAIL          TO D090-AT-RETAIL.              05550099
+057700     MOVE D115-AT-COST            TO D090-AT-COST.                05560099
+057800     MOVE D115-SHRINKAGE-CD       TO D090-SHRINKAGE-CD.           05570099
+057900     MOVE D115-ADJ-CD             TO D090-ADJ-CD.                 05580099
+058000     MOVE '000'                   TO D090-SORT-BATCH-NBR-80.      05590099
+058100* POPULATE FIELDS FROM TMDSEAR TABLE FETCH                        05600099
+058200     MOVE DT-DEPT-NBR(DEPT-NUMBER) TO D090-DEPT-80.               05610099
+058300     MOVE DT-GMA-NBR(DEPT-NUMBER)  TO D090-DIV-80.                05620099
+058400     MOVE DT-DMA-NBR(DEPT-NUMBER)  TO D090-MERCH-MGR-80.          05630099
+058500     MOVE DT-BYR-NBR(DEPT-NUMBER)  TO D090-BUYER-80.              05640099
+058600*                                                                 05650099
+058700     MOVE PV-FISCAL-WEEK          TO D090-FISCAL-WEEK-80.         05660099
+058800*                                                                 05670099
+058900     PERFORM 5000-WRITE-OUTPUT-RECORD.                            05680099
+059000*                                                                 05690099
+060700*                                                                 05700099
+060800******************************************************************05710099
+060900* DEPT,GMA,DMA,BUYER ARE LOADED TO TABLE INDEXED BY 'DEPT-NUMBER' 05720099
+061000******************************************************************05730099
+061100 3000-LOAD-DEPT-TABLE.                                            05740099
+061200*                                                                 05750099
+061300     MOVE MDSEAR-DEPT-NBR    TO PV-DEPT-NBR-X.                    05760099
+061400* 'DEPT-NUMBER' INDEX WILL MAINTAIN CONTROL FOR TABLE EXTRACTION  05770099
+061500     SET DEPT-NUMBER         TO PV-DEPT-NBR-9.                    05780099
+061600*                                                                 05790099
+061700     MOVE MDSEAR-DEPT-NBR    TO DT-DEPT-NBR(DEPT-NUMBER).         05800099
+061800     MOVE MDSEAR-GMA-NBR     TO DT-GMA-NBR(DEPT-NUMBER).          05810099
+061900     MOVE MDSEAR-DMA-NBR     TO DT-DMA-NBR(DEPT-NUMBER).          05820099
+062000     MOVE MDSEAR-BYR-NBR     TO DT-BYR-NBR(DEPT-NUMBER).          05830099
+062100*                                                                 05840099
+062200*                                                                 05850099
+062300******************************************************************05860099
+062400* READ CONTROL CARD THEN CALL CALENDAR RTN TO GET FISCAL WEEK ## *05870099
+062500******************************************************************05880099
+062600 4000-PROCESS-CONTROL-CARD.                                       05890099
+062700                                                                  05900099
+062800     READ CONTROL-CARD INTO CC-CONTROL-REC                        05910099
+063000         AT END DISPLAY '*** ABEND *** IN ', PC-PROGRAM-NAME      05920099
+063100                DISPLAY PE-MSG-05                                 05930099
+063200                MOVE +4003 TO PV-ABEND-CODE                       05940099
+063300                CALL 'ILBOABN0' USING PV-ABEND-CODE.              05950099
+063700                                                                  05960099
+063800     DISPLAY 'MLKUT403 LEDGER CONTROL CARD:', CC-CONTROL-REC.     05970099
+083300                                                                  05980099
+082900* PERFORM CALENDAR ROUTINE FUNCTIONS                              05990099
+245000     INITIALIZE DPG51                                             06000099
+245100                DPG52                                             06010099
+245200                DPG53                                             06020099
+245300                DPG54                                             06030099
+245400                DPG55                                             06040099
+245500                DPG56.                                            06050099
+083000     SET  DPG51-FISCAL-454-CALENDAR                               06060099
+083100          DPG51-DO-NOT-INCR-DECR-DATE                             06070099
+083100          DPG52-LK-DTE-ISO-FMT       TO TRUE.                     06080099
+083200     MOVE CC-CONTROL-DATE            TO DPG52-LK-DATE-INPUT.      06090099
+083300                                                                  06100099
+083400     CALL DP500-KOHLS-CALENDAR-ROUTINE                            06110099
+083500         USING DPG51 DPG52 DPG53 DPG54 DPG55 DPG56.               06120099
+083600                                                                  06130099
+083700     EVALUATE TRUE                                                06140099
+083800         WHEN DPG54-SEVERE-ERROR                                  06150099
+083900         WHEN DPG54-DATE-INVALID                                  06160099
+084000             DISPLAY '** ABEND - PROGRAM ', PC-PROGRAM-NAME, '**' 06170099
+084100             DISPLAY '** BAD CALL TO CALENDAR MODULE DPKUT500'    06180099
+084200             DISPLAY DPG54-ERROR-MESSAGE                          06190099
+084300             MOVE +4019 TO PV-ABEND-CODE                          06200099
+084400             CALL 'ILBOABN0' USING PV-ABEND-CODE                  06210099
+084500     END-EVALUATE.                                                06220099
+084600*                                                                 06230099
+084700     DISPLAY 'DPG56-FISCAL WEEK NBR : ', DPG56-FISCAL-WEEK-NBR-X. 06240099
+084800* MOVE FISCAL WEEK FROM CALENDAR ROUTINE TO PROGRAM VARIABLE      06250099
+084900     MOVE DPG56-FISCAL-WEEK-NBR-X   TO PV-FISCAL-WEEK.            06260099
+064300*                                                                 06270099
+064400*                                                                 06280099
+064500***************************************************************   06290099
+064600* READ A RECORD FROM THE WEEKLY EDIT INPUT FILE                   06300099
+064700******************************************************************06310099
+064800 4100-READ-EDIT-FILE.                                             06320099
+064900*                                                                 06330099
+065000     READ WEEKLY-EDIT-DATA INTO HOLD-RECORD                       06340099
+065100           AT END MOVE 'Y' TO PS-MORE-DATA-RECORDS-SW.            06350099
+065200*                                                                 06360099
+065300     IF NOT END-OF-DATA                                           06370099
+065400         ADD 1 TO PA-INPUT-RECORDS-COUNT-IN                       06380099
+065600     END-IF.                                                      06390099
+065700*                                                                 06400099
+065800******************************************************************06410099
+065900* 5000-WRITE-OUTPUT-RECORD  AND ACCUMULATE OUTPUT COUNTS          06420099
+066000******************************************************************06430099
+066100*                                                                 06440099
+066200 5000-WRITE-OUTPUT-RECORD.                                        06450099
+066300                                                                  06460099
+066400     MOVE SPACES                    TO OUTPUT-RECORD.             06470099
+066500*                                                                 06480099
+066600     EVALUATE TRUE                                                06490099
+066700         WHEN PV-PURCHASE                                         06500099
+066800             WRITE OUTPUT-RECORD FROM D090-PURCH-JRNL             06510099
+066900             ADD 1 TO PA-PURCHASE-COUNT-OUT                       06520099
+067000                      PA-OUTPUT-RECORD-COUNT-OUT                  06530099
+067100         WHEN PV-TRANSFER-FROM                                    06540099
+067200             WRITE OUTPUT-RECORD FROM D090-TRANSFER-FROM-REC      06550099
+067300             ADD 1 TO PA-TRANSFER-FROM-COUNT-OUT                  06560099
+067400                      PA-OUTPUT-RECORD-COUNT-OUT                  06570099
+067500         WHEN PV-TRANSFER-TO                                      06580099
+067600             WRITE OUTPUT-RECORD FROM D090-TRANSFER-TO-REC        06590099
+067700             ADD 1 TO PA-TRANSFER-TO-COUNT-OUT                    06600099
+067800                      PA-OUTPUT-RECORD-COUNT-OUT                  06610099
+067900         WHEN PV-MARKDOWN                                         06620099
+068000             WRITE OUTPUT-RECORD FROM D090-MKDWN-REC              06630099
+068100             ADD 1 TO PA-MARKDOWN-COUNT-OUT                       06640099
+068200                      PA-OUTPUT-RECORD-COUNT-OUT                  06650099
+068300         WHEN PV-MARKON                                           06660099
+068400             WRITE OUTPUT-RECORD FROM D090-MARKON                 06670099
+068500             ADD 1 TO PA-MARKON-COUNT-OUT                         06680099
+068600                  PA-OUTPUT-RECORD-COUNT-OUT                      06690099
+068700         WHEN PV-ADJ                                              06700099
+068800             WRITE OUTPUT-RECORD FROM D090-ADJ-REC                06710099
+068900             ADD 1 TO PA-INVEN-ADJUSTMT-COUNT-OUT                 06720099
+069000                      PA-OUTPUT-RECORD-COUNT-OUT                  06730099
+069100         WHEN OTHER                                               06740099
+069200             DISPLAY 'ERROR WRITING OUTPUT', HOLD-RECORD          06750099
+069300     END-EVALUATE.                                                06760099
+069400*                                                                 06770099
+069500******************************************************************06780099
+069600* TO WRITE HEADER RECORD TO OUTPUT FILE                           06790099
+069700******************************************************************06800099
+069800*                                                                 06810099
+069900 5100-WRITE-HEADER-REC.                                           06820099
+070000*                                                                 06830099
+070100     MOVE SPACES                    TO OUTPUT-RECORD.             06840099
+070200     MOVE PC-HEADER-OUTPUT          TO HD-HEADER-REC.             06850099
+070300     MOVE DPG56-FISCAL-PERIOD-NBR                                 06860099
+070400                               TO HD-FISCAL-PERIOD-NBR.           06870099
+070500     MOVE DPG56-NBR-FISCAL-PERIOD-WEEKS                           06880099
+070600                               TO HD-NBR-FISCAL-WEEKS.            06890099
+070700     MOVE DPG56-FISCAL-PERIOD-WEEK                                06900099
+070800                               TO HD-FISCAL-PERIOD-WEEK.          06910099
+070900     MOVE PV-FISCAL-WEEK       TO HD-FISCAL-WEEK.                 06920099
+070900*                                                                 06930099
+071000     WRITE OUTPUT-RECORD          FROM HEADER-RECORD.             06940099
+071100     ADD 1                          TO PA-HEADER-RECORD-COUNT-OUT 06950099
+071200                                       PA-OUTPUT-RECORD-COUNT-OUT.06960099
+071300*                                                                 06970099
+071400***************************************************************   06980099
+071500* MAIN PROCESSING PARAGRAPH FOR DEPT CURSOR CONTROL               06990099
+071600******************************************************************07000099
+071700 7000-PROCESS-DEPT-CURSOR.                                        07010099
+071800*                                                                 07020099
+071900     MOVE +0                    TO PV-RETRY-CNT                   07030099
+072000     PERFORM 7100-OPEN-DEPT-CURSOR.                               07040099
+072100     PERFORM 7200-FETCH-DEPT-CSR                                  07050099
+072200         UNTIL TABLE-LOADED.                                      07060099
+072300     PERFORM 7300-CLOSE-DEPT-CSR.                                 07070099
+072300             DISPLAY '7300-CLOSE-DEPT-CSR'.                       07080099
+072500*                                                                 07090099
+072600*                                                                 07100099
+072700******************************************************************07110099
+072800* OPEN CURSOR TO SELECT DEPT / GMM / DMM / BUYER FROM TMDSEAR     07120099
+072900******************************************************************07130099
+073000 7100-OPEN-DEPT-CURSOR.                                           07140099
+073100*                                                                 07150099
+073200     MOVE ZERO TO PV-RETRY-CNT.                                   07160099
+073300     PERFORM                                                      07170099
+               WITH TEST AFTER                                          07180099
+073500         UNTIL PV-RETRY-CNT > PC-MAX-RETRIES                      07190099
+073600            OR SQLCODE = ZERO                                     07200099
+073700                                                                  07210099
+073800         EXEC SQL                                                 07220099
+073900             OPEN DEPT_CSR                                        07230099
+074000         END-EXEC                                                 07240099
+074100                                                                  07250099
+074200         EVALUATE SQLCODE                                         07260099
+074300             WHEN -913                                            07270099
+074400             WHEN -911                                            07280099
+074500             WHEN -904                                            07290099
+074600             WHEN +0                                              07300099
+074700                 CONTINUE                                         07310099
+074800             WHEN OTHER                                           07320099
+074900                 MOVE '7100-OPEN-DEPT' TO PV-PARAGRAPH-NAME       07330099
+075000                 MOVE PE-MSG-01        TO PV-DB2-OPERATION        07340099
+075100                 PERFORM 9900-SQL-ERROR                           07350099
+075200         END-EVALUATE                                             07360099
+075300         COMPUTE PV-RETRY-CNT = PV-RETRY-CNT + 1                  07370099
+075400     END-PERFORM.                                                 07380099
+075500                                                                  07390099
+075600     IF  PV-RETRY-CNT > PC-MAX-RETRIES                            07400099
+075700         MOVE '7100-OPEN-DEPT' TO PV-PARAGRAPH-NAME               07410099
+075800         MOVE PE-MSG-04        TO PV-OPERATION-ATTEMPTED          07420099
+075900         PERFORM 9900-SQL-ERROR                                   07430099
+076000     END-IF.                                                      07440099
+076100*                                                                 07450099
+072000     DISPLAY '7100-OPEN-DEPT-CURSOR COMPLETE'.                    07460099
+076200*                                                                 07470099
+076300***************************************************************   07480099
+076400* FETCH GMM / DMM / BUYER BASED ON INPUT D115-DEPT-XX FIELD       07490099
+076500***************************************************************   07500099
+076600                                                                  07510099
+076700 7200-FETCH-DEPT-CSR.                                             07520099
+076800*                                                                 07530099
+076900     MOVE ZERO TO PV-RETRY-CNT.                                   07540099
+077000                                                                  07550099
+073300*    PERFORM VARYING                                              07560099
+073400*        PV-RETRY-CNT FROM 1 BY 1                                 07570099
+073500*        UNTIL PV-RETRY-CNT > PC-MAX-RETRIES                      07580099
+073600*           OR SQLCODE = ZERO                                     07590099
+073600*           OR SQLCODE = +100                                     07600099
+077300*           OR TABLE-LOADED                                       07610099
+077100     PERFORM WITH TEST AFTER                                      07620099
+077200       UNTIL PV-RETRY-CNT > PC-MAX-RETRIES                        07630099
+077300          OR TABLE-LOADED                                         07640099
+077400                                                                  07650099
+077500       EXEC SQL                                                   07660099
+077600            FETCH DEPT_CSR                                        07670099
+077700             INTO :MDSEAR-DEPT-NBR                                07680099
+077800                 ,:MDSEAR-GMA-NBR                                 07690099
+077900                 ,:MDSEAR-DMA-NBR                                 07700099
+078000                 ,:MDSEAR-BYR-NBR                                 07710099
+078100       END-EXEC                                                   07720099
+078200                                                                  07730099
+078300       EVALUATE TRUE                                              07740099
+078400           WHEN SQLCODE = +0                                      07750099
+078500               PERFORM 3000-LOAD-DEPT-TABLE                       07760099
+078600           WHEN SQLCODE = -913                                    07770099
+078700           WHEN SQLCODE = -904                                    07780099
+078800               ADD +1                      TO PV-RETRY-CNT        07790099
+078900           WHEN SQLCODE = +100                                    07800099
+079000               SET TABLE-LOADED            TO TRUE                07810099
+079100           WHEN OTHER                                             07820099
+079200               MOVE '7200-FETCH-DEPT-CSR'  TO PV-PARAGRAPH-NAME   07830099
+079300               MOVE PE-MSG-02              TO PV-DB2-OPERATION    07840099
+079400               PERFORM 9900-SQL-ERROR                             07850099
+079500         COMPUTE PV-RETRY-CNT = PV-RETRY-CNT + 1                  07860099
+079600       END-EVALUATE                                               07870099
+079700*                                                                 07880099
+079800       IF  PV-RETRY-CNT > PC-MAX-RETRIES                          07890099
+079900           MOVE '7200-FETCH-DEPT' TO PV-PARAGRAPH-NAME            07900099
+080000           MOVE PE-MSG-04        TO PV-OPERATION-ATTEMPTED        07910099
+080100           PERFORM 9900-SQL-ERROR                                 07920099
+080200       END-IF                                                     07930099
+080300     END-PERFORM.                                                 07940099
+080400*                                                                 07950099
+072200     DISPLAY '7200-FETCH-CURSOR COMPLETE' .                       07960099
+080500*                                                                 07970099
+080600******************************************************************07980099
+080700 7300-CLOSE-DEPT-CSR.                                             07990099
+080800******************************************************************08000099
+080900     EXEC SQL                                                     08010099
+081000        CLOSE DEPT_CSR                                            08020099
+081100     END-EXEC.                                                    08030099
+081200                                                                  08040099
+081300     EVALUATE SQLCODE                                             08050099
+081400         WHEN +0                                                  08060099
+081500             CONTINUE                                             08070099
+081600         WHEN OTHER                                               08080099
+081700             MOVE '7200-CLOSE-DEPT-CSR'    TO PV-PARAGRAPH-NAME   08090099
+081900             MOVE PE-MSG-03                TO PV-DB2-OPERATION    08100099
+082100             PERFORM 9900-SQL-ERROR                               08110099
+082200     END-EVALUATE.                                                08120099
+082300*                                                                 08130099
+072300     DISPLAY '7300-CLOSE-DEPT-CSR'.                               08140099
+085100*                                                                 08150099
+085100*                                                                 08160099
+085200 8000-EOJ-ROUTINE.                                                08170099
+085300*                                                                 08180099
+085600     DISPLAY '******** END OF JOB STATISTICS ***********'         08190099
+085700     DISPLAY 'INPUT RECORD COUNT    ', PA-INPUT-RECORDS-COUNT-IN  08200099
+085800     DISPLAY 'OUTPUT RECORD COUNT   ', PA-OUTPUT-RECORD-COUNT-OUT 08210099
+085900     DISPLAY '** * * * * * * * * * * * * * * * * * * * *'         08220099
+086000     DISPLAY 'HEADER RECORD  INPUT   ', PA-HEADER-RECORD-COUNT-IN 08230099
+086100     DISPLAY '               OUTPUT  ', PA-HEADER-RECORD-COUNT-OUT08240099
+086200     DISPLAY ' * * * * * * * * * * * * * * * * * * * * *'         08250099
+086300     DISPLAY 'PURCHASE REC   INPUT  ', PA-PURCHASE-COUNT-IN       08260099
+086400     DISPLAY '               OUTPUT ', PA-PURCHASE-COUNT-OUT      08270099
+086500     DISPLAY ' * * * * * * * * * * * * * * * * * * * * *'         08280099
+086600     DISPLAY 'TRANSFER FROM  INPUT  ', PA-TRANSFER-FROM-COUNT-IN  08290099
+086700     DISPLAY '               OUTPUT ', PA-TRANSFER-FROM-COUNT-OUT 08300099
+086800     DISPLAY ' * * * * * * * * * * * * * * * * * * * * *'         08310099
+086900     DISPLAY 'TRANSFER TO    INPUT  ', PA-TRANSFER-TO-COUNT-IN    08320099
+087000     DISPLAY '               OUTPUT ', PA-TRANSFER-TO-COUNT-OUT   08330099
+087100     DISPLAY ' * * * * * * * * * * * * * * * * * * * * *'         08340099
+087200     DISPLAY 'MARKDOWN COUNT INPUT  ', PA-MARKDOWN-COUNT-IN       08350099
+087300     DISPLAY '               OUTPUT ', PA-MARKDOWN-COUNT-OUT      08360099
+087400     DISPLAY ' * * * * * * * * * * * * * * * * * * * * *'         08370099
+087500     DISPLAY 'MARKON COUNT   INPUT  ', PA-MARKON-COUNT-IN         08380099
+087600     DISPLAY '               OUTPUT ', PA-MARKON-COUNT-OUT        08390099
+087700     DISPLAY ' * * * * * * * * * * * * * * * * * * * * *'         08400099
+087800     DISPLAY 'ADJUSTMENTS    INPUT  ', PA-INVEN-ADJUSTMT-COUNT-IN 08410099
+087900     DISPLAY '               OUTPUT ', PA-INVEN-ADJUSTMT-COUNT-IN 08420099
+088000     DISPLAY ' * * * * * * * * * * * * * * * * * * * * *'         08430099
+088100     DISPLAY 'ERROR RECORD COUNT     ', PA-ERROR-RECORDS-COUNT-IN 08440099
+088200     DISPLAY ' * * * * * * * * * * * * * * * * * * * * *'         08450099
+088300     DISPLAY '************** E O J *********************'         08460099
+088400*                                                                 08470099
+088500     CLOSE CONTROL-CARD                                           08480099
+088500           WEEKLY-EDIT-DATA                                       08490099
+088600           MTD-PURCH-FILE.                                        08500099
+088700*                                                                 08510099
+088800*                                                                 08520099
+088900******************************************************************08530099
+089000*  THIS ROUTINE FORCES AN ABEND DUE TO A DB2 RELATED PROBLEM.     08540099
+089100******************************************************************08550099
+089200 9900-SQL-ERROR.                                                  08560099
+089300     MOVE +4013                    TO PV-ABEND-CODE.              08570099
+089400     DISPLAY '** ABEND **          = SQL ERROR'.                  08580099
+089500     DISPLAY '** PROGRAM **        = ', PC-PROGRAM-NAME.          08590099
+089600     DISPLAY '** PARAGRAPH **      = ', PV-PARAGRAPH-NAME.        08600099
+089700     DISPLAY '** OPERATION **      = ', PV-DB2-OPERATION.         08610099
+089800*                                                                 08620099
+089900*    THE FOLLOWING COPYBOOK UTILIZES THE DB2 ABEND MODULE         08630099
+090000*    DSNTIAR TO CONVERT SQLCA INTO UNDERSTANDABLE VERBAGE.        08640099
+090100*                                                                 08650099
+090200     COPY DPPD004.                                                08660099
+090300                                                                  08670099
+090400     CALL 'ILBOABN0' USING PV-ABEND-CODE.                         08680099
+090500*                                                                 08690099

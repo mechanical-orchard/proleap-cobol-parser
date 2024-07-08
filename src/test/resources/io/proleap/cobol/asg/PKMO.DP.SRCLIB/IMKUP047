@@ -1,0 +1,1424 @@
+       IDENTIFICATION DIVISION.                                                 
+       PROGRAM-ID.    IMKUP047.                                                 
+       AUTHOR.        D. THEEL.                                                 
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+       DATE-WRITTEN.  05/04/2005.                                               
+       DATE-COMPILED.                                                           
+                                                                                
+      *****************************************************************         
+      *  IMKUP047 - PERM PRICING TPPCPRC UPDATE                                 
+      *****************************************************************         
+      *                                                                         
+      *  THIS PROGRAM WILL UPDATE TPPCPRC WHEN A PRICE CHANGE GOES              
+      *  INTO EFFECT.  THE INPUT FILE IS SORTED IN ITEM/STORE SEQUENCE.         
+      *  CHECKPOINT RESTART LOGIC IS USED IN THIS PROGRAM.                      
+      *                                                                         
+      *  TABLES ACCESSED ARE:                                                   
+      *      TSK     - SKU TABLE                                                
+      *      TPPCPRC - PRICE HISTORY                                            
+      *      TCKRSTCNTL - DB2 CHECKPOINT RESTART CONTROL                        
+      *      TCKRSTINF  - DB2 CHECKPOINT RESTART INFORMATION                    
+      *  TABLES UPDATED ARE:                                                    
+      *      TPPCPRC - PRICE HISTORY                                            
+      *      TCKRSTCNTL - DB2 CHECKPOINT RESTART CONTROL                        
+      *      TCKRSTINF  - DB2 CHECKPOINT RESTART INFORMATION                    
+      *  FILES READ ARE:                                                        
+      *      IMRD048 PRICE UPDATE FILE FROM IMKUT061, SORTED BY ITEM,           
+      *      STORE NUMBER SEQUENCE.  THE FILE IS READ VIA THE DB2               
+      *      CHECKPOINTING SYSTEM.                                              
+      *****************************************************************         
+      * 05/04/05 - D. THEEL         -  WR NO. 28048                             
+      *    - NEW PROGRAM.                                                       
+      *****************************************************************         
+      * 06/28/05 - D. THEEL         -  WR NO. 28048                             
+      *    -  ADD CONTROL CARD FILE WITH PROCESS OLD DATE INDICATOR.            
+      *       THIS WILL BE DEFAULTED TO N. IF IT IS A Y, WE WILL PROCESS        
+      *       A PRICE CHANGE THAT IS IN THE PAST.  REMOVED ALL LOGIC            
+      *       CHECKING IF WE ARE RUNNING BEFORE OR AFTER MIDNIGHT.              
+      *       THE START TIMESTAMP ON TPPCPRC WILL BE THE                        
+      *       PRICE CHANGE EFFECTIVE DATE WITH A TIME OF MIDNIGHT.              
+      *       WHEN INACTIVATING THE CURRENT ROW, THE END                        
+      *       TIMESTAMP WILL BE DERIVED BY SUBTRACTING ONE MICROSECOND          
+      *       FROM THE START TIMESTAMP.  ADDED DISPLAY OF CURRENT               
+      *       TIMESTAMP.  ADDED LOGIC TO DELETE FUTURE TPPCPRC                  
+      *       ROWS WHEN PROCESSING A CLEARANCE TO ACTIVE PRICE CHANGE.          
+      *       CHANGED LOGIC ON TSKULOG TO INSERT                                
+      *       CURRENT TIMESTAMP INSTEAD OF CALLING TO GET CURRENT               
+      *       TIMESTAMP. COMMENTED OUT UNNEEDED CALLS TO GET                    
+      *       CURRENT TIMESTAMP.                                                
+      *****************************************************************         
+      * 12/21/05 - PAUL KEBER       -  IR NO. P000833647                        
+      *    - DROP MK2 OR FNL PRICE CHANGES IF THE SKU IS NOT STATUS 25          
+      *      OR 30.  DISPLAY ERRORS AND END WITH RETURN CODE 4095.              
+      *****************************************************************         
+      * 02/13/06 - PAUL KEBER       -  IR NO. P000850113                        
+      *    -  DROP MK2 OR FNL PRICE CHANGES IF THE SKU IS STATUS 25             
+      *       AND THERE IS NO STORE SPECIFIC ROW ON TPPCPRC.                    
+      *****************************************************************         
+      * 02/15/06 - PAUL KEBER       -  IR NO. P000850306                        
+      *    -  DROP MK2 OR FNL PRICE CHANGES IF A CLEARANCE TO ACTIVE            
+      *       PRICE CHANGE WAS MADE TO THE SKU ON THE SAME DAY.                 
+      *****************************************************************         
+      * 03/27/06 - PAUL KEBER       -  IR NO. P000863508                        
+      *    -  CHANGE TO AVOID SETTING A STATUS 30 SKU TO STATUS 25 ON           
+      *       AN RCP PRICE CHANGE.                                              
+      *****************************************************************         
+      * 07/03/06 - PAUL KEBER       -  WR NO. 29434                             
+      *    -  CHANGE TO ONLY UPDATE TPPCPRC FOR PERFORMANCE                     
+      *       ENHANCEMENTS.  NEW PROGRAM IMKUP057 WILL NOW UPDATE TSK           
+      *       AND TSKULOG.                                                      
+      *****************************************************************         
+      * 07/19/06 - PAUL KEBER       -  WR NO. 29434                             
+      *    - DROP MK2 OR FNL PRICE CHANGES IF THE SKU IS STATUS 30 AND          
+      *      THERE IS NO STORE SPECIFIC ROW ON TPPCPRC.                         
+      *****************************************************************         
+      * 10/31/06 - PAUL KEBER       -  IR NO. P000946072                        
+      *    -  FIX TO ALLOW PROCESSING MK2 AND FNL PRICE CHANGES THAT            
+      *       DO NOT HAVE AN ACTIVE STORE SPECIFIC ROW.                         
+      *****************************************************************         
+      * 12/26/06 - PAUL KEBER       -  WR NO. 29434                             
+      *    - DON'T BYPASS PRICE CHANGE IF NO TUPCPLS STORE ROW IS FOUND         
+      *      FOR MK2 OR FNL PRICE CHANGES.  COMPRESS TUPCPLS ROWS FOR           
+      *      RCP (STATUS 25 TO 30), MK2, OR FNL PRICE CHANGES IF ALL            
+      *      STORES HAVE THE SAME PRICE.                                        
+      *****************************************************************         
+      * 06/09/08 - PAUL KEBER       -  IR NO. INC000000384169                   
+      *    - CHANGE TO DROP A 2ND PRICE CHANGE FOR THE SAME STORE               
+      *      SPECIFIC ROW ON AN RCP PRICE CHANGE.                               
+      *****************************************************************         
+PK0708* 07/15/08 - PAUL KEBER       -  IR NO. INC000000441273                   
+PK0708*    - CHANGE TO DROP DUPLICATE PERM PRICE CHANGES FOR ALL PRICE          
+PK0708*      CHANGE TYPES.                                                      
+      *****************************************************************         
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+       CONFIGURATION SECTION.                                                   
+       SOURCE-COMPUTER. IBM-3090.                                               
+       OBJECT-COMPUTER. IBM-3090.                                               
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+       FILE-CONTROL.                                                            
+           SELECT PRICE-UPDATE-FILE            ASSIGN TO INP01.                 
+           SELECT CONTROL-CARD-FILE            ASSIGN TO INP02.         00400094
+                                                                                
+      *****************************************************************         
+       DATA DIVISION.                                                           
+      *****************************************************************         
+       FILE SECTION.                                                            
+                                                                                
+       FD  PRICE-UPDATE-FILE                                                    
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS                                             
+           RECORD CONTAINS 56 CHARACTERS                                        
+           DATA RECORD IS PRICE-UPDATE-RECORD.                                  
+       01  PRICE-UPDATE-RECORD         PIC  X(56).                              
+      *                                                                         
+       FD  CONTROL-CARD-FILE                                            00590094
+           RECORDING MODE IS F                                          00600094
+           BLOCK CONTAINS 0 RECORDS.                                    00610094
+       01  CD-CONTROL-RECORD           PIC X(80).                       00620094
+                                                                                
+      *                                                                         
+       WORKING-STORAGE SECTION.                                                 
+      ******************************************************************        
+      * PC PROGRAM CONSTANTS                                           *        
+      ******************************************************************        
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-PROGRAM-NAME                PIC  X(08)   VALUE                
+                                                           'IMKUP047'.          
+           05  PC-ZERO-STORE                  PIC S9(04)   VALUE +0             
+                                                           COMP.                
+           05  PC-MAXIMUM-RETRY-COUNT         PIC S9(04)   VALUE +2             
+                                                           COMP SYNC.           
+           05  PC-MAX-STORES                  PIC  9(02)   VALUE 40.            
+           05  PC-CLEARANCE-NUM               PIC S9(3)V   COMP-3               
+                                                           VALUE 30.            
+           05  PC-MIXED-NUM                   PIC S9(3)V   COMP-3               
+                                                           VALUE 25.            
+           05  PC-CLEARANCE                   PIC  X(02)   VALUE '30'.          
+           05  PC-MIXED                       PIC  X(02)   VALUE '25'.          
+           05  PC-DEFAULT-TIMESTAMP           PIC  X(26)   VALUE                
+               '9999-09-09-23.59.00.000000'.                                    
+           05  PC-TIMESTAMP-INACTIVE-TIME     PIC  X(16)   VALUE                
+               '-23.59.59.999999'.                                              
+           05  PC-TIMESTAMP-ACTIVE-TIME       PIC  X(16)   VALUE                
+               '-00.00.00.000000'.                                              
+                                                                                
+      ******************************************************************        
+      * PV PROGRAM VARIABLES                                           *        
+      ******************************************************************        
+       01  PV-WORK-VARIABLES.                                                   
+           05  PV-RETRY-COUNT                 PIC S9(04)   VALUE +0             
+                                                           COMP.                
+           05  PV-PREV-STR-NBR                PIC S9(04)   VALUE +0             
+                                                           COMP.                
+           05  PV-PARAGRAPH-NAME              PIC  X(30)   VALUE SPACES.        
+           05  PV-DB2-OPERATION-ATTEMPTED     PIC  X(30)   VALUE SPACES.        
+           05  PV-NEW-SKU-STATUS              PIC  X(02)   VALUE SPACES.        
+               88  PV-NEW-SKU-STATUS-ACTIVE                VALUE '20'.          
+               88  PV-NEW-SKU-STATUS-CLEARANCE             VALUE '30'.          
+               88  PV-NEW-SKU-STATUS-MIXED                 VALUE '25'.          
+           05  PV-TSK-STATUS-CODE             PIC  9(02)   VALUE ZERO.          
+           05  PV-COMMIT-TIMESTAMP            PIC  X(26)   VALUE SPACES.        
+           05  PV-CURRENT-TIMESTAMP           PIC  X(26)   VALUE SPACES.        
+           05  PV-RUN-DATE                    PIC  X(10)   VALUE SPACES.        
+           05  PV-SAVE-SKU                    PIC S9(08)   VALUE +0             
+                                                           COMP-3.              
+           05  PV-PREV-SKU                    PIC S9(08)   VALUE +0             
+                                                           COMP-3.              
+           05  PV-PREV-PRCHG-TYP-CDE          PIC  X(03)   VALUE SPACES.        
+           05  PV-PREV-UNT-RTL-AMT            PIC S9(7)V99 VALUE +0             
+                                                           COMP-3.              
+           05  PV-PPCPRC-STRT-TMST            PIC  X(26)   VALUE SPACES.        
+           05  PV-PPCPRC-END-TMST             PIC  X(26)   VALUE SPACES.        
+           05  PV-RECS-READ-CNTR              PIC  9(09)   VALUE ZEROES.00830000
+           05  PV-SQLCODE-DISPLAY             PIC +(8)9    VALUE ZEROES.00830000
+           05  PV-DETAIL-KEY.                                                   
+               10  PV-DK-SKU                  PIC  X(08)   VALUE SPACES.        
+               10  PV-DK-STORE-NBR            PIC  9(04)   VALUE ZERO.          
+           05  PV-DELAY-INTERVAL.                                               
+               10  FILLER                   PIC X(02)   VALUE SPACES.           
+               10  PV-DELAY-TIME            PIC 9(08)   VALUE 6000.             
+           05  WS-SYSWAIT                   PIC X(08) VALUE 'SYSWAIT'.          
+                                                                                
+      ******************************************************************        
+      * CR CHECKPOINT RESTART VARIABLES                                *        
+      ******************************************************************        
+       01  CR-CHECKPOINT-RESTART-AREA.                                          
+           05  CR-AREA-LEN                    PIC S9(04) VALUE +87              
+                                                         COMP.                  
+           05  CR-CHECKPOINT-RESTART-VAR.                                       
+               10  CR-DETAIL-KEY              PIC  X(12) VALUE SPACES.          
+               10  CR-RECS-PROCESSED-CNTR     PIC  9(09) VALUE ZERO.            
+               10  CR-RECS-READ-CNTR          PIC  9(09) VALUE ZERO.            
+               10  CR-TSK-ROW-READ-CNTR       PIC  9(08) VALUE ZERO.            
+               10  CR-TPPCPRC-ROW-UPD-CNTR    PIC  9(08) VALUE ZERO.            
+               10  CR-TPPCPRC-ROW-INS-CNTR    PIC  9(08) VALUE ZERO.            
+               10  CR-TPPCPRC-ROW-INACTV-CNTR PIC  9(08) VALUE ZERO.            
+               10  CR-TPPCPRC-ROW-DEL-CNTR    PIC  9(08) VALUE ZERO.            
+               10  CR-COMMIT-CNTR             PIC  9(09) VALUE ZERO.            
+               10  CR-SKU-STRS-BYPASSED-CNTR  PIC  9(08) VALUE ZERO.            
+                                                                                
+      ******************************************************************        
+      * PS PROGRAM SWITCHES                                            *        
+      ******************************************************************        
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-RETAIL-CHANGED-SW           PIC  X(01)   VALUE 'N'.           
+               88  PS-RETAIL-CHANGED-YES                   VALUE 'Y'.           
+               88  PS-RETAIL-CHANGED-NO                    VALUE 'N'.           
+           05  PS-STATUS-CHANGED-SW           PIC  X(01)   VALUE 'N'.           
+               88  PS-STATUS-CHANGED                       VALUE 'Y'.           
+               88  PS-STATUS-CHANGED-NO                    VALUE 'N'.           
+           05  PS-END-OF-FILE-SW              PIC  X(01)   VALUE 'N'.           
+               88  PS-END-OF-FILE                          VALUE 'Y'.           
+           05  PS-FIRST-COMMIT-SW             PIC  X(01)   VALUE 'N'.           
+               88  PS-FIRST-COMMIT                         VALUE 'Y'.           
+           05  PS-FIRST-SKU-STORE-SW          PIC  X(01)   VALUE 'N'.           
+               88  PS-FIRST-SKU-STORE                      VALUE 'Y'.           
+               88  PS-NOT-FIRST-SKU-STORE                  VALUE 'N'.           
+           05  PS-NO-DOCUMENTS-SW             PIC  X(01)   VALUE 'N'.           
+               88  PS-NO-DOCUMENTS                         VALUE 'Y'.           
+           05  PS-CURRENT-ROW-FOUND-SW        PIC  X(01)   VALUE 'N'.           
+               88  PS-CURRENT-ROW-FOUND                    VALUE 'Y'.           
+               88  PS-CURRENT-ROW-NOT-FOUND                VALUE 'N'.           
+           05  PS-NEW-CLR-RCP-SW              PIC  X(01)   VALUE 'N'.           
+               88  PS-NEW-CLR-RCP                          VALUE 'Y'.           
+               88  PS-NOT-NEW-CLR-RCP                      VALUE 'N'.           
+           05  PS-CHECKPOINT-RESTART-SW       PIC  X(01)   VALUE 'N'.           
+               88  PS-CHECKPOINT-RESTART                   VALUE 'Y'.           
+               88  PS-NOT-CHECKPOINT-RESTART               VALUE 'N'.           
+           05  PS-STRS-ALL-SAME-PRICE-SW      PIC  X(01)   VALUE 'N'.           
+               88  PS-STRS-ALL-SAME-PRICE                  VALUE 'Y'.           
+               88  PS-NOT-STRS-ALL-SAME-PRICE              VALUE 'N'.           
+                                                                                
+       01  ABEND-CODE                         PIC S9(04)   VALUE +0             
+                                                           COMP SYNC.           
+           88  PV-ABEND-4001                   VALUE +4001.                     
+      *        EMPTY CONTROL CARD                                               
+           88  PV-ABEND-4002                   VALUE +4002.                     
+      *        INCORRECT CONTROL CARD DATA                                      
+           88  PV-ABEND-4003                   VALUE +4003.                     
+      *        EFFECTIVE DATE LESS THAN CURRENT DATE                            
+           88  PV-ABEND-4004                   VALUE +4004.                     
+      *        INVALID CONTROL CARD JOB NAME                                    
+           88  PV-ABEND-4005                   VALUE +4005.                     
+      *        CLR TO ACTIVE REASON AND NON-ZERO STORE                          
+           88  PV-ABEND-4006                   VALUE +4006.                     
+      *        CLEARANCE REASON AND NON-ZERO STORE                              
+           88  PV-ABEND-4007                   VALUE +4007.                     
+      *        ALL REMAINING CLEARANCE AND NO ZERO STORE                        
+           88  PV-ABEND-4008                   VALUE +4008.                     
+      *        NOT ALL REMAINING CLEARANCE AND ZERO STORE                       
+           88  PV-ABEND-4013                   VALUE +4013.                     
+      *        DB2 ABEND                                                        
+                                                                                
+       01  DISPLAY-EDITS.                                                       
+           05  DI-RECS-PROCESSED-CNTR       PIC  Z(08)9  VALUE ZEROS.           
+           05  DI-RECS-READ-CNTR            PIC  Z(08)9  VALUE ZEROS.           
+           05  DI-SKU-STRS-BYPASSED-CNTR    PIC  Z(07)9  VALUE ZEROS.           
+           05  DI-TSK-ROW-READ-CNTR         PIC  Z(07)9  VALUE ZEROS.           
+           05  DI-TPPCPRC-ROW-UPDATE-CNTR   PIC  Z(07)9  VALUE ZEROS.           
+           05  DI-TPPCPRC-ROW-INSERT-CNTR   PIC  Z(07)9  VALUE ZEROS.           
+           05  DI-TPPCPRC-ROW-INACTV-CNTR   PIC  Z(07)9  VALUE ZEROS.           
+           05  DI-TPPCPRC-ROW-DEL-CNTR      PIC  Z(07)9  VALUE ZEROS.           
+           05  DI-COMMIT-CNTR               PIC  Z(08)9  VALUE ZEROS.           
+           05  DI-INPUT-RECS-DISPLAY        PIC  9(06)   VALUE ZEROS.           
+                                                                                
+      *****************************************************************         
+      *    PERM PRICE UPDATE FILE LAYOUT.                                       
+      *****************************************************************         
+           COPY IMRD048.                                                        
+                                                                                
+      ****************************************************************  00830094
+      * RECORD LAYOUT FOR CONTROL CARD FILE.                            00840094
+      * CC PROCESS OLD DATE WILL DEFAULT TO N.  IT WILL BE Y ONLY IF    00840094
+      * WE NEED TO PROCESS A PRICE CHANGE THAT IS IN THE PAST.          00840094
+      ****************************************************************  00850094
+       01  CC-CONTROL-CARD.                                                     
+           05  FILLER                       PIC X(09)    VALUE                  
+               'JOB NAME:'.                                                     
+           05  CC-JOB-NAME                  PIC X(08)    VALUE SPACES.          
+           05  FILLER                       PIC X(18)    VALUE                  
+               ' PROCESS OLD DATE:'.                                            
+           05  CC-PROCESS-OLD-DATE          PIC X(01)    VALUE SPACE.           
+           05  FILLER                       PIC X(44)    VALUE SPACES.          
+                                                                                
+      *****************************************************************         
+      *    DB2 COMMUNICATION AREA                                               
+      *****************************************************************         
+           COPY DPWS004.                                                        
+                                                                                
+      *****************************************************************         
+      *  TSK - SKU TABLE                                                        
+      *****************************************************************         
+           EXEC SQL                                                             
+               INCLUDE TSK                                                      
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *  TPPCPRC - PRICE HISTORY TABLE                                          
+      *****************************************************************         
+           EXEC SQL                                                             
+               INCLUDE TPPCPRC                                                  
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *    COBOL DECLARATIONS FOR THE CHECKPOINT RESTART CONTROL TABLE          
+      *****************************************************************         
+           EXEC SQL                                                             
+               INCLUDE TCKRSTCN                                                 
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *    COBOL DECL FOR THE CHECKPOINT RESTART INFO TABLE                     
+      *****************************************************************         
+           EXEC SQL                                                             
+               INCLUDE TCKRSTIN                                                 
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+           COPY SQLCA2.                                                         
+                                                                                
+       PROCEDURE DIVISION.                                                      
+      ******************************************************************        
+      * 0000-MAIN-MODULE.                                              *        
+      *  ==> PROCESSES:                                                *        
+      *    - CONTROLS HIGHEST LEVEL FLOW OF PROGRAM                    *        
+      ******************************************************************        
+       0000-MAIN-MODULE.                                                        
+           MOVE '0000-MAIN-MODULE' TO PV-PARAGRAPH-NAME.                        
+                                                                                
+           PERFORM 1000-INITIALIZATION.                                         
+                                                                                
+           PERFORM 2000-PROCESS-PRICE-UPDATES                                   
+             UNTIL PS-END-OF-FILE.                                              
+                                                                                
+           PERFORM 3000-EOJ-PROCESSING.                                         
+                                                                                
+           IF CR-SKU-STRS-BYPASSED-CNTR > ZERO                                  
+               MOVE 4095 TO RETURN-CODE                                         
+           END-IF.                                                              
+                                                                                
+           STOP RUN.                                                            
+                                                                                
+      ******************************************************************        
+      * 1000-INITIALIZATION.                                           *        
+      *  ==> PROCESSES:                                                *        
+      *      - CHECKS FOR RESTART PROCESSING.                          *        
+      *      - INITIALIZES VARIABLES.                                  *        
+      ******************************************************************        
+       1000-INITIALIZATION.                                                     
+           MOVE '1000-INITIALIZATION ' TO PV-PARAGRAPH-NAME.                    
+                                                                                
+           OPEN INPUT PRICE-UPDATE-FILE                                         
+                      CONTROL-CARD-FILE.                                        
+                                                                                
+           PERFORM 7300-READ-CONTROL-CARD.                              03240094
+                                                                                
+           PERFORM 7400-INIT-CHECKPOINT-SELECT.                                 
+                                                                                
+      ******************************************************************        
+      *    IF PROGRAM IS IN A RESTART STATUS.  SELECT SAVED DATA FROM  *        
+      *    THE RESTART INFO TABLE.                                     *        
+      ******************************************************************        
+           IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                                   
+               PERFORM 7500-SELECT-RESTART-INFO                                 
+               MOVE TCKRSTINF-WORK-STRG-DESC-TEXT                               
+                                   TO CR-CHECKPOINT-RESTART-VAR                 
+               MOVE CR-DETAIL-KEY  TO PV-DETAIL-KEY                             
+               SET PS-CHECKPOINT-RESTART TO TRUE                                
+           ELSE                                                                 
+               SET PS-FIRST-COMMIT TO TRUE                                      
+               INITIALIZE CR-CHECKPOINT-RESTART-VAR                             
+           END-IF.                                                              
+                                                                                
+           PERFORM 4000-READ-RECORD                                             
+               UNTIL PV-RECS-READ-CNTR > CR-RECS-PROCESSED-CNTR                 
+                  OR PS-END-OF-FILE.                                            
+                                                                                
+           IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                                   
+               DISPLAY '** RESTART RUN **'                              06720800
+               DISPLAY 'INPUT RECORD RESTARTED ON RECORD: '             02067000
+                        PV-RECS-READ-CNTR                               02068000
+               DISPLAY 'SKU NUMBER:   ' IM048-UIR-SKU                   06720900
+               DISPLAY 'STORE NUMBER: ' IM048-UIR-STR-NBR               06720800
+           END-IF.                                                              
+                                                                                
+           IF PS-END-OF-FILE                                                    
+PK0708       AND TCKRSTCNTL-CKPT-STAT-CODE = '0'                                
+               SET PS-NO-DOCUMENTS TO TRUE                                      
+               DISPLAY ' '                                                      
+               DISPLAY '***********************************'                    
+               DISPLAY ' NO PRICE CHANGES EFFECTIVE TODAY.'                     
+               DISPLAY '***********************************'                    
+               DISPLAY ' '                                                      
+           ELSE                                                                 
+               PERFORM 7100-GET-COMMIT-TIMESTAMP                                
+               PERFORM 7200-SET-CURRENT-TIMESTAMP                               
+               IF IM048-UIR-EFF-DTE < PV-RUN-DATE                               
+                   IF CC-PROCESS-OLD-DATE = 'N'                                 
+                       DISPLAY '*** EFF DATE LESS THAN CURRENT DATE ***'        
+                       DISPLAY '*** INPUT FILE EFFECTIVE DATE: '                
+                               IM048-UIR-EFF-DTE                                
+                               ' RUN DATE: ' PV-RUN-DATE                        
+                       SET PV-ABEND-4003 TO TRUE                                
+                       PERFORM 9999-ABEND                                       
+                   ELSE                                                         
+                       DISPLAY '*** PROCESSING EFFECTIVE DATE LESS THAN'        
+                               ' CURRENT DATE ***'                              
+                       DISPLAY '*** INPUT FILE EFFECTIVE DATE: '                
+                               IM048-UIR-EFF-DTE                                
+                               ' RUN DATE: ' PV-RUN-DATE                        
+                   END-IF                                                       
+               END-IF                                                           
+      *******  SET PV-PPCPRC-STRT-TMST = IM048-UIR-EFF-DTE MIDNIGHT             
+               MOVE IM048-UIR-EFF-DTE TO                                        
+                                   PV-PPCPRC-STRT-TMST (1:10)                   
+               MOVE PC-TIMESTAMP-ACTIVE-TIME TO                                 
+                     PV-PPCPRC-STRT-TMST (11:16)                                
+               PERFORM 7600-CALC-END-TMST                                       
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 2000-PROCESS-PRICE-UPDATES.                                    *        
+      *  ==> PROCESSES:                                                *        
+      *    - PROCESSES A PRICE UPDATE RECORD AND READS NEXT PRICE      *        
+      *    - UPDATE RECORD                                             *        
+      ******************************************************************        
+       2000-PROCESS-PRICE-UPDATES.                                              
+           MOVE '2000-PROCESS-PRICE-UPDATES' TO PV-PARAGRAPH-NAME.              
+                                                                                
+      *    PERFORM 7200-SET-CURRENT-TIMESTAMP.                                  
+                                                                                
+           IF IM048-UIR-SKU = PV-SAVE-SKU                                       
+               SET PS-NOT-FIRST-SKU-STORE TO TRUE                               
+           ELSE                                                                 
+               PERFORM 7000-COMMIT-PROCESSING                                   
+      *        LOGIC TO BEGIN PROCESSING A NEW SKU                              
+               MOVE IM048-UIR-SKU      TO PV-SAVE-SKU                           
+               MOVE IM048-UIR-ITM-NBR  TO TSK-ITEM-NMBR                         
+                                          PPCPRC-TSK-ITM-NBR                    
+               MOVE IM048-UIR-STAT-CDE TO PV-TSK-STATUS-CODE                    
+               MOVE PV-TSK-STATUS-CODE TO TSK-STATUS-CODE                       
+               MOVE SPACES             TO PV-NEW-SKU-STATUS                     
+               SET PS-FIRST-SKU-STORE  TO TRUE                                  
+               SET PS-NOT-NEW-CLR-RCP  TO TRUE                                  
+               SET PS-NOT-STRS-ALL-SAME-PRICE TO TRUE                           
+               IF IM048-PRCHGTYP-CLR-TO-ACTIVE                                  
+                 OR IM048-PRCHGTYP-CLEARNCE                                     
+                 OR IM048-PRCHGTYP-REG-CLEARNCE                                 
+      *          DETERMINE IF THE SKU STATUS IS CHANGING                        
+                   PERFORM 2050-DETERMINE-NEW-SKU-STATUS                        
+               ELSE                                                             
+                   IF (IM048-PRCHGTYP-2ND-CLR-MRKDWN                            
+                       OR IM048-PRCHGTYP-FINL-CLR-MRKDWN)                       
+                     AND IM048-UIR-STR-NBR = 0                                  
+                     AND IM048-UIR-ALL-SAME-PRICE                               
+                       SET PS-STRS-ALL-SAME-PRICE TO TRUE                       
+                   END-IF                                                       
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+           SET PS-RETAIL-CHANGED-NO                                             
+               PS-STATUS-CHANGED-NO TO TRUE.                                    
+                                                                                
+      *   PERFORM STORE ZERO UPDATES                                            
+           IF IM048-UIR-STR-NBR = 0                                             
+             OR (PV-NEW-SKU-STATUS-MIXED                                        
+                 AND PS-FIRST-SKU-STORE)                                        
+PK0708         IF IM048-UIR-SKU = PV-PREV-SKU                                   
+PK0708           AND IM048-UIR-STR-NBR = PV-PREV-STR-NBR                        
+PK0708*            BYPASS A MARKDOWN IF THE SKU STORE IS A DUPLICATE            
+PK0708              DISPLAY '*** BYPASSING 2ND PRICE CHANGE FOR A SKU/'         
+PK0708                      'STORE'                                             
+PK0708              DISPLAY 'SKU NBR: ' IM048-UIR-SKU                   0672    
+PK0708                      ' STORE: ' IM048-UIR-STR-NBR                0672    
+PK0708                      ' 1ST PRCHG TYPE: ' PV-PREV-PRCHG-TYP-CDE   0672    
+PK0708                      ' 1ST PRICE: ' PV-PREV-UNT-RTL-AMT          0672    
+PK0708                      ' DROPPED PRCHG TYPE: '                     0672    
+PK0708                               IM048-UIR-PRCHG-TYP-CDE                    
+PK0708                      ' DROPPED PRICE: '                          0672    
+PK0708                               IM048-UIR-NEW-UNT-RTL-AMT                  
+PK0708              ADD +1 TO CR-SKU-STRS-BYPASSED-CNTR                         
+PK0708          ELSE                                                            
+                    PERFORM 2100-SKU-PROCESSING                                 
+PK0708          END-IF                                                          
+           END-IF.                                                              
+                                                                                
+      *   PERFORM RCP STORE SPECIFIC UPDATES                                    
+           IF IM048-UIR-STR-NBR > 0                                             
+             AND NOT PS-STRS-ALL-SAME-PRICE                                     
+               IF IM048-UIR-SKU = PV-PREV-SKU                                   
+                 AND IM048-UIR-STR-NBR = PV-PREV-STR-NBR                        
+      *            BYPASS AN RCP, MK2 OR FNL MARKDOWN IF THE SKU                
+      *            STORE IS A DUPLICATE (2 PRICE CHANGE ID'S)                   
+                   DISPLAY '*** BYPASSING RCP, MK2, OR FNL - 2ND PRICE'         
+                           ' CHANGE'                                            
+                   DISPLAY 'SKU NBR: ' IM048-UIR-SKU                            
+                           ' STORE: ' IM048-UIR-STR-NBR                         
+                           ' 1ST PRCHG TYPE: ' PV-PREV-PRCHG-TYP-CDE            
+                           ' 1ST PRICE: ' PV-PREV-UNT-RTL-AMT                   
+                           ' DROPPED PRCHG TYPE: '                              
+                                    IM048-UIR-PRCHG-TYP-CDE                     
+                           ' DROPPED PRICE: ' IM048-UIR-NEW-UNT-RTL-AMT         
+                   ADD +1 TO CR-SKU-STRS-BYPASSED-CNTR                          
+               ELSE                                                             
+                   PERFORM 2200-SKU-STORE-PROCESSING                            
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+           ADD +1 TO CR-RECS-PROCESSED-CNTR.                                    
+           SET PS-NOT-CHECKPOINT-RESTART TO TRUE.                               
+           MOVE IM048-UIR-SKU TO PV-PREV-SKU.                                   
+           MOVE IM048-UIR-STR-NBR TO PV-PREV-STR-NBR.                           
+           MOVE IM048-UIR-PRCHG-TYP-CDE TO PV-PREV-PRCHG-TYP-CDE.               
+           MOVE IM048-UIR-NEW-UNT-RTL-AMT TO PV-PREV-UNT-RTL-AMT.               
+                                                                                
+           PERFORM 4000-READ-RECORD.                                            
+                                                                                
+      ******************************************************************        
+      * 2050-DETERMINE-NEW-SKU-STATUS.                                 *        
+      *  ==> PROCESSES:                                                *        
+      *    - DETERMINES IF THE SKU STATUS IS CHANGING                  *        
+      ******************************************************************        
+       2050-DETERMINE-NEW-SKU-STATUS.                                           
+           MOVE '2050-DETERMINE-NEW-SKU-STATUS' TO PV-PARAGRAPH-NAME.           
+                                                                                
+           IF IM048-PRCHGTYP-CLR-TO-ACTIVE                                      
+               IF IM048-UIR-STR-NBR = 0                                         
+                   SET PV-NEW-SKU-STATUS-ACTIVE TO TRUE                         
+               ELSE                                                             
+                   DISPLAY '** ABEND **'                                        
+                   DISPLAY 'IMKUP047 - ABEND'                                   
+                   DISPLAY 'CLR TO ACTIVE REASON AND NON-ZERO STORE'            
+                   DISPLAY 'PARAGRAPH = ' PV-PARAGRAPH-NAME                     
+                   DISPLAY 'INPUT SKU = ' IM048-UIR-SKU                         
+                   DISPLAY 'STORE NBR = ' IM048-UIR-STR-NBR                     
+                   DISPLAY 'EFFECTIVE DATE = ' IM048-UIR-EFF-DTE                
+                   PERFORM 9990-DISPLAY-CONTROL-INFO                            
+                   SET PV-ABEND-4005 TO TRUE                                    
+                   PERFORM 9999-ABEND                                           
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+           IF IM048-PRCHGTYP-CLEARNCE                                           
+               IF IM048-UIR-STR-NBR = 0                                         
+                   SET PV-NEW-SKU-STATUS-CLEARANCE TO TRUE                      
+               ELSE                                                             
+                   DISPLAY '** ABEND **'                                        
+                   DISPLAY 'IMKUP047 - ABEND'                                   
+                   DISPLAY 'CLEARANCE REASON AND NON-ZERO STORE'                
+                   DISPLAY 'PARAGRAPH = ' PV-PARAGRAPH-NAME                     
+                   DISPLAY 'INPUT SKU = ' IM048-UIR-SKU                         
+                   DISPLAY 'STORE NBR = ' IM048-UIR-STR-NBR                     
+                   DISPLAY 'EFFECTIVE DATE = ' IM048-UIR-EFF-DTE                
+                   PERFORM 9990-DISPLAY-CONTROL-INFO                            
+                   SET PV-ABEND-4006 TO TRUE                                    
+                   PERFORM 9999-ABEND                                           
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+           IF IM048-PRCHGTYP-REG-CLEARNCE                                       
+             AND IM048-UIR-ALL-RMNG-STRS                                        
+               IF IM048-UIR-STR-NBR = 0                                         
+                   SET PV-NEW-SKU-STATUS-CLEARANCE TO TRUE                      
+                   IF IM048-UIR-ALL-SAME-PRICE                                  
+                     AND NOT (IM048-UIR-STAT-CDE = PC-MIXED                     
+                              OR PC-CLEARANCE)                                  
+                       SET PS-STRS-ALL-SAME-PRICE TO TRUE                       
+                   END-IF                                                       
+               ELSE                                                             
+                   DISPLAY '** ABEND **'                                        
+                   DISPLAY 'IMKUP047 - ABEND'                                   
+                   DISPLAY 'ALL REMAINING CLEARANCE AND NO ZERO STORE'          
+                   DISPLAY 'PARAGRAPH = ' PV-PARAGRAPH-NAME                     
+                   DISPLAY 'INPUT SKU = ' IM048-UIR-SKU                         
+                   DISPLAY 'STORE NBR = ' IM048-UIR-STR-NBR                     
+                   DISPLAY 'EFFECTIVE DATE = ' IM048-UIR-EFF-DTE                
+                   PERFORM 9990-DISPLAY-CONTROL-INFO                            
+                   SET PV-ABEND-4007 TO TRUE                                    
+                   PERFORM 9999-ABEND                                           
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+           IF IM048-PRCHGTYP-REG-CLEARNCE                                       
+             AND NOT IM048-UIR-ALL-RMNG-STRS                                    
+               IF IM048-UIR-STR-NBR > 0                                         
+                   IF NOT (IM048-UIR-STAT-CDE = PC-MIXED                        
+                           OR PC-CLEARANCE)                                     
+                       SET PV-NEW-SKU-STATUS-MIXED TO TRUE                      
+                   END-IF                                                       
+               ELSE                                                             
+                   DISPLAY '** ABEND **'                                        
+                   DISPLAY 'IMKUP047 - ABEND'                                   
+                   DISPLAY 'NOT ALL REMAINING CLEARANCE AND ZERO STORE'         
+                   DISPLAY 'PARAGRAPH = ' PV-PARAGRAPH-NAME                     
+                   DISPLAY 'INPUT SKU = ' IM048-UIR-SKU                         
+                   DISPLAY 'STORE NBR = ' IM048-UIR-STR-NBR                     
+                   DISPLAY 'EFFECTIVE DATE = ' IM048-UIR-EFF-DTE                
+                   PERFORM 9990-DISPLAY-CONTROL-INFO                            
+                   SET PV-ABEND-4008 TO TRUE                                    
+                   PERFORM 9999-ABEND                                           
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 2100-SKU-PROCESSING.                                           *        
+      *  ==> PROCESSES:                                                *        
+      *    - PERFORM SKU UPDATES                                       *        
+      ******************************************************************        
+       2100-SKU-PROCESSING.                                                     
+           MOVE '2100-SKU-PROCESSING' TO PV-PARAGRAPH-NAME.                     
+                                                                                
+           PERFORM 5400-SELECT-TSK.                                             
+           IF IM048-UIR-STR-NBR = 0                                             
+      *        PROCESS A PRICE CHANGE AND POSSIBLE STATUS CHANGE                
+               PERFORM 2700-PRICE-UPDATE-CHECK                                  
+               PERFORM 2750-STATUS-UPDATE-CHECK                                 
+               IF PS-RETAIL-CHANGED-YES                                         
+                 OR PS-STATUS-CHANGED                                           
+                   IF PV-NEW-SKU-STATUS-ACTIVE                                  
+                     OR (PS-STRS-ALL-SAME-PRICE                                 
+                         AND (IM048-UIR-STAT-CDE = PC-MIXED                     
+                              OR PC-CLEARANCE))                                 
+      *                CLEARANCE TO ACTIVE PRICE CHANGE OR A FINAL              
+      *                MARKDOWN PRICE CHANGE WITH ALL STORES SAME PRICE.        
+      *                DELETE ANY FUTURE ROWS ON TPPCPRC                        
+                       PERFORM 6300-DEL-FUTR-PPCPRC                             
+                   END-IF                                                       
+                   MOVE IM048-UIR-STR-NBR TO PPCPRC-STR-NBR                     
+                   MOVE IM048-UIR-NEW-UNT-RTL-AMT TO PPCPRC-RTL-AMT             
+                   MOVE IM048-UIR-NEW-GP-PRIC-ID  TO PPCPRC-MEITGP-NBR          
+                   PERFORM 2500-PRICE-HISTORY-UPDATE                            
+                   IF (PV-NEW-SKU-STATUS-ACTIVE                                 
+                       OR (PS-STRS-ALL-SAME-PRICE                               
+                           AND (IM048-UIR-STAT-CDE = PC-MIXED                   
+                                OR PC-CLEARANCE)))                              
+                     AND TSK-REGN-PRIC-IND = 'Y'                                
+      *                DB COMPRESS OF A CLEARANCE TO ACTIVE PRICE CHANGE        
+      *                OR A FINAL MARKDOWN PRICE CHANGE WITH ALL STORES         
+      *                THE SAME PRICE.                                 *        
+                       PERFORM 6500-COMPRESS-TPPCPRC                            
+                   END-IF                                                       
+               END-IF                                                           
+           ELSE                                                                 
+      *        PROCESS A STATUS CHANGE TO 25 FOR THE SKU FOR THE RCP            
+      *        FIRST TIER (PV-NEW-SKU-STATUS-MIXED IS SET)                      
+               PERFORM 2750-STATUS-UPDATE-CHECK                                 
+               IF PS-STATUS-CHANGED                                             
+                   MOVE ZERO TO PPCPRC-STR-NBR                                  
+                   MOVE TSK-CUR-UNIT-RTL-AMT TO PPCPRC-RTL-AMT                  
+                   MOVE TSK-MEITGP-NBR TO PPCPRC-MEITGP-NBR                     
+                   PERFORM 2500-PRICE-HISTORY-UPDATE                            
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 2200-SKU-STORE-PROCESSING.                                     *        
+      ******************************************************************        
+       2200-SKU-STORE-PROCESSING.                                               
+           MOVE '2200-SKU-STORE-PROCESSING' TO PV-PARAGRAPH-NAME.               
+                                                                                
+           MOVE IM048-UIR-STR-NBR TO PPCPRC-STR-NBR.                            
+           MOVE PC-CLEARANCE-NUM  TO PPCPRC-STATUS-CDE.                         
+           MOVE IM048-UIR-NEW-UNT-RTL-AMT TO PPCPRC-RTL-AMT.                    
+           MOVE IM048-UIR-NEW-GP-PRIC-ID  TO PPCPRC-MEITGP-NBR.                 
+                                                                                
+           IF IM048-PRCHGTYP-2ND-CLR-MRKDWN                                     
+             OR IM048-PRCHGTYP-FINL-CLR-MRKDWN                                  
+               IF NOT (TSK-STATUS-CODE = PC-CLEARANCE-NUM                       
+                       OR PC-MIXED-NUM)                                         
+      *            BYPASS A MK2 OR FNL MARKDOWN IF THE SKU IS NOT MIXED         
+      *            OR CLEARANCE STATUS                                          
+                   DISPLAY '*** BYPASSING FINAL OR MK2 - NOT MIXED OR '         
+                           'CLEARANCE STATUS'                                   
+                   DISPLAY 'SKU NUMBER: ' IM048-UIR-SKU                         
+                           ' STORE NUMBER: ' IM048-UIR-STR-NBR                  
+                   ADD +1 TO CR-SKU-STRS-BYPASSED-CNTR                          
+               ELSE                                                             
+                   PERFORM 2500-PRICE-HISTORY-UPDATE                            
+               END-IF                                                           
+           ELSE                                                                 
+               PERFORM 2500-PRICE-HISTORY-UPDATE                                
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 2500-PRICE-HISTORY-UPDATE.                                     *        
+      *  ==> PROCESSES:                                                *        
+      *    - UPDATES THE MOST CURRENT ROW FOR THE ITEM BEING UPATED    *        
+      *      WITH THE PERM PRICE CHANGE EFF DATE MINUS ONE MICOSECOND  *        
+      *      AS THE END TIMESTAMP.                                     *        
+      *    - INSERTS A NEW ROW, FOR THE ITEM BEING UPDATED, WITH THE   *        
+      *      CHANGES INPUT ON THE PRICE UPDATE RECORD. THE START       *        
+      *      TIMESTAMP WILL BE THE EFFECTIVE DATE OF THE PRICE CHANGE  *        
+      *      WITH A TIME OF MIDNIGHT.                                  *        
+      ******************************************************************        
+       2500-PRICE-HISTORY-UPDATE.                                               
+           MOVE '2500-PRICE-HISTORY-UPDATE' TO PV-PARAGRAPH-NAME.               
+                                                                                
+           PERFORM 6400-UPDATE-CURRENT-TPPCPRC.                                 
+           IF SQLCODE = +100                                                    
+             AND PPCPRC-STR-NBR > 0                                             
+             AND (IM048-PRCHGTYP-2ND-CLR-MRKDWN                                 
+                  OR IM048-PRCHGTYP-FINL-CLR-MRKDWN)                            
+               IF TSK-STATUS-CODE = PC-MIXED-NUM                                
+                 AND NOT IM048-PRCHGTYP-REG-CLEARNCE                            
+      *            BYPASS A MK2 OR FNL MARKDOWN IF THE SKU IS MIXED             
+      *            STATUS AND A TPPCPRC ROW IS NOT FOUND                        
+                   DISPLAY '*** BYPASSING FINAL OR MK2 - MIXED STAT'            
+                           'US BUT STORE NOT FOUND'                             
+                   DISPLAY 'SKU NUMBER: ' IM048-UIR-SKU                         
+                           ' STORE NUMBER: ' IM048-UIR-STR-NBR                  
+                   ADD +1 TO CR-SKU-STRS-BYPASSED-CNTR                          
+               ELSE                                                             
+                   PERFORM 6450-INSERT-NEW-TPPCPRC                              
+               END-IF                                                           
+           ELSE                                                                 
+               PERFORM 6450-INSERT-NEW-TPPCPRC                                  
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 2700-PRICE-UPDATE-CHECK.                                       *        
+      *  ==> PROCESSES:                                                *        
+      *    - CHECK FOR RETAIL PRICE UPDATES.                           *        
+      ******************************************************************        
+       2700-PRICE-UPDATE-CHECK.                                                 
+           MOVE '2700-PRICE-UPDATE-CHECK' TO PV-PARAGRAPH-NAME.                 
+                                                                                
+           IF TSK-CUR-UNIT-RTL-AMT NOT = IM048-UIR-NEW-UNT-RTL-AMT              
+               SET PS-RETAIL-CHANGED-YES                                        
+                                   TO TRUE                                      
+           END-IF.                                                              
+                                                                                
+           IF TSK-MEITGP-NBR NOT = IM048-UIR-NEW-GP-PRIC-ID                     
+               SET PS-RETAIL-CHANGED-YES TO TRUE                                
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 2750-STATUS-UPDATE-CHECK.                                      *        
+      *  ==> PROCESSES:                                                *        
+      *    - CHECK FOR SKU STATUS UPDATES.                             *        
+      ******************************************************************        
+       2750-STATUS-UPDATE-CHECK.                                                
+                                                                                
+           MOVE '2750-STATUS-UPDATE-CHECK' TO PV-PARAGRAPH-NAME.                
+                                                                                
+           IF PV-NEW-SKU-STATUS = SPACES                                        
+               MOVE TSK-STATUS-CODE TO PPCPRC-STATUS-CDE                        
+           ELSE                                                                 
+      *        SKU IS CLEARANCE, OR CLEARANCE TO ACTIVE, OR RCP MIXED           
+               MOVE PV-NEW-SKU-STATUS  TO PV-TSK-STATUS-CODE                    
+               MOVE PV-TSK-STATUS-CODE TO PPCPRC-STATUS-CDE                     
+               IF IM048-UIR-STAT-CDE NOT = PV-NEW-SKU-STATUS                    
+                   SET PS-STATUS-CHANGED TO TRUE                                
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 3000-EOJ-PROCESSING.                                           *        
+      *  ==> PROCESSES:                                                *        
+      *    - CHECK IF LAST SKU PROCESSED SHOULD BE COMPRESSED          *        
+      *    - CLOSE FILES                                               *        
+      *    - DISPLAYS PROCESSING TOTALS                                *        
+      *    - TAKES A FINAL COMMIT AND UPDATES THE CHECKPOINT STATUS    *        
+      *      TO INDICATE SUCESSFULL COMPLETION                         *        
+      ******************************************************************        
+       3000-EOJ-PROCESSING.                                                     
+           MOVE '3000-EOJ-PROCESSING' TO PV-PARAGRAPH-NAME.                     
+                                                                                
+                                                                                
+           CLOSE PRICE-UPDATE-FILE                                              
+                 CONTROL-CARD-FILE.                                             
+                                                                                
+           IF PS-NO-DOCUMENTS                                                   
+               CONTINUE                                                         
+           ELSE                                                                 
+               PERFORM 7800-COMMIT                                              
+               MOVE '0' TO TCKRSTCNTL-CKPT-STAT-CODE                            
+               PERFORM 7900-UPDATE-CHECKPOINT-STATUS                            
+           END-IF.                                                              
+                                                                                
+           PERFORM 9990-DISPLAY-CONTROL-INFO.                                   
+                                                                                
+      ******************************************************************        
+      * 4000-READ-RECORD.                                              *        
+      *  ==> PROCESSES:                                                *        
+      *    - READS THE NEXT RECORD IN THE INPUT FILE.                  *        
+      ******************************************************************        
+       4000-READ-RECORD.                                                        
+           MOVE '4000-READ-RECORD' TO PV-PARAGRAPH-NAME.                        
+                                                                                
+           READ PRICE-UPDATE-FILE                                               
+               INTO IM048-UPC-ID-PRICE-UPDATE-REC                               
+                   AT END                                                       
+                       MOVE 'Y'     TO PS-END-OF-FILE-SW                        
+                   NOT AT END                                                   
+                       ADD +1                  TO PV-RECS-READ-CNTR             
+                       MOVE IM048-UIR-SKU      TO PV-DK-SKU                     
+                       MOVE IM048-UIR-STR-NBR  TO PV-DK-STORE-NBR               
+                       ADD 1 TO DI-INPUT-RECS-DISPLAY                           
+                       IF DI-INPUT-RECS-DISPLAY = 100000                        
+                           DISPLAY '***100,000 INPUT RECS READ,  '              
+                                   'CURR TMST = ' PV-CURRENT-TIMESTAMP          
+                           MOVE ZERO TO DI-INPUT-RECS-DISPLAY                   
+                       END-IF                                                   
+           END-READ.                                                            
+                                                                                
+                                                                                
+                                                                                
+      ******************************************************************        
+      * 5400-SELECT-TSK.                                               *        
+      *  ==> PROCESSES:                                                *        
+      *    - READS TSK                                                 *        
+      ******************************************************************        
+       5400-SELECT-TSK.                                                         
+           MOVE '5400-SELECT-TSK'  TO PV-PARAGRAPH-NAME.                        
+                                                                                
+           INITIALIZE PV-RETRY-COUNT.                                           
+           PERFORM  WITH TEST AFTER                                             
+             UNTIL SQLCODE = ZERO                                               
+              OR   SQLCODE = +100                                               
+              OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                        
+               EXEC SQL                                                         
+                   SELECT                                                       
+                        CUR_UNIT_RTL_AMT                                        
+                      , STATUS_CODE                                             
+                      , REGN_PRIC_IND                                           
+                      , MEITGP_NBR                                              
+                   INTO                                                         
+                       :TSK-CUR-UNIT-RTL-AMT                                    
+                      ,:TSK-STATUS-CODE                                         
+                      ,:TSK-REGN-PRIC-IND                                       
+                      ,:TSK-MEITGP-NBR                                          
+                    FROM TSK                                                    
+                   WHERE ITEM_NMBR = :TSK-ITEM-NMBR                             
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       ADD +1      TO CR-TSK-ROW-READ-CNTR                      
+                   WHEN SQLCODE = -913                                          
+                       ADD +1      TO PV-RETRY-COUNT                            
+                   WHEN SQLCODE = +100                                          
+                       DISPLAY 'IM048-UIR-SKU  = ' IM048-UIR-SKU                
+                       MOVE 'READ TSK TABLE'                                    
+                                   TO PV-DB2-OPERATION-ATTEMPTED                
+                       PERFORM 9999-SQL-ABEND                                   
+                   WHEN OTHER                                                   
+                       MOVE 'READ TSK TABLE'                                    
+                                        TO PV-DB2-OPERATION-ATTEMPTED           
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                           
+               MOVE 'READ TSK TABLE'    TO PV-DB2-OPERATION-ATTEMPTED           
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 6300-DEL-FUTR-PPCPRC.                                          *        
+      *  ==> PROCESSES:                                                *        
+      *    - DELETE FUTURE TPPCPRC ROWS                                *        
+      ******************************************************************        
+       6300-DEL-FUTR-PPCPRC.                                                    
+           MOVE '6300-DEL-FUTR-PPCPRC' TO PV-PARAGRAPH-NAME.                    
+                                                                                
+           INITIALIZE PV-RETRY-COUNT.                                           
+           PERFORM  WITH TEST AFTER                                             
+             UNTIL SQLCODE = ZERO                                               
+              OR SQLCODE = +100                                                 
+              OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                        
+               EXEC SQL                                                         
+                   DELETE FROM TPPCPRC                                          
+                      WHERE STRT_TMST   > CURRENT TIMESTAMP                     
+                        AND TSK_ITM_NBR = :PPCPRC-TSK-ITM-NBR                   
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       ADD SQLERRD(3)  TO CR-TPPCPRC-ROW-DEL-CNTR               
+                   WHEN SQLCODE = +100                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = -913                                          
+                      ADD +1           TO PV-RETRY-COUNT                        
+                   WHEN OTHER                                                   
+                       MOVE 'DELETE TPPCPRC'                                    
+                                       TO PV-DB2-OPERATION-ATTEMPTED            
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                           
+               MOVE 'DELETE TPPCPRC'   TO PV-DB2-OPERATION-ATTEMPTED            
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 6400-UPDATE-CURRENT-TPPCPRC.                                   *        
+      *  ==> PROCESSES:                                                *        
+      *    - UPDATES THE CURRENT ITEM ROW WITH THE NEW ENDING DATE     *        
+      ******************************************************************        
+       6400-UPDATE-CURRENT-TPPCPRC.                                             
+           MOVE '6400-UPDATE-CURRENT-TPPCPRC' TO PV-PARAGRAPH-NAME.             
+                                                                                
+           INITIALIZE PV-RETRY-COUNT.                                           
+           PERFORM  WITH TEST AFTER                                             
+             UNTIL SQLCODE = ZERO                                               
+              OR SQLCODE = +100                                                 
+              OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                        
+               EXEC SQL                                                         
+                   UPDATE  TPPCPRC                                              
+                     SET END_TMST       = :PV-PPCPRC-END-TMST                   
+                      WHERE TSK_ITM_NBR = :PPCPRC-TSK-ITM-NBR                   
+                        AND STR_NBR     = :PPCPRC-STR-NBR                       
+                        AND STRT_TMST   < :PV-PPCPRC-STRT-TMST                  
+                        AND END_TMST   >= :PV-PPCPRC-STRT-TMST                  
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       ADD SQLERRD(3)  TO CR-TPPCPRC-ROW-UPD-CNTR               
+                   WHEN SQLCODE = +100                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = -913                                          
+                      ADD +1           TO PV-RETRY-COUNT                        
+                   WHEN OTHER                                                   
+                       MOVE 'UPDATE TPPCPRC'                                    
+                                       TO PV-DB2-OPERATION-ATTEMPTED            
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                           
+               MOVE 'UPDATE TPPCPRC'   TO PV-DB2-OPERATION-ATTEMPTED            
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 6450-INSERT-NEW-TPPCPRC.                                       *        
+      *  ==> PROCESSES:                                                *        
+      *    - INSERTS A NEW ROW FOR THE ITEM WHICH IS BEING UPDATED.    *        
+      ******************************************************************        
+       6450-INSERT-NEW-TPPCPRC.                                                 
+           MOVE '6450-INSERT-NEW-TPPCPRC' TO PV-PARAGRAPH-NAME.                 
+                                                                                
+           INITIALIZE PV-RETRY-COUNT.                                           
+           PERFORM  WITH TEST AFTER                                             
+             UNTIL SQLCODE = ZERO                                               
+              OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                        
+               EXEC SQL                                                         
+                INSERT INTO TPPCPRC                                             
+                       (TSK_ITM_NBR                                             
+                       ,STR_NBR                                                 
+                       ,STRT_TMST                                               
+                       ,END_TMST                                                
+                       ,MEITGP_NBR                                              
+                       ,RTL_AMT                                                 
+                       ,STATUS_CDE                                              
+                       ,UID_NBR)                                                
+                VALUES (:PPCPRC-TSK-ITM-NBR                                     
+                       ,:PPCPRC-STR-NBR                                         
+                       ,:PV-PPCPRC-STRT-TMST                                    
+                       ,:PC-DEFAULT-TIMESTAMP                                   
+                       ,:PPCPRC-MEITGP-NBR                                      
+                       ,:PPCPRC-RTL-AMT                                         
+                       ,:PPCPRC-STATUS-CDE                                      
+                       ,:PC-PROGRAM-NAME)                                       
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       ADD SQLERRD(3)  TO CR-TPPCPRC-ROW-INS-CNTR               
+                   WHEN SQLCODE = -913                                          
+                      ADD +1           TO PV-RETRY-COUNT                        
+                   WHEN OTHER                                                   
+                       MOVE 'INSERT TPPCPRC'                                    
+                                       TO PV-DB2-OPERATION-ATTEMPTED            
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                           
+               MOVE 'INSERT TPPCPRC'   TO PV-DB2-OPERATION-ATTEMPTED            
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 6500-COMPRESS-TPPCPRC.                                         *        
+      *  ==> PROCESSES:                                                *        
+      *    - INACTIVATE ALL CURRENT ACTIVE STORE ROWS FOR THIS ITEM    *        
+      *      ON TPPCPRC FOR A CLEARANCE TO ACTIVE PRICE CHANGE.        *        
+      ******************************************************************        
+       6500-COMPRESS-TPPCPRC.                                                   
+           MOVE '6500-COMPRESS-TPPCPRC' TO PV-PARAGRAPH-NAME.                   
+                                                                                
+           INITIALIZE PV-RETRY-COUNT.                                           
+           PERFORM  WITH TEST AFTER                                             
+             UNTIL SQLCODE = ZERO                                               
+               OR  SQLCODE = +100                                               
+               OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                       
+               EXEC SQL                                                         
+                   UPDATE  TPPCPRC                                              
+                     SET  END_TMST      = :PV-PPCPRC-END-TMST                   
+                      WHERE TSK_ITM_NBR = :PPCPRC-TSK-ITM-NBR                   
+                        AND STR_NBR    ^= :PC-ZERO-STORE                        
+                        AND END_TMST   >= :PV-PPCPRC-STRT-TMST                  
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       ADD SQLERRD(3)  TO CR-TPPCPRC-ROW-INACTV-CNTR            
+                   WHEN SQLCODE = +100                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = -913                                          
+                       ADD +1      TO PV-RETRY-COUNT                            
+                   WHEN OTHER                                                   
+                       MOVE 'UPDATE TPPCPRC'                                    
+                                       TO PV-DB2-OPERATION-ATTEMPTED            
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                           
+               MOVE 'UPDATE TPPCPRC'   TO PV-DB2-OPERATION-ATTEMPTED            
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 7000-COMMIT-PROCESSING.                                        *        
+      *  ==> PROCESSES:                                                *        
+      *    - CHECK IF WE NEED TO TAKE A COMMIT.                        *        
+      *    - COMMIT THIS UNIT OF WORK.                                 *        
+      ******************************************************************        
+       7000-COMMIT-PROCESSING.                                                  
+                                                                                
+           PERFORM 7200-SET-CURRENT-TIMESTAMP.                                  
+           IF PV-CURRENT-TIMESTAMP > PV-COMMIT-TIMESTAMP                        
+               IF PS-FIRST-COMMIT                                               
+                   MOVE '9'        TO TCKRSTCNTL-CKPT-STAT-CODE                 
+                   PERFORM 7900-UPDATE-CHECKPOINT-STATUS                        
+                   MOVE 'N'        TO PS-FIRST-COMMIT-SW                        
+               END-IF                                                           
+               PERFORM 7800-COMMIT                                              
+               PERFORM 7100-GET-COMMIT-TIMESTAMP                                
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 7100-GET-COMMIT-TIMESTAMP.                                     *        
+      *  ==> PROCESSES:                                                *        
+      *    - GET THE COMMIT TIMESTAMP FROM THE CHECKPOINT CONTROL      *        
+      *      TABLE.                                                    *        
+      ******************************************************************        
+       7100-GET-COMMIT-TIMESTAMP.                                               
+           MOVE '7100-GET-COMMIT-TIMESTAMP' TO PV-PARAGRAPH-NAME.               
+                                                                                
+           INITIALIZE PV-RETRY-COUNT.                                           
+           PERFORM  WITH TEST AFTER                                             
+             UNTIL SQLCODE = ZERO                                               
+               OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                       
+               EXEC SQL                                                         
+                   SELECT                                                       
+                     (CURRENT TIMESTAMP + CKPT_FRQNCY_QTY SECONDS)              
+                   INTO                                                         
+                     :PV-COMMIT-TIMESTAMP                                       
+                   FROM TCKRSTCNTL                                              
+                  WHERE JOB_NAME  = :CC-JOB-NAME                                
+                    AND PLAN_NAME = :PC-PROGRAM-NAME                            
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = -913                                          
+                       ADD +1      TO PV-RETRY-COUNT                            
+                   WHEN OTHER                                                   
+                       MOVE 'SELECT TCKRSTCNTL'                                 
+                                       TO PV-DB2-OPERATION-ATTEMPTED            
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                           
+               MOVE 'SELECT TCKRSTCNTL'                                         
+                                       TO PV-DB2-OPERATION-ATTEMPTED            
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 7200-SET-CURRENT-TIMESTAMP.                                    *        
+      *  ==> PROCESSES:                                                *        
+      *    - GET THE CURRENT TIMESTAMP FROM DB2.                       *        
+      ******************************************************************        
+       7200-SET-CURRENT-TIMESTAMP.                                              
+           MOVE '7200-SET-CURRENT-TIMESTAMP' TO PV-PARAGRAPH-NAME.              
+                                                                                
+           EXEC SQL                                                             
+                SET :PV-CURRENT-TIMESTAMP = CURRENT TIMESTAMP                   
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = ZERO                                              
+                   MOVE PV-CURRENT-TIMESTAMP (1:10) TO                          
+                          PV-RUN-DATE                                           
+               WHEN OTHER                                                       
+                   MOVE 'ERROR ON SET OF TIMESTAMP '                            
+                                   TO PV-DB2-OPERATION-ATTEMPTED                
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************07160094
+      * READ CONTROL FILE FOR PROCESS OLD DATE INDICATOR               *07170094
+      ******************************************************************07180094
+       7300-READ-CONTROL-CARD.                                          07140094
+           MOVE '*7300-READ-CONTROL-CARD*' TO PV-PARAGRAPH-NAME.        07150094
+                                                                        07210094
+           READ CONTROL-CARD-FILE INTO CC-CONTROL-CARD                  07190094
+               AT END                                                           
+                   DISPLAY '*** NO CONTROL CARD ***'                            
+                   SET PV-ABEND-4001 TO TRUE                                    
+                   PERFORM 9999-ABEND.                                          
+                                                                        07210094
+           DISPLAY CC-CONTROL-CARD.                                             
+           IF CC-PROCESS-OLD-DATE = 'N'                                         
+               DISPLAY ' CC: DO NOT PROCESS OLD DATE DATA'                      
+           ELSE                                                                 
+               IF CC-PROCESS-OLD-DATE = 'Y'                                     
+                   DISPLAY ' CC: PROCESS OLD DATE DATA'                         
+               ELSE                                                             
+                   DISPLAY '*** INCORRECT CONTROL CARD DATA ***'                
+                   SET PV-ABEND-4002 TO TRUE                                    
+                   PERFORM 9999-ABEND                                           
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+           IF CC-JOB-NAME = SPACES                                              
+               DISPLAY '*** INVALID CONTROL CARD JOB NAME ***'                  
+               SET PV-ABEND-4004 TO TRUE                                        
+               PERFORM 9999-ABEND                                               
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 7400-INIT-CHECKPOINT-SELECT.                                   *        
+      *  ==> PROCESSES:                                                *        
+      *    - SELECTS FROM THE CHECKPOINT RESTART CONTROL TABLE TO SEE  *        
+      *      IF WE ARE IN A RESTART CONDITION.                         *        
+      ******************************************************************        
+       7400-INIT-CHECKPOINT-SELECT.                                             
+           MOVE '7400-INIT-CHECKPOINT-SELECT' TO PV-PARAGRAPH-NAME.             
+                                                                                
+           INITIALIZE PV-RETRY-COUNT.                                           
+           PERFORM  WITH TEST AFTER                                             
+             UNTIL SQLCODE = ZERO                                               
+               OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                       
+               EXEC SQL                                                         
+                 SELECT                                                         
+                      CKPT_STAT_CODE                                            
+                   INTO                                                         
+                     :TCKRSTCNTL-CKPT-STAT-CODE                                 
+                   FROM  TCKRSTCNTL                                             
+                  WHERE  JOB_NAME  = :CC-JOB-NAME                               
+                    AND  PLAN_NAME = :PC-PROGRAM-NAME                           
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = -913                                          
+                       ADD +1      TO PV-RETRY-COUNT                            
+                   WHEN OTHER                                                   
+                       MOVE 'SELECT TCKRSTCNTL'                                 
+                                       TO PV-DB2-OPERATION-ATTEMPTED            
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                           
+               MOVE 'SELECT TCKRSTCNTL'                                         
+                                       TO PV-DB2-OPERATION-ATTEMPTED            
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 7500-SELECT-RESTART-INFO.                                      *        
+      *  ==> PROCESSES:                                                *        
+      *    - SELECTS FROM THE CHECKPOINT RESTART INFORMATION TABLE TO  *        
+      *      OBTAIN THE PROGRAMS SAVED VARIABLES.                      *        
+      ******************************************************************        
+       7500-SELECT-RESTART-INFO.                                                
+           MOVE '7500-SELECT-RESTART-INFO' TO PV-PARAGRAPH-NAME.                
+                                                                                
+           INITIALIZE PV-RETRY-COUNT.                                           
+           PERFORM  WITH TEST AFTER                                             
+             UNTIL SQLCODE = ZERO                                               
+               OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                       
+               EXEC SQL                                                         
+                   SELECT                                                       
+                      WORK_STRG_DESC                                            
+                   INTO                                                         
+                     :TCKRSTINF-WORK-STRG-DESC                                  
+                   FROM  TCKRSTINF                                              
+                  WHERE  JOB_NAME  = :CC-JOB-NAME                               
+                    AND  PLAN_NAME = :PC-PROGRAM-NAME                           
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = -913                                          
+                       ADD +1      TO PV-RETRY-COUNT                            
+                   WHEN OTHER                                                   
+                       MOVE 'SELECT TCKRSTINF'                                  
+                                       TO PV-DB2-OPERATION-ATTEMPTED            
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                           
+               MOVE 'SELECT TCKRSTINF' TO PV-DB2-OPERATION-ATTEMPTED            
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 7600-CALC-END-TMST.                                            *        
+      *    - CALC END TMST FOR TPPCPRC PROCESSING                      *        
+      ******************************************************************        
+       7600-CALC-END-TMST.                                                      
+           MOVE '7600-CALC-END-TMST' TO PV-PARAGRAPH-NAME.                      
+                                                                                
+           INITIALIZE PV-RETRY-COUNT.                                           
+           PERFORM  WITH TEST AFTER                                             
+             UNTIL SQLCODE = ZERO                                               
+               OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                       
+               EXEC SQL                                                         
+                   SELECT                                                       
+                     TIMESTAMP(:PV-PPCPRC-STRT-TMST) - 1 MICROSECOND            
+                   INTO                                                         
+                     :PV-PPCPRC-END-TMST                                        
+                   FROM  SYSIBM.SYSDUMMY1                                       
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = -913                                          
+                       ADD +1      TO PV-RETRY-COUNT                            
+                   WHEN OTHER                                                   
+                       MOVE 'SELECT SYSDUMMY1'                                  
+                                       TO PV-DB2-OPERATION-ATTEMPTED            
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                           
+               MOVE 'SELECT SYSDUMMY1' TO PV-DB2-OPERATION-ATTEMPTED            
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      ******************************************************************        
+      * 7800-COMMIT.                                                   *        
+      *  ==> PROCESSES:                                                *        
+      *    - PERFORM UPDATE OF CHECKPOINT INFORMATION TABLE.           *        
+      *    - TAKE A COMMIT.                                            *        
+      ******************************************************************        
+       7800-COMMIT.                                                             
+           MOVE '7800-COMMIT'      TO PV-PARAGRAPH-NAME.                        
+                                                                                
+           MOVE PV-DETAIL-KEY      TO CR-DETAIL-KEY.                            
+           MOVE PV-RECS-READ-CNTR  TO CR-RECS-READ-CNTR.                        
+           MOVE CR-CHECKPOINT-RESTART-AREA                                      
+                                   TO TCKRSTINF-WORK-STRG-DESC.                 
+                                                                                
+           INITIALIZE PV-RETRY-COUNT.                                           
+           PERFORM  WITH TEST AFTER                                             
+             UNTIL SQLCODE = ZERO                                               
+               OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                       
+               EXEC SQL                                                         
+                 UPDATE TCKRSTINF                                               
+                    SET WORK_STRG_DESC = :TCKRSTINF-WORK-STRG-DESC              
+                  WHERE JOB_NAME       = :CC-JOB-NAME                           
+                    AND PLAN_NAME      = :PC-PROGRAM-NAME                       
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = -913                                          
+                       ADD +1      TO PV-RETRY-COUNT                            
+                   WHEN OTHER                                                   
+                       MOVE 'UPDATE TCKRSTINF'                                  
+                                       TO PV-DB2-OPERATION-ATTEMPTED            
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                           
+               MOVE 'UPDATE TCKRSTINF' TO PV-DB2-OPERATION-ATTEMPTED            
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+           EXEC SQL                                                             
+               COMMIT                                                           
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+               ADD +1              TO CR-COMMIT-CNTR                            
+           ELSE                                                                 
+               MOVE 'ERROR ON COMMIT'                                           
+                                   TO PV-DB2-OPERATION-ATTEMPTED                
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 7900-UPDATE-CHECKPOINT-STATUS.                                 *        
+      *  ==> PROCESSES:                                                *        
+      *    - UPDATES THE STATUS ON THE CHECKPOINT CONTROL TABLE        *        
+      ******************************************************************        
+       7900-UPDATE-CHECKPOINT-STATUS.                                           
+           MOVE '7900-UPDATE-CHECKPOINT-STATUS' TO PV-PARAGRAPH-NAME.           
+                                                                                
+           INITIALIZE PV-RETRY-COUNT.                                           
+           PERFORM  WITH TEST AFTER                                             
+             UNTIL SQLCODE = ZERO                                               
+               OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                       
+               EXEC SQL                                                         
+                 UPDATE  TCKRSTCNTL                                             
+                    SET  CKPT_STAT_CODE = :TCKRSTCNTL-CKPT-STAT-CODE            
+                  WHERE  JOB_NAME  = :CC-JOB-NAME                               
+                    AND  PLAN_NAME = :PC-PROGRAM-NAME                           
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = -913                                          
+                       ADD +1      TO PV-RETRY-COUNT                            
+                   WHEN OTHER                                                   
+                       MOVE 'UPDATE TCKRSTCNTL'                                 
+                                       TO PV-DB2-OPERATION-ATTEMPTED            
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                           
+               MOVE 'UPDATE TCKRSTCNTL'                                         
+                                       TO PV-DB2-OPERATION-ATTEMPTED            
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * 9990-DISPLAY-CONTROL-INFO.                                     *        
+      *  ==> PROCESSES:                                                *        
+      *    - DISPLAYS CONTROL INFORMATION AT END OF JOB                *        
+      ******************************************************************        
+       9990-DISPLAY-CONTROL-INFO.                                               
+                                                                                
+           MOVE CR-RECS-PROCESSED-CNTR                                          
+                                   TO DI-RECS-PROCESSED-CNTR.                   
+           MOVE CR-RECS-READ-CNTR  TO DI-RECS-READ-CNTR.                        
+           MOVE CR-SKU-STRS-BYPASSED-CNTR                                       
+                                   TO DI-SKU-STRS-BYPASSED-CNTR.                
+           MOVE CR-TSK-ROW-READ-CNTR                                            
+                                   TO DI-TSK-ROW-READ-CNTR.                     
+           MOVE CR-TPPCPRC-ROW-UPD-CNTR                                         
+                                   TO DI-TPPCPRC-ROW-UPDATE-CNTR.               
+           MOVE CR-TPPCPRC-ROW-INS-CNTR                                         
+                                   TO DI-TPPCPRC-ROW-INSERT-CNTR.               
+           MOVE CR-TPPCPRC-ROW-DEL-CNTR                                         
+                                   TO DI-TPPCPRC-ROW-DEL-CNTR.                  
+           MOVE CR-TPPCPRC-ROW-INACTV-CNTR                                      
+                                   TO DI-TPPCPRC-ROW-INACTV-CNTR.               
+           MOVE CR-COMMIT-CNTR     TO DI-COMMIT-CNTR.                           
+                                                                                
+           DISPLAY '********************************************'.              
+           DISPLAY '**** RUN STATISTICS FOR PROGRAM IMKUP047 ***'.              
+           DISPLAY '****'.                                                      
+           DISPLAY 'INPUT RECS PROCESSED: ' DI-RECS-PROCESSED-CNTR.             
+           DISPLAY 'INPUT RECORDS READ:   ' DI-RECS-READ-CNTR.                  
+           DISPLAY 'SKU/STORES BYPASSED:   ' DI-SKU-STRS-BYPASSED-CNTR.         
+           DISPLAY 'TSK SELECTS:           ' DI-TSK-ROW-READ-CNTR.              
+           DISPLAY 'TPPCPRC ROWS UPDATED:  ' DI-TPPCPRC-ROW-UPDATE-CNTR.        
+           DISPLAY 'TPPCPRC ROWS INSERTED: ' DI-TPPCPRC-ROW-INSERT-CNTR.        
+           DISPLAY 'TPPCPRC ROWS INACTIVD: ' DI-TPPCPRC-ROW-INACTV-CNTR.        
+           DISPLAY 'TPPCPRC ROWS DELETED : ' DI-TPPCPRC-ROW-DEL-CNTR.           
+           DISPLAY 'COMMITS TAKEN:        ' DI-COMMIT-CNTR.                     
+           DISPLAY '****'.                                                      
+           DISPLAY '**** RUN STATS END FOR PROGRAM IMKUP047  ***'.              
+           DISPLAY '********************************************'.              
+                                                                                
+      ******************************************************************        
+      * 9999-SQL-ABEND.                                                *        
+      *  ==> PROCESSES:                                                *        
+      *    - PERFORMS ABENDS AFTER UNEXPECTED SQLCODE                  *        
+      ******************************************************************        
+       9999-SQL-ABEND.                                                          
+                                                                                
+           MOVE SQLCODE TO PV-SQLCODE-DISPLAY.                                  
+                                                                                
+           DISPLAY '** ABEND **'.                                               
+           DISPLAY 'IMKUP047 - ABEND'.                                          
+           DISPLAY 'PARAGRAPH = ' PV-PARAGRAPH-NAME.                            
+           DISPLAY 'OPERATION = ' PV-DB2-OPERATION-ATTEMPTED.                   
+           DISPLAY 'SQL CODE  = ' PV-SQLCODE-DISPLAY.                           
+           DISPLAY 'INPUT SKU = ' IM048-UIR-SKU.                                
+           DISPLAY 'STORE NBR = ' IM048-UIR-STR-NBR.                            
+           DISPLAY 'EFFECTIVE DATE = ' IM048-UIR-EFF-DTE.                       
+                                                                                
+           PERFORM 9990-DISPLAY-CONTROL-INFO.                                   
+                                                                                
+           COPY DPPD004.                                                        
+                                                                                
+           SET PV-ABEND-4013 TO TRUE.                                           
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    
+                                                                                
+       9999-ABEND.                                                      07730094
+      ******************************************************************07740094
+      * ABEND ROUTINE MISC ERRORS                                      *07750094
+      ******************************************************************07760094
+           DISPLAY '** PROGRAM **        = ' PC-PROGRAM-NAME.           07770094
+           DISPLAY '** PARAGRAPH **      = ' PV-PARAGRAPH-NAME.         07780094
+           CALL 'ILBOABN0' USING ABEND-CODE.                            07800094

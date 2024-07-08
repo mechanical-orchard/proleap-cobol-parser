@@ -1,0 +1,1389 @@
+       IDENTIFICATION DIVISION.                                                 
+                                                                                
+       PROGRAM-ID.    INKUP010.                                                 
+       AUTHOR.        PAUL KEBER.                                               
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+       DATE-WRITTEN.  2004-08-11.                                               
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *           INKUP010 - CUTOFF DATABASE MAIN UPDATE               *00100000
+      ******************************************************************        
+      * WHEN PROCESSING AN ITEM CUTOFF TAKEN INPUT RECORD, THIS        *00100000
+      * PROGRAM WILL UPDATE THE INT_INV_CUTOFF TABLE ROW CUTOFF ONHAND *00100000
+      * QUANTITY AND INTRANSIT CUTOFF QUANTITY COLUMNS USING DATA FROM *00100000
+      * THE CUTOFF DATABASE CONSOLIDATED EXTRACT FILE.  IT WILL ALSO   *00100000
+      * SET THE POST FLUSH RECEIPT QUANTITY TO ZERO ON THE ROW IF THE  *00100000
+      * PROCESSING DATE IS NOT GREATER THAN THE DC CUTOFF DATE.  A NEW *00100000
+      * INT_INV_CUTOFF TABLE ROW WILL BE INSERTED IF PROCESSING AN     *00100000
+      * ITEM CUTOFF NOT TAKEN INPUT RECORD.  THIS PROGRAM CONTAINS     *00100000
+      * CHECKPOINT RESTART LOGIC.                                      *00100000
+      * THE INPUT TO THIS PROGRAM WILL CONTAIN A CONTROL CARD FOR THE  *        
+      * PROCESSING JOB NAME.                                           *        
+      ******************************************************************        
+      ******************** HISTORY OF CHANGES **************************00111027
+      * WR/PROJ  DATE        DESCRIPTION OF CHANGES                     00113027
+      * -------  ----------  ----------------------------------------   00114027
+      * WR26600  08-11-2004  PAUL KEBER - INITIAL INSTALLATION.         00119027
+      * WR27808  05-01-2005  ERIN SEARL - MANIFESTING PROJECT.          00119027
+L27808*                      V. LEE YANG - ADD DELETE LOGIC.            00119027
+800497* P00800497 09-13-2005 R. JANSSEN - ISSUE INSERTING MISSING SKUS  00119027
+W29225* WR29225   09-14-2005 RONNA MCDONALD                             00119027
+W29225*                    - WHEN ITEM CUTOFF EXISTS (1 - RECORD FROM           
+W29225*                      STORE EXP AND NO RECORD FROM FASHION) AND          
+W29225*                      THE STORE EXPECTED IS NON ZERO THEN DO AN          
+W29225*                      INSERT TO THE CUTOFF DATABASE.             00119027
+W29225*                                                                         
+W29225*                    - WHEN ITEM CUTOFF EXISTS (1 - RECORD FROM           
+W29225*                      STORE EXP AND NO RECORD FROM FASHION) AND  00119027
+W29225*                      THE STORE EXPECTED IS ZERO                         
+W29225*                      THEN DELETE THE RECORD FROM THE CUTOFF             
+W29225*                      DATABASE.                                  00119027
+W29225*                                                                         
+W29225*                    - REPORT ON BOTH OF THESE SCENARIOS.                 
+W29225*                                                                         
+W29225*                    - ALSO REPORT ON WHEN ITEM CUTOFF TAKEN (3 -         
+W29225*                      RECORD IS IN STORE EXPECTED AND FASHION,   00119027
+W29225*                      BUT NOT ON CUTOFF - THIS HAPPENS WHEN      00119027
+W29225*                      RECEIVING AND FASION GET IT BEFORE WE              
+W29225*                      CUTOVER) AN UPDATE FAILS, AND THEN AN              
+W29225*                      INSERT IS DONE                                     
+W28545* W28545   08-10-2006  ADD LOGIC FOR DEPARTMENT LEVEL                     
+W28545*                      INVENTORY PROCESS.                                 
+W28545*                      -B. GRAHAM - STRATAGEM                             
+W33304* W33304   04-08-2008  HOLDING INVENTORY LEDGER OPEN ACROSS PERIOD        
+      ******************************************************************00120000
+                                                                        00140000
+       ENVIRONMENT DIVISION.                                            00150000
+                                                                        00160000
+       CONFIGURATION SECTION.                                           00170000
+       SOURCE-COMPUTER.        IBM-3090.                                00180000
+       OBJECT-COMPUTER.        IBM-3090.                                00190000
+                                                                        00160000
+       INPUT-OUTPUT SECTION.                                            00200000
+       FILE-CONTROL.                                                    00210000
+                                                                        00211000
+           SELECT CC-JOBNAME-CNTL-FILE                                          
+               ASSIGN TO INP01.                                                 
+                                                                                
+           SELECT CUTOFF-UPDATES-FILE                                   00220000
+               ASSIGN TO INP02.                                         00230000
+                                                                        00250000
+W29225     SELECT REPORT-AUDIT-FILE                                     00220000
+W29225         ASSIGN TO RPT01.                                         00230000
+W29225                                                                  00250000
+       DATA DIVISION.                                                   00260000
+                                                                        00250000
+       FILE SECTION.                                                    00270000
+                                                                        00280000
+       FD  CC-JOBNAME-CNTL-FILE                                                 
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  CC-JOBNAME-CNTL-REC         PIC X(80).                               
+                                                                                
+       FD  CUTOFF-UPDATES-FILE                                          00290000
+           LABEL RECORDS ARE STANDARD                                   00300000
+           RECORDING MODE IS F                                          00310000
+           BLOCK CONTAINS 0 RECORDS.                                    00320000
+       01  CUTOFF-UPDATES-RECORD       PIC X(56).                       00330026
+                                                                        00340000
+W29225 FD  REPORT-AUDIT-FILE                                            00290000
+W29225     LABEL RECORDS ARE STANDARD                                   00300000
+W29225     RECORDING MODE IS F                                          00310000
+W29225     BLOCK CONTAINS 0 RECORDS.                                    00320000
+W29225 01  REPORT-AUDIT-RECORD         PIC X(200).                      00330026
+W29225                                                                  00340000
+       WORKING-STORAGE SECTION.                                         00370000
+                                                                        00380000
+       01  FILLER                      PIC X(28)   VALUE                00381000
+                'BEGINNING OF WORKING STORAGE'.                         00382000
+       01  ABEND-CODE                  PIC S9(04)  VALUE ZERO COMP SYNC.00383000
+                                                                        00384000
+       01  PC-PROGRAM-CONSTANTS.                                        00385000
+           05  PC-PROGRAM-NAME         PIC  X(08)  VALUE 'INKUP010'.    00387000
+           05  PC-MAX-DEADLOCKS        PIC S9(03)  VALUE +3.            00389000
+W29225     05  PC-LINE-MAX             PIC S9(4)   VALUE +80 COMP SYNC.         
+W29225     05  PC-DELETE-DESC          PIC X(83)   VALUE                        
+W29225          'NOT IN FASHION AND STORE EXP IS ZERO             '.    00440000
+W29225     05  PC-INS-CTOFF-EXISTS     PIC X(83)   VALUE                        
+W29225          'NOT IN FASHION BUT STORE EXP IS NOT ZERO         '.    00440000
+W29225     05  PC-INS-CTOFF-TAKEN      PIC X(83)   VALUE                        
+W29225          'IN FASHION AND STORE EXP, BUT NOT IN CUTOFF      '.    00440000
+W29225     05  PC-SKU-NOT-FOUND        PIC X(83)   VALUE                        
+W29225          '************     SKU NOT VALID      *************'.    00440000
+                                                                        00390000
+       01  PE-PROGRAM-ERROR-MESSAGES.                                   00400000
+           05  PE-MSG-01                       PIC X(50) VALUE          00430000
+                'INT_INV_CTOFF ROW NOT FOUND FOR UPDATE           '.    00440000
+           05  PE-MSG-02                       PIC X(50) VALUE          00430000
+                'ATTEMPT TO UPDATE ROW ON INT_INV_CTOFF FAILED    '.    00440000
+           05  PE-MSG-03                       PIC X(50) VALUE          00470000
+                'ERROR IN SELECT ''STATUS CODE'' FROM TCKRSTCNTL  '.    00480000
+           05  PE-MSG-04                       PIC X(50) VALUE          00490000
+                'UPDATE TO ''WORK_STRG_DESC'' ON TCKRSTINF FAILED '.    00500000
+           05  PE-MSG-05                       PIC X(50) VALUE          00510000
+                'PROGRAM ABENDED WHILE TRYING TO PERFORM A COMMIT '.    00520000
+           05  PE-MSG-06                       PIC X(50) VALUE          00530000
+                'PROGRAM MAXIMUM DEADLOCK COUNT HAS BEEN EXCEEDED '.    00540000
+           05  PE-MSG-07                       PIC X(50) VALUE          00430000
+                'TINVPAR ROW NOT FOUND DURING FETCH               '.    00440000
+           05  PE-MSG-08                       PIC X(50) VALUE          00430000
+                'ATTEMPT TO FETCH ROW ON TINVPAR FAILED           '.    00440000
+           05  PE-MSG-09                       PIC X(50) VALUE          00430000
+                'TINVPAR CURSOR OPEN FAILED                       '.    00440000
+           05  PE-MSG-10                       PIC X(50) VALUE          00430000
+                'TINVPAR CURSOR CLOSE FAILED                      '.    00440000
+           05  PE-MSG-11                       PIC X(50) VALUE          00430000
+                'ATTEMPT TO INSERT ROW ON INT_INV_CTOFF FAILED    '.    00440000
+L27808     05  PE-MSG-12                       PIC X(50) VALUE          00430000
+L27808          'ATTEMPT TO DELETE ROW OFF INT_INV_CTOFF FAILED   '.    00440000
+W29225     05  PE-MSG-13                       PIC X(50) VALUE          00430000
+W29225          'ATTEMPT TO SELECT FROM TSKXREF                   '.    00440000
+W29225     05  PE-MSG-14                       PIC X(50) VALUE          00430000
+W29225          'MAX RETRIES EXCEEDED ON TSKXREF                 '.     00440000
+                                                                        00550000
+       01  PS-PROGRAM-SWITCHES.                                         00560000
+           05  PS-EOF-CUTOFF-UPDATES-FILE-SW PIC X(01)    VALUE 'N'.    00570000
+               88  PS-EOF-CUTOFF-UPDATES-FILE             VALUE 'Y'.    00580000
+           05  PS-FIRST-COMMIT-SW           PIC X(01)     VALUE 'N'.    00610000
+               88  PS-FIRST-COMMIT                        VALUE 'Y'.    00620000
+           05  PS-DEADLOCK-RESTART-SW       PIC X(01)     VALUE 'N'.    00630000
+               88  PS-PROGRAM-DEADLOCKED                  VALUE 'Y'.    00640000
+W29225     05  PS-TSKXREF-FOUND-SW          PIC X      VALUE 'N'.               
+W29225         88  PS-TSKXREF-FOUND                    VALUE 'Y'.               
+W29225         88  PS-TSKXREF-NOT-FOUND                VALUE 'N'.               
+                                                                        00650000
+       01  PROGRAM-VARIABLES.                                           00710000
+           05  PV-RETRY-COUNT                  PIC S9(04) VALUE +0.     00720000
+           05  PV-DEADLOCK-COUNT               PIC S9(04) VALUE +0.     00730000
+                                                                        00740000
+           05  PV-PARAGRAPH-NAME               PIC  X(30) VALUE SPACES. 00750000
+           05  PV-ABEND-MESSAGE                PIC  X(75) VALUE SPACES. 00760000
+           05  PV-OPERATION-ATTEMPTED          PIC  X(50) VALUE SPACES. 00770000
+           05  PV-CURRENT-TIMESTAMP            PIC  X(26) VALUE SPACES. 00780000
+           05  PV-COMMIT-TIMESTAMP             PIC  X(26) VALUE SPACES. 00790000
+W29225     05  PV-PAGE-COUNTER                 PIC S9(4)  VALUE ZEROES          
+W29225                                                     COMP SYNC.           
+W29225     05  PV-LINE-COUNTER                 PIC S9(4)  VALUE 99              
+W29225                                                     COMP SYNC.           
+W29225     05  PV-EXISTS                       PIC S9(04) VALUE +0 COMP.        
+W29225     05  PV-SQL-SUB                   PIC  9(03) VALUE ZERO.              
+                                                                                
+       01  PV-PROCESS-JOB-NAME-CC.                                              
+           05  PV-PROCESS-JOB-NAME       PIC X(08)   VALUE SPACES.              
+           05  FILLER                    PIC X(72)   VALUE SPACES.              
+                                                                                
+       01  PA-PROGRAM-ACCUMULATORS.                                     00810000
+           05  PA-RECORD-COUNTS.                                        00820000
+               10  PA-INPUT-COUNT        PIC  9(09)  VALUE ZEROES.      00830000
+               10  PA-UPDATE-COUNT       PIC  9(09)  VALUE ZEROES.      00840000
+800497         10  PA-UPDT-INS-COUNT     PIC  9(09)  VALUE ZEROES.      00840000
+               10  PA-INSERT-COUNT       PIC  9(09)  VALUE ZEROES.      00840000
+               10  PA-COMMIT-COUNT       PIC  9(09)  VALUE ZEROES.      00840000
+L27808         10  PA-DELETE-COUNT       PIC  9(09)  VALUE ZEROES.      00840000
+                                                                        00880000
+       01  PD-PROGRAM-DISPLAYS.                                         00890000
+           05  PD-DEADLOCK-COUNT         PIC  9(04) VALUE 0.            00900000
+           05  PD-DISPLAY-TOTAL          PIC  Z,ZZZ,ZZZ,ZZZ,ZZ9.99-.    00901000
+                                                                        00880000
+       01  SAVE-AREA.                                                   00910000
+           05  SV-PRIMARY-KEY.                                          00920000
+               10  SV-LOC-NBR            PIC S9(04)     COMP   VALUE +0.00961000
+                                                                        01080000
+       01  CR-CHECKPOINT-RESTART-AREA.                                  01470000
+L27808     05  CR-AREA-LEN                  PIC S9(04) VALUE +45  COMP. 01480000
+           05  CR-CHECKPOINT-RESTART-VAR.                               01490000
+               10  CR-PREV-DTL-KEY          PIC  X(07) VALUE SPACES.    01500000
+               10  FILLER REDEFINES CR-PREV-DTL-KEY.                    01510000
+                   15  CR-LOC-NBR           PIC S9(04) COMP.            00961000
+                   15  CR-SKU-NBR           PIC S9(08) COMP-3.          00961000
+               10  CR-INPUT-READ-COUNT      PIC  9(09) VALUE ZEROES.    01560000
+               10  CR-UPDATE-COUNT          PIC  9(09) VALUE ZEROES.    01560000
+               10  CR-INSERT-COUNT          PIC  9(09) VALUE ZEROES.    01560000
+L27808         10  CR-DELETE-COUNT          PIC  9(09) VALUE ZEROES.    01560000
+                                                                        01570000
+       01  CK-CHECKPOINT-SAVE-AREA.                                     01580000
+           05  CK-SAVE-PREV-KEY         PIC  X(07) VALUE SPACES.        01590000
+           05  FILLER REDEFINES CK-SAVE-PREV-KEY.                       01600000
+               10  CK-LOC-NBR           PIC S9(04) COMP.                01610000
+               10  CK-SKU-NBR           PIC S9(08) COMP-3.              01620000
+                                                                        01650000
+W29225******************************************************************        
+W29225*   STANDARD REPORT HEADER FOR A 200 COLUMN REPORT.                       
+W29225******************************************************************        
+W29225     COPY DPWS200O.                                                       
+W29225                                                                          
+W29225 01  HL-HEADING-LINE1.                                                    
+W29225     05  FILLER                        PIC X(01)   VALUE SPACES.          
+W29225     05  FILLER                        PIC X(80)   VALUE SPACES.          
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '   CUTOFF DATABASE MAIN UPDATE AUDIT    '.                      
+W29225     05  FILLER                        PIC X(80)   VALUE SPACES.          
+W29225                                                                          
+W29225 01  HL-HEADING-LINE2.                                                    
+W29225     05  FILLER                        PIC X(01)   VALUE SPACES.          
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '                                        '.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '                                     POS'.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         'T            OLD     OLD     OLD        '.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '                                        '.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '                                        '.                      
+W29225                                                                          
+W29225 01  HL-HEADING-LINE3.                                                    
+W29225     05  FILLER                        PIC X(01)   VALUE SPACES.          
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '                                        '.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '                     CTOFF   IN TRNS FLS'.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         'H    STR     CTOFF   IN TRNS EXP OH     '.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '                                        '.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '                                        '.                      
+W29225                                                                          
+W29225 01  HL-HEADING-LINE4.                                                    
+W29225     05  FILLER                        PIC X(01)   VALUE SPACES.          
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '                                        '.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '                     OH      CTOFF   RCP'.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         'T    EXP OH  OH      CTOFF   OH         '.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '                                        '.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '                                        '.                      
+W29225                                                                          
+W29225 01  HL-HEADING-LINE5.                                                    
+W29225     05  FILLER                        PIC X(01)   VALUE SPACES.          
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         ' LOC   SKU      ACTION         TABLE    '.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '                     QTY     QTY     QTY'.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '     QTY     QTY     QTY     QTY     DES'.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         'CRIPTION                                '.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '                                        '.                      
+W29225                                                                          
+W29225 01  HL-HEADING-LINE6.                                                    
+W29225     05  FILLER                        PIC X(01)   VALUE SPACES.          
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         ' _____ ________ ______________ _________'.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '____________________ _______ _______ ___'.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '____ _______ _______ _______ _______ ___'.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '________________________________________'.                      
+W29225     05  FILLER                        PIC X(40)   VALUE                  
+W29225         '________________________________________'.                      
+W29225                                                                          
+W29225 01  SL-SPACE-LINE                     PIC X(200)  VALUE SPACES.          
+W29225                                                                          
+W29225 01  DL-DETAIL-LINE.                                                      
+W29225     05  FILLER                        PIC X(02)   VALUE SPACE.           
+W29225     05  DL-LOC                        PIC Z(05)   VALUE ZEROES.          
+W29225     05  FILLER                        PIC X(01)   VALUE SPACE.           
+W29225     05  DL-SKU                        PIC X(08)   VALUE ZEROES.          
+W29225     05  FILLER                        PIC X(01)   VALUE SPACE.           
+W29225     05  DL-ACTION                     PIC X(08)   VALUE ZEROES.          
+W29225     05  FILLER                        PIC X(01)   VALUE SPACE.           
+W29225     05  FILLER                        PIC X(04)   VALUE 'FROM'.          
+W29225     05  FILLER                        PIC X(01)   VALUE SPACE.           
+W29225     05  DL-TABLE                      PIC X(30)   VALUE ZEROES.          
+W29225     05  FILLER                        PIC X(01)   VALUE SPACE.           
+W29225     05  DL-CTOFF-OH-QTY               PIC ZZZZZ9- VALUE ZEROES.          
+W29225     05  FILLER                        PIC X(01)   VALUE SPACE.           
+W29225     05  DL-IN-TRNST-CTOFF-QTY         PIC ZZZZZ9- VALUE ZEROES.          
+W29225     05  FILLER                        PIC X(01)   VALUE SPACE.           
+W29225     05  DL-POST-FSH-RCPT-QTY          PIC ZZZZZ9- VALUE ZEROES.          
+W29225     05  FILLER                        PIC X(01)   VALUE SPACE.           
+W29225     05  DL-STR-EXPTED-OH-QTY          PIC ZZZZZ9- VALUE ZEROES.          
+W29225     05  FILLER                        PIC X(01)   VALUE SPACE.           
+W29225     05  DL-OLD-CTOFF-OH-QTY           PIC ZZZZZ9- VALUE ZEROES.          
+W29225     05  FILLER                        PIC X(01)   VALUE SPACE.           
+W29225     05  DL-OLD-IN-TRNST-CTOFF-QTY     PIC ZZZZZ9- VALUE ZEROES.          
+W29225     05  FILLER                        PIC X(01)   VALUE SPACE.           
+W29225     05  DL-OLD-STR-EXPTED-OH-QTY      PIC ZZZZZ9- VALUE ZEROES.          
+W29225     05  FILLER                        PIC X(01)   VALUE SPACE.           
+W29225     05  DL-DESC                       PIC X(83)   VALUE SPACE.           
+W29225                                                                          
+W29225 01  RUN-TIME.                                                            
+W29225     05  R-HR                          PIC 99.                            
+W29225     05  R-MIN                         PIC 99.                            
+W29225     05  R-SEC                         PIC 99.                            
+W29225     05  R-TH                          PIC 99.                            
+W29225                                                                          
+W29225 01  DATE-IN.                                                             
+W29225     05 DATE-IN-YY                     PIC XX.                            
+W29225     05 DATE-IN-MM                     PIC XX.                            
+W29225     05 DATE-IN-DD                     PIC XX.                            
+                                                                                
+      ******************************************************************01090000
+      * INDR050 - CUTOFF DATABASE CONSOLIDATED EXTRACT COPYBOOK         01100000
+      ******************************************************************01110000
+           COPY INRD050.                                                01120000
+                                                                        01130000
+      ******************************************************************01140000
+      *  DB2 ERROR MESSAGES FORMAT AREA.                                01150000
+      ******************************************************************01160000
+           COPY DPWS004.                                                01170000
+                                                                        01180000
+      ******************************************************************01190000
+      *  USED FOR DB2 ERRORS                                            01200000
+      ******************************************************************01210000
+           EXEC SQL                                                     01220000
+               INCLUDE SQLCA                                            01230000
+           END-EXEC.                                                    01240000
+                                                                        01250000
+      ******************************************************************01260000
+      *  INVENTORY CUTOFF TABLE                                         01270000
+      ******************************************************************01280000
+           EXEC SQL                                                     01290000
+               INCLUDE INT00000                                         01300000
+           END-EXEC.                                                    01310000
+                                                                        01320000
+      ******************************************************************        
+      *  LAYOUT USED FOR INVENTORY PARMS TABLE                                  
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TINVPAR                                                  
+           END-EXEC.                                                            
+28545                                                                           
+28545 *****************************************************************         
+28545 * TINCNTL DCLGEN                                                          
+28545 *****************************************************************         
+28545      EXEC SQL                                                             
+28545          INCLUDE TINCNTL                                                  
+28545      END-EXEC.                                                            
+                                                                                
+W29225******************************************************************        
+W29225*  SKU CROSS REFERENCE TABLE                                              
+W29225******************************************************************        
+W29225     EXEC SQL                                                             
+W29225         INCLUDE TSKXREF                                                  
+W29225     END-EXEC.                                                            
+W29225                                                                          
+      ***************************************************************** 01330000
+      * DB2 CHECKPOINT RESTART CONTROL TABLE AND RESTART INFO TABLE     01340000
+      ***************************************************************** 01350000
+           EXEC SQL                                                     01360000
+               INCLUDE TCKRSTCN                                         01370000
+           END-EXEC.                                                    01380000
+                                                                        01390000
+           EXEC SQL                                                     01400000
+               INCLUDE TCKRSTIN                                         01410000
+           END-EXEC.                                                    01420000
+                                                                        01462000
+      ******************************************************************        
+      *  SQL DB2 TINVPAR CURSOR DECLARATION                                     
+      ******************************************************************        
+           EXEC SQL                                                             
+               DECLARE TINVPAR_CSR CURSOR FOR                                   
+                   SELECT ACTL_DC_CTOFF_DTE                                 0291
+                         ,PLND_INV_DTE                                          
+                         ,MFSTNG_IND                                            
+28545              FROM TINVPAR A                                               
+28545                  ,TINCNTL B                                               
+                   WHERE LOC_NBR           = :INVPAR-LOC-NBR                0312
+                     AND ACTL_FIN_BK_DTE   = '9999-09-09'                   0313
+                     AND PLND_INV_DTE     >= :IN050-PROCESS-DATE            0314
+W33304               AND SCHD_PHY_CNT_CDE IN ('PI','NS','CL')               0315
+28545                AND A.INV_ID = B.INV_ID                                    
+28545                AND B.ACTV_IND = 'Y'                                       
+W33304               AND A.LOC_INV_STAT_CDE = 'IN'                              
+                   ORDER BY PLND_INV_DTE                                        
+           END-EXEC.                                                            
+                                                                                
+      *-------------------*                                             01660000
+       PROCEDURE DIVISION.                                              01670000
+      *-------------------*                                             01680000
+                                                                        01690000
+       0000-INKUP010.                                                   01700000
+                                                                        01710000
+           PERFORM 1000-INITIALIZATION.                                 01720000
+                                                                        01730000
+           PERFORM 2000-PROCESS-INPUT                                   01740000
+                UNTIL PS-EOF-CUTOFF-UPDATES-FILE.                       01750000
+                                                                        01760000
+           PERFORM 8000-EOJ-ROUTINE.                                    01770000
+                                                                        01780000
+           STOP RUN.                                                    01790000
+                                                                        01800000
+      ******************************************************************01810000
+      * OPEN INPUT FILE , INITIALIZE COUNTERS , READ FIRST INPUT RECORD 01820000
+      * PREPARE CHECKPOINT RESTART TABLES FOR PROCESSING / RESTART      01830000
+      ******************************************************************01840000
+                                                                        01850000
+       1000-INITIALIZATION.                                             01860000
+                                                                        01870000
+           OPEN INPUT CC-JOBNAME-CNTL-FILE                              01880000
+                      CUTOFF-UPDATES-FILE.                              01880000
+W29225     OPEN OUTPUT REPORT-AUDIT-FILE.                                       
+                                                                        01890000
+W29225     PERFORM 1100-INITIALIZE-HEADER.                                      
+W29225                                                                          
+           PERFORM 4000-READ-PROCESS-JOB-NAME.                                  
+                                                                                
+           DISPLAY ' '.                                                         
+           DISPLAY ' PROCESSING JOB NAME: ' PV-PROCESS-JOB-NAME.                
+                                                                                
+           IF PV-PROCESS-JOB-NAME = SPACES                                      
+               MOVE +4002                 TO ABEND-CODE                         
+               DISPLAY '**  ABEND     **'                                       
+               DISPLAY '**  PROGRAM   **  =  INKUP010'                          
+               DISPLAY '**  INVALID PROCESSING JOB NAME'                        
+               CALL 'ILBOABN0'  USING ABEND-CODE                                
+           END-IF.                                                              
+                                                                                
+           CLOSE CC-JOBNAME-CNTL-FILE.                                  06861000
+                                                                        01890000
+           PERFORM 7400-INIT-CHECKPOINT-SELECT.                         01900000
+                                                                        01910000
+      * CKPT-STAT-CODE = '9' INDICATES A RESTART CONDITION              01920000
+           IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                           01930000
+                PERFORM 7500-SELECT-RESTART-INFO                        01940000
+                MOVE TCKRSTINF-WORK-STRG-DESC-TEXT TO                   01950000
+                                             CR-CHECKPOINT-RESTART-VAR  01960000
+                MOVE CR-PREV-DTL-KEY          TO CK-SAVE-PREV-KEY       01970000
+                MOVE CR-UPDATE-COUNT          TO PA-UPDATE-COUNT        01970000
+L27808          MOVE CR-DELETE-COUNT          TO PA-DELETE-COUNT        01970000
+                MOVE CR-INSERT-COUNT          TO PA-INSERT-COUNT        01970000
+           ELSE                                                         01980000
+               SET PS-FIRST-COMMIT TO TRUE                              01990000
+               INITIALIZE CR-CHECKPOINT-RESTART-VAR                     02000000
+           END-IF.                                                      02010000
+                                                                        02020000
+           PERFORM 4100-READ-CUTOFF-UPDATES-FILE UNTIL                  02030000
+              (PA-INPUT-COUNT > CR-INPUT-READ-COUNT)                    02040000
+               OR                                                       02050000
+               PS-EOF-CUTOFF-UPDATES-FILE.                              02051000
+                                                                        02060000
+           IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                           02061000
+               DISPLAY '** RESTART RUN **'                              06720800
+               DISPLAY 'LOCATION NUMBER: ' IN050-LOC-NBR                06720800
+               DISPLAY 'SKU NUMBER:      ' IN050-SKU-NBR                06720900
+               DISPLAY 'INPUT RECORD RESTARTED ON RECORD '              02067000
+                        PA-INPUT-COUNT                                  02068000
+           END-IF.                                                      02069000
+                                                                        02069100
+           IF PS-EOF-CUTOFF-UPDATES-FILE                                02070000
+               IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                       02071000
+                   CONTINUE                                             02072000
+               ELSE                                                     02073000
+                   DISPLAY '** NO RECORDS ON INPUT FILE **'             02080000
+           ELSE                                                         02090000
+               PERFORM 7300-GET-COMMIT-TIMESTAMP                        02100000
+               DISPLAY 'COMMITS WILL BE TAKEN EVERY ',                  02110000
+                    TCKRSTCNTL-CKPT-FRQNCY-QTY, ' SECONDS.'             02120000
+           END-IF.                                                      02130000
+                                                                        02140000
+W29225 1100-INITIALIZE-HEADER.                                                  
+W29225                                                                          
+W29225****************************************************************          
+W29225*    SET UP THE STANDARD PAGE HEADER.                                     
+W29225*    ACCEPT THE RUN DATE AND RUN TIME FROM THE SYSTEM.                    
+W29225****************************************************************          
+W29225     ACCEPT DATE-IN  FROM DATE.                                           
+W29225     ACCEPT RUN-TIME FROM TIME.                                           
+W29225     MOVE DATE-IN-MM TO DP200O-RUN-MONTH.                                 
+W29225     MOVE DATE-IN-DD TO DP200O-RUN-DAY.                                   
+W29225     MOVE DATE-IN-YY TO DP200O-RUN-YEAR.                                  
+W29225     MOVE R-HR       TO DP200O-RUN-HOUR.                                  
+W29225     MOVE R-MIN      TO DP200O-RUN-MINUTE.                                
+W29225     MOVE PC-PROGRAM-NAME TO DP200O-PROGRAM-NAME.                         
+W29225     MOVE 1               TO DP200O-REPORT-NUMBER.                        
+W29225                                                                          
+      ******************************************************************02150000
+      * PROCESS THE SORTED/CONDENSED FILE - UPDATE OR INSERT AS NEEDED  02160000
+      ******************************************************************02170000
+       2000-PROCESS-INPUT.                                              02180000
+                                                                        02190000
+           MOVE 'N' TO PS-DEADLOCK-RESTART-SW.                          02200000
+                                                                        02210000
+           IF IN050-LOC-NBR NOT EQUAL SV-LOC-NBR                        02231000
+               PERFORM 7000-PROCESS-TINVPAR                             02220000
+           END-IF.                                                      02331000
+                                                                        02210000
+           IF PS-PROGRAM-DEADLOCKED                                     02231000
+               CONTINUE                                                 02232000
+           ELSE                                                         02233000
+L27808         EVALUATE TRUE                                                    
+L27808             WHEN IN050-ITEM-CTOFF-NOT-TAKEN                              
+L27808                 PERFORM 7200-INSERT-INV-CTOFF-ROW                    0226
+L27808             WHEN IN050-ITEM-CTOFF-TAKEN                                  
+L27808                 PERFORM 7100-UPDATE-INV-CTOFF-ROW                    0226
+W29225                 PERFORM 2100-CHECK-INSERT-CTOFF-TAKEN                    
+L27808             WHEN IN050-ITEM-CTOFF-EXISTS                                 
+W29225                 IF IN050-STR-EXPTED-OH-QTY = ZEROES                      
+W29225                     PERFORM 7150-DELETE-INV-CTOFF-ROW                    
+W29225                     PERFORM 6100-AUDIT-DELETE                            
+W29225                 ELSE                                                     
+W29225                     PERFORM 7100-UPDATE-INV-CTOFF-ROW                    
+W29225                     PERFORM 2200-CHECK-INSERT-CTOFF-EXISTS               
+L27808                 END-IF                                                   
+L27808             WHEN OTHER                                                   
+L27808                 MOVE +4001 TO ABEND-CODE                                 
+L27808                 DISPLAY '**  ABEND     **'                               
+L27808                 DISPLAY '**  PROGRAM   **  =  INKUP010'                  
+L27808                 DISPLAY '**  INVALID RECORD TYPE'                        
+L27808                 DISPLAY '**  INPUT RECORD: '                             
+L27808                       IN050-CTOFF-CON-EXTR-RECORD                        
+L27808                 CALL 'ILBOABN0' USING ABEND-CODE                         
+L27808         END-EVALUATE                                             02331000
+           END-IF.                                                      02331000
+                                                                        02340000
+           IF PS-PROGRAM-DEADLOCKED                                     02350000
+               CONTINUE                                                 02360000
+           ELSE                                                         02370000
+               PERFORM 7700-COMMIT-PROCESSING                           02380000
+               MOVE IN050-LOC-NBR TO SV-LOC-NBR                                 
+               PERFORM 4100-READ-CUTOFF-UPDATES-FILE                    02390000
+           END-IF.                                                      02401000
+                                                                        02410000
+W29225******************************************************************02700000
+W29225* READS THE PROCESSING JOB NAME CONTROL CARD FILE.                02710000
+W29225******************************************************************02720000
+W29225 2100-CHECK-INSERT-CTOFF-TAKEN.                                           
+W29225                                                                          
+W29225                                                                          
+W29225*    THIS SQLCODE COMES FROM 7100-UPDATE-INV-CTOFF-ROW WHEN               
+W29225*    THE ROW IS NOT FOUND                                                 
+W29225     IF SQLCODE = +100                                                    
+W29225        PERFORM 6300-VALIDATE-SKU-TSKXREF                                 
+W29225        IF PS-TSKXREF-FOUND                                               
+W29225           PERFORM 7200-INSERT-INV-CTOFF-ROW                              
+W29225           MOVE PC-INS-CTOFF-TAKEN       TO DL-DESC                       
+W29225           MOVE 'INSERT  '               TO DL-ACTION                     
+W29225           MOVE 'INT_INV_CTOFF'          TO DL-TABLE                      
+W29225           PERFORM 6200-AUDIT-INSERT                                      
+W29225           ADD 1 TO PA-UPDT-INS-COUNT                             03591000
+W29225           DISPLAY '**  INT_INV_CTOFF NOT '                       03621000
+W29225                'FOUND FOR LOCATION: '                            03621000
+W29225                 INT00000-LOC-NBR ' SKU: ' INT00000-SKU-NBR               
+W29225        ELSE                                                              
+W29225           MOVE PC-SKU-NOT-FOUND         TO DL-DESC                       
+W29225           MOVE 'NONE    '               TO DL-ACTION                     
+W29225           MOVE 'NA           '          TO DL-TABLE                      
+W29225           PERFORM 6200-AUDIT-INSERT                                      
+W29225           DISPLAY '**  SKU: ' IN050-SKU-NBR ' NOT VALID'                 
+W29225        END-IF                                                            
+W29225     END-IF.                                                              
+W29225                                                                          
+W29225******************************************************************02700000
+W29225* READS THE PROCESSING JOB NAME CONTROL CARD FILE.                02710000
+W29225******************************************************************02720000
+W29225 2200-CHECK-INSERT-CTOFF-EXISTS.                                          
+W29225                                                                          
+W29225*    THIS SQLCODE COMES FROM 7100-UPDATE-INV-CTOFF-ROW WHEN               
+W29225*    THE ROW IS NOT FOUND                                                 
+W29225     IF SQLCODE = +100                                                    
+W29225        PERFORM 6300-VALIDATE-SKU-TSKXREF                                 
+W29225        IF PS-TSKXREF-FOUND                                               
+W29225           PERFORM 7200-INSERT-INV-CTOFF-ROW                              
+W29225           MOVE PC-INS-CTOFF-EXISTS     TO DL-DESC                        
+W29225           MOVE 'INSERT  '              TO DL-ACTION                      
+W29225           MOVE 'INT_INV_CTOFF'         TO DL-TABLE                       
+W29225           PERFORM 6200-AUDIT-INSERT                                      
+W29225           ADD 1 TO PA-UPDT-INS-COUNT                             03591000
+W29225           DISPLAY '**  INT_INV_CTOFF NOT '                       03621000
+W29225                'FOUND FOR LOCATION: '                            03621000
+W29225                 INT00000-LOC-NBR ' SKU: ' INT00000-SKU-NBR               
+W29225        ELSE                                                              
+W29225           MOVE PC-SKU-NOT-FOUND         TO DL-DESC                       
+W29225           MOVE 'NONE    '               TO DL-ACTION                     
+W29225           MOVE 'NA           '          TO DL-TABLE                      
+W29225           PERFORM 6200-AUDIT-INSERT                                      
+W29225           DISPLAY '**  SKU: ' IN050-SKU-NBR ' NOT VALID'                 
+W29225        END-IF                                                            
+W29225     END-IF.                                                              
+W29225                                                                          
+      ******************************************************************02700000
+      * READS THE PROCESSING JOB NAME CONTROL CARD FILE.                02710000
+      ******************************************************************02720000
+       4000-READ-PROCESS-JOB-NAME.                                      02730000
+           READ CC-JOBNAME-CNTL-FILE INTO PV-PROCESS-JOB-NAME-CC        02740000
+               AT END                                                   02750000
+                   MOVE +4003                 TO ABEND-CODE                     
+                   DISPLAY '**  ABEND     **'                                   
+                   DISPLAY '**  PROGRAM   **  =  INKUP010'                      
+                   DISPLAY '**  EMPTY PROCESSING JOB NAME CONTROL CARD'         
+                   CALL 'ILBOABN0'  USING ABEND-CODE.                           
+                                                                        02770000
+      ******************************************************************02700000
+      * READS THE CUTOFF UPDATES FILE INTO THE INRD050 LAYOUT           02710000
+      ******************************************************************02720000
+       4100-READ-CUTOFF-UPDATES-FILE.                                   02730000
+           READ CUTOFF-UPDATES-FILE INTO IN050-CTOFF-CON-EXTR-RECORD    02740000
+              AT END                                                    02750000
+                MOVE 'Y' TO PS-EOF-CUTOFF-UPDATES-FILE-SW.              02760000
+                                                                        02770000
+           IF PS-EOF-CUTOFF-UPDATES-FILE                                02780000
+               MOVE IN050-LOC-NBR             TO CR-LOC-NBR             02790000
+               MOVE IN050-SKU-NBR             TO CR-SKU-NBR             02791000
+               MOVE PA-INPUT-COUNT            TO CR-INPUT-READ-COUNT    02795000
+               MOVE PA-UPDATE-COUNT           TO CR-UPDATE-COUNT        02795000
+L27808         MOVE PA-DELETE-COUNT           TO CR-DELETE-COUNT        02795000
+               MOVE PA-INSERT-COUNT           TO CR-INSERT-COUNT        02795000
+      *        MOVE COMMIT INFO TO WORKING STORAGE ROW                  02796000
+               MOVE CR-CHECKPOINT-RESTART-AREA TO                       02797000
+                                             TCKRSTINF-WORK-STRG-DESC   02798000
+               EXEC SQL                                                 02799000
+                 UPDATE TCKRSTINF                                       02799100
+                    SET WORK_STRG_DESC = :TCKRSTINF-WORK-STRG-DESC      02799200
+                  WHERE JOB_NAME   = :PV-PROCESS-JOB-NAME               02799300
+                    AND PLAN_NAME  = :PC-PROGRAM-NAME                   02799400
+               END-EXEC                                                 02799500
+               IF SQLCODE = 0                                           02799700
+                   CONTINUE                                             02799800
+               ELSE                                                     02799900
+                   MOVE PE-MSG-04            TO PV-OPERATION-ATTEMPTED  02800000
+                   MOVE '* 4100-READ-CUTOFF-UPDATES-FILE *' TO          02800100
+                        PV-PARAGRAPH-NAME                               02800200
+                   PERFORM 9999-SQL-ABEND                               02800300
+               END-IF                                                   02800400
+           ELSE                                                         02801000
+               ADD 1                         TO PA-INPUT-COUNT          02810000
+           END-IF.                                                      02820000
+                                                                        02830000
+W29225 6000-PRINT-DETAIL-LINE.                                                  
+W29225****************************************************************          
+W29225*    PRINT DETAIL LINE.                                                   
+W29225*                                                                         
+W29225*    PERFORMED BY 2000-PROCESS.                                           
+W29225****************************************************************          
+W29225                                                                          
+W29225     IF PV-LINE-COUNTER >= PC-LINE-MAX                                    
+W29225        PERFORM 6010-PRINT-HEADERS.                                       
+W29225     WRITE REPORT-AUDIT-RECORD                                            
+W29225         FROM DL-DETAIL-LINE                                              
+W29225         AFTER ADVANCING 1 LINE.                                          
+W29225     ADD 1 TO PV-LINE-COUNTER.                                            
+W29225                                                                          
+W29225     EJECT                                                                
+W29225                                                                          
+W29225 6010-PRINT-HEADERS.                                                      
+W29225                                                                          
+W29225****************************************************************          
+W29225*    PRINT THE PAGE HEADERS.                                              
+W29225*                                                                         
+W29225*    PERFORMED BY 6000-DETAIL-PRINT-LINE                                  
+W29225****************************************************************          
+W29225                                                                          
+W29225     ADD  1               TO PV-PAGE-COUNTER.                             
+W29225                                                                          
+W29225     MOVE PV-PAGE-COUNTER TO DP200O-PAGE-NUMBER.                          
+W29225                                                                          
+W29225     WRITE REPORT-AUDIT-RECORD                                            
+W29225         FROM DP200O-STANDRD-HEADER-200-COLS                              
+W29225         AFTER ADVANCING PAGE.                                            
+W29225                                                                          
+W29225     WRITE REPORT-AUDIT-RECORD                                            
+W29225         FROM HL-HEADING-LINE1                                            
+W29225         AFTER ADVANCING 2 LINE.                                          
+W29225                                                                          
+W29225     WRITE REPORT-AUDIT-RECORD                                            
+W29225         FROM HL-HEADING-LINE2                                            
+W29225         AFTER ADVANCING 1 LINE.                                          
+W29225                                                                          
+W29225     WRITE REPORT-AUDIT-RECORD                                            
+W29225         FROM HL-HEADING-LINE3                                            
+W29225         AFTER ADVANCING 1 LINE.                                          
+W29225                                                                          
+W29225     WRITE REPORT-AUDIT-RECORD                                            
+W29225         FROM HL-HEADING-LINE4                                            
+W29225         AFTER ADVANCING 1 LINE.                                          
+W29225                                                                          
+W29225     WRITE REPORT-AUDIT-RECORD                                            
+W29225         FROM HL-HEADING-LINE5                                            
+W29225         AFTER ADVANCING 1 LINE.                                          
+W29225                                                                          
+W29225     WRITE REPORT-AUDIT-RECORD                                            
+W29225         FROM HL-HEADING-LINE6                                            
+W29225         AFTER ADVANCING 1 LINE.                                          
+W29225                                                                          
+W29225     WRITE REPORT-AUDIT-RECORD                                            
+W29225         FROM SL-SPACE-LINE                                               
+W29225         AFTER ADVANCING 1 LINE.                                          
+W29225                                                                          
+W29225     MOVE 10 TO PV-LINE-COUNTER.                                          
+W29225                                                                          
+W29225     EJECT                                                                
+W29225                                                                          
+W29225******************************************************************02150000
+W29225* PROCESS THE SORTED/CONDENSED FILE - UPDATE OR INSERT AS NEEDED  02160000
+W29225******************************************************************02170000
+W29225 6100-AUDIT-DELETE.                                               02180000
+W29225                                                                  02190000
+W29225     MOVE IN050-LOC-NBR               TO DL-LOC.                          
+W29225     MOVE IN050-SKU-NBR               TO DL-SKU.                          
+W29225     MOVE 'DELETE  '                  TO DL-ACTION.                       
+W29225     MOVE 'INT_INV_CTOFF'             TO DL-TABLE.                        
+W29225     MOVE IN050-CTOFF-OH-QTY          TO DL-CTOFF-OH-QTY.                 
+W29225     MOVE IN050-IN-TRNST-CTOFF-QTY    TO DL-IN-TRNST-CTOFF-QTY.           
+W29225     MOVE IN050-POST-FSH-RCPT-QTY     TO DL-POST-FSH-RCPT-QTY.            
+W29225     MOVE IN050-STR-EXPTED-OH-QTY     TO DL-STR-EXPTED-OH-QTY.            
+W29225     MOVE IN050-OLD-CTOFF-OH-QTY      TO DL-OLD-CTOFF-OH-QTY.             
+W29225     MOVE IN050-OLD-IN-TRNST-CTOFF-QTY                                    
+W29225                                     TO DL-OLD-IN-TRNST-CTOFF-QTY.        
+W29225     MOVE IN050-OLD-STR-EXPTED-OH-QTY TO DL-OLD-STR-EXPTED-OH-QTY.        
+W29225     MOVE PC-DELETE-DESC              TO DL-DESC.                         
+W29225                                                                          
+W29225     PERFORM 6000-PRINT-DETAIL-LINE.                                      
+W29225                                                                          
+W29225******************************************************************02150000
+W29225* PROCESS THE SORTED/CONDENSED FILE - UPDATE OR INSERT AS NEEDED  02160000
+W29225******************************************************************02170000
+W29225 6200-AUDIT-INSERT.                                               02180000
+W29225                                                                  02190000
+W29225     MOVE IN050-LOC-NBR               TO DL-LOC.                          
+W29225     MOVE IN050-SKU-NBR               TO DL-SKU.                          
+W29225     MOVE IN050-CTOFF-OH-QTY          TO DL-CTOFF-OH-QTY.                 
+W29225     MOVE IN050-IN-TRNST-CTOFF-QTY    TO DL-IN-TRNST-CTOFF-QTY.           
+W29225     MOVE IN050-POST-FSH-RCPT-QTY     TO DL-POST-FSH-RCPT-QTY.            
+W29225     MOVE IN050-STR-EXPTED-OH-QTY     TO DL-STR-EXPTED-OH-QTY.            
+W29225     MOVE IN050-OLD-CTOFF-OH-QTY      TO DL-OLD-CTOFF-OH-QTY.             
+W29225     MOVE IN050-OLD-IN-TRNST-CTOFF-QTY                                    
+W29225                                     TO DL-OLD-IN-TRNST-CTOFF-QTY.        
+W29225     MOVE IN050-OLD-STR-EXPTED-OH-QTY TO DL-OLD-STR-EXPTED-OH-QTY.        
+W29225                                                                          
+W29225     PERFORM 6000-PRINT-DETAIL-LINE.                                      
+W29225                                                                          
+W29225******************************************************************02150000
+W29225* VALIDATE THE SKU FOR THE COMPANY                                02160000
+W29225******************************************************************02170000
+W29225 6300-VALIDATE-SKU-TSKXREF.                                       02180000
+W29225                                                                  02190000
+W29225     MOVE IN050-SKU-NBR               TO SKXREF-SKU                       
+W29225                                                                  02190000
+W29225     PERFORM WITH TEST AFTER                                      02190000
+W29225         VARYING PV-SQL-SUB FROM 1 BY 1                           02190000
+W29225         UNTIL  (PV-SQL-SUB > PC-MAX-DEADLOCKS                    02190000
+W29225            OR   SQLCODE = 0                                      02190000
+W29225            OR   SQLCODE = +100)                                  02190000
+W29225                                                                  02190000
+W29225         EXEC SQL                                                 02190000
+W29225             SELECT 1                                             02190000
+W29225             INTO :PV-EXISTS                                      02190000
+W29225              FROM TSKXREF                                        02190000
+W29225             WHERE SKU = :SKXREF-SKU                              02190000
+W29225             WITH UR                                              02190000
+W29225         END-EXEC                                                 02190000
+W29225                                                                  02190000
+W29225         EVALUATE TRUE                                            02190000
+W29225             WHEN SQLCODE = +100                                  02190000
+W29225                 SET PS-TSKXREF-NOT-FOUND TO TRUE                 02190000
+W29225                 DISPLAY ' TSKXREF SKU NOT FOUND: '               02190000
+W29225                       SKXREF-ITM-NBR                             02190000
+W29225             WHEN SQLCODE = 0                                     02190000
+W29225                 SET PS-TSKXREF-FOUND TO TRUE                     02190000
+W29225             WHEN SQLCODE = -904                                  02190000
+W29225             WHEN SQLCODE = -913                                  02190000
+W29225                 CONTINUE                                         02190000
+W29225             WHEN SQLWARN NOT = SPACES                            02190000
+W29225             WHEN SQLCODE NOT = ZERO                              02190000
+W29225                 MOVE '6300-VALIDATE-SKU-TSKXREF'                 02190000
+W29225                     TO PV-PARAGRAPH-NAME                         02190000
+W29225                 MOVE PE-MSG-13 TO PV-OPERATION-ATTEMPTED                 
+W29225                 PERFORM 9999-SQL-ABEND                           02190000
+W29225         END-EVALUATE                                             02190000
+W29225     END-PERFORM.                                                 02190000
+W29225                                                                  02190000
+W29225     IF  PV-SQL-SUB > PC-MAX-DEADLOCKS                            02190000
+W29225         MOVE '3000-SELECT-FROM-TSKXREF' TO PV-PARAGRAPH-NAME     02190000
+W29225         MOVE PE-MSG-14 TO PV-OPERATION-ATTEMPTED                         
+W29225         PERFORM 9999-SQL-ABEND                                   02190000
+W29225     END-IF.                                                      02190000
+W29225                                                                  02190000
+W29225                                                                          
+      ***************************************************************** 03300000
+      * SELECT TINVPAR DC CUTOFF DATE FOR THE INPUT STORE.              03310000
+      ***************************************************************** 03330000
+       7000-PROCESS-TINVPAR.                                            03350000
+                                                                        03360000
+           MOVE IN050-LOC-NBR         TO INVPAR-LOC-NBR.                03151000
+                                                                        02890000
+           PERFORM 7010-OPEN-TINVPAR-CSR.                                       
+                                                                                
+           PERFORM 7020-FETCH-TINVPAR-CSR.                                      
+                                                                                
+           PERFORM 7030-CLOSE-TINVPAR-CSR.                                      
+                                                                        03290000
+      ******************************************************************        
+      *    OPEN INVENTORY PARAMETER CURSOR                                      
+      ******************************************************************        
+       7010-OPEN-TINVPAR-CSR.                                                   
+                                                                                
+           EXEC SQL                                                             
+               OPEN TINVPAR_CSR                                                 
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE SQLCODE                                                     
+               WHEN +0                                                          
+                   CONTINUE                                                     
+               WHEN OTHER                                                       
+                   MOVE '7010-OPEN-TINVPAR-CSR' TO PV-PARAGRAPH-NAME    03240000
+                   MOVE PE-MSG-09 TO PV-OPERATION-ATTEMPTED             03250000
+                   PERFORM 9999-SQL-ABEND                               03260000
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *    FETCH INVENTORY PARAMETER CURSOR                                     
+      ******************************************************************        
+       7020-FETCH-TINVPAR-CSR.                                                  
+                                                                                
+           EXEC SQL                                                             
+               FETCH TINVPAR_CSR                                                
+               INTO :INVPAR-ACTL-DC-CTOFF-DTE                                   
+                   ,:INVPAR-PLND-INV-DTE                                        
+                   ,:INVPAR-MFSTNG-IND                                          
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE SQLCODE                                             03580000
+               WHEN 0                                                   03590000
+                   CONTINUE                                             03591000
+               WHEN +100                                                03590000
+                   DISPLAY '**  TINVPAR FETCH FOR LOCATION: '           03621000
+                         INVPAR-LOC-NBR                                         
+                   MOVE '7020-FETCH-TINVPAR-CSR'                        03640000
+                                      TO PV-PARAGRAPH-NAME              03650000
+                   MOVE PE-MSG-07     TO PV-OPERATION-ATTEMPTED         03720000
+                   PERFORM 9999-SQL-ABEND                               03730000
+               WHEN -911                                                03610000
+                   ADD +1             TO PV-DEADLOCK-COUNT              03620000
+                   DISPLAY 'DEADLOCK -911 IN 7020-FETCH-TINVPAR-CSR'    03621000
+                   IF PV-DEADLOCK-COUNT > PC-MAX-DEADLOCKS              03630000
+                       MOVE '7020-FETCH-TINVPAR-CSR'                    03640000
+                                      TO PV-PARAGRAPH-NAME              03650000
+                       MOVE PE-MSG-08 TO PV-OPERATION-ATTEMPTED         03651000
+                       PERFORM 9000-DEADLOCK-ERROR                      03660000
+                   ELSE                                                 03670000
+                       PERFORM 7999-RESTART-PROCESS                     03680000
+                   END-IF                                               03690000
+               WHEN OTHER                                               03700000
+                   MOVE '7020-FETCH-TINVPAR-CSR'                        03640000
+                                      TO PV-PARAGRAPH-NAME              03650000
+                   MOVE PE-MSG-08     TO PV-OPERATION-ATTEMPTED         03720000
+                   PERFORM 9999-SQL-ABEND                               03730000
+           END-EVALUATE.                                                03740000
+                                                                                
+      ******************************************************************        
+      *    CLOSE INVENTORY PARAMETER CURSOR                                     
+      ******************************************************************        
+       7030-CLOSE-TINVPAR-CSR.                                                  
+                                                                                
+           EXEC SQL                                                             
+               CLOSE TINVPAR_CSR                                                
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE SQLCODE                                                     
+               WHEN +0                                                          
+                   CONTINUE                                                     
+               WHEN OTHER                                                       
+                   MOVE '7030-CLOSE-TINVPAR-CSR' TO PV-PARAGRAPH-NAME   03240000
+                   MOVE PE-MSG-10 TO PV-OPERATION-ATTEMPTED             03250000
+                   PERFORM 9999-SQL-ABEND                               03260000
+           END-EVALUATE.                                                        
+                                                                                
+      ***************************************************************** 03300000
+      * UPDATE THE INVENTORY CUTOFF TABLE ROW WITH NEW COUNTS.          03310000
+      ***************************************************************** 03330000
+       7100-UPDATE-INV-CTOFF-ROW.                                       03350000
+                                                                        03360000
+           MOVE IN050-LOC-NBR            TO INT00000-LOC-NBR.           03520000
+           MOVE IN050-SKU-NBR            TO INT00000-SKU-NBR.           03530000
+           MOVE IN050-CTOFF-OH-QTY       TO INT00000-CTOFF-OH-QTY.      03530000
+           MOVE IN050-PROCESS-DATE       TO INT00000-LAST-UPD-DTE.      03551000
+           MOVE PC-PROGRAM-NAME          TO INT00000-LAST-UPD-BY-USR-ID.03551000
+                                                                        03390000
+           MOVE ZERO                     TO INT00000-IN-TRNST-CTOFF-QTY         
+                                            INT00000-POST-FSH-RCPT-QTY          
+                                            INT00000-STR-EXPTED-OH-QTY.         
+                                                                                
+           IF INVPAR-MFSTNG-IND = 'Y'                                           
+      * REPLACE THE VALUE ON THE INVENTORY DATE                                 
+               IF IN050-PROCESS-DATE = INVPAR-PLND-INV-DTE                      
+                   MOVE IN050-IN-TRNST-CTOFF-QTY                                
+                          TO INT00000-IN-TRNST-CTOFF-QTY                        
+                   MOVE IN050-STR-EXPTED-OH-QTY                                 
+                          TO INT00000-STR-EXPTED-OH-QTY                         
+               ELSE                                                             
+      * CARRY-FORWARD THE VALUE AFTER THE INVENTORY DATE                        
+                   IF IN050-PROCESS-DATE > INVPAR-PLND-INV-DTE                  
+                       MOVE IN050-OLD-IN-TRNST-CTOFF-QTY                        
+                              TO INT00000-IN-TRNST-CTOFF-QTY                    
+                       MOVE IN050-OLD-STR-EXPTED-OH-QTY                         
+                              TO INT00000-STR-EXPTED-OH-QTY                     
+                   END-IF                                                       
+               END-IF                                                           
+           ELSE                                                                 
+               IF IN050-PROCESS-DATE > INVPAR-ACTL-DC-CTOFF-DTE                 
+                   MOVE IN050-POST-FSH-RCPT-QTY                                 
+                          TO INT00000-POST-FSH-RCPT-QTY                         
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+           EXEC SQL                                                     03400000
+               UPDATE INT_INV_CTOFF                                     03410000
+                 SET CTOFF_OH_QTY        = :INT00000-CTOFF-OH-QTY       03421000
+                   , IN_TRNST_CTOFF_QTY  = :INT00000-IN-TRNST-CTOFF-QTY 03422000
+                   , POST_FSH_RCPT_QTY   = :INT00000-POST-FSH-RCPT-QTY  03423000
+                   , LAST_UPD_DTE        = :INT00000-LAST-UPD-DTE       03424000
+                   , LAST_UPD_BY_USR_ID  = :INT00000-LAST-UPD-BY-USR-ID 03425000
+                   , STR_EXPTED_OH_QTY   = :INT00000-STR-EXPTED-OH-QTY          
+               WHERE LOC_NBR             = :INT00000-LOC-NBR            03520000
+                 AND SKU_NBR             = :INT00000-SKU-NBR            03530000
+           END-EXEC                                                     03560000
+                                                                        03570000
+           EVALUATE SQLCODE                                             03580000
+               WHEN 0                                                   03590000
+                   ADD 1 TO PA-UPDATE-COUNT                             03591000
+               WHEN +100                                                03590000
+W29225*            PERFORM 7200-INSERT-INV-CTOFF-ROW                            
+W29225*            ADD 1 TO PA-UPDT-INS-COUNT                           03591000
+W29225*            DISPLAY '**  INT_INV_CTOFF NOT FOUND FOR LOCATION: ' 03621000
+W29225*                  INT00000-LOC-NBR ' SKU: ' INT00000-SKU-NBR             
+                   MOVE '7100-UPDATE-INV-CTOFF-ROW'                     03640000
+                                      TO PV-PARAGRAPH-NAME              03650000
+800497*           MOVE PE-MSG-01     TO PV-OPERATION-ATTEMPTED          03720000
+800497*           PERFORM 9999-SQL-ABEND                                03730000
+               WHEN -911                                                03610000
+                   ADD +1             TO PV-DEADLOCK-COUNT              03620000
+                   DISPLAY 'DEADLOCK -911 IN 7100-UPDATE-INV-CTOFF-ROW' 03621000
+                   IF PV-DEADLOCK-COUNT > PC-MAX-DEADLOCKS              03630000
+                       MOVE '7100-UPDATE-INV-CTOFF-ROW'                 03640000
+                                      TO PV-PARAGRAPH-NAME              03650000
+                       MOVE PE-MSG-02 TO PV-OPERATION-ATTEMPTED         03651000
+                       PERFORM 9000-DEADLOCK-ERROR                      03660000
+                   ELSE                                                 03670000
+                       PERFORM 7999-RESTART-PROCESS                     03680000
+                   END-IF                                               03690000
+               WHEN OTHER                                               03700000
+                   MOVE '7100-UPDATE-INV-CTOFF-ROW'                     03640000
+                                      TO PV-PARAGRAPH-NAME              03650000
+                   MOVE PE-MSG-02     TO PV-OPERATION-ATTEMPTED         03720000
+                   PERFORM 9999-SQL-ABEND                               03730000
+           END-EVALUATE.                                                03740000
+                                                                        03750000
+L27808*****************************************************************         
+L27808* DELETE THE INVENTORY CUTOFF TABLE ROW WITH NO FASHION ROW               
+L27808*****************************************************************         
+L27808 7150-DELETE-INV-CTOFF-ROW.                                               
+L27808                                                                          
+L27808     MOVE IN050-LOC-NBR        TO INT00000-LOC-NBR.                       
+L27808     MOVE IN050-SKU-NBR        TO INT00000-SKU-NBR.                       
+L27808                                                                          
+L27808     EXEC SQL                                                             
+L27808         DELETE                                                           
+L27808           FROM INT_INV_CTOFF                                             
+L27808           WHERE LOC_NBR           = :INT00000-LOC-NBR                    
+L27808             AND SKU_NBR           = :INT00000-SKU-NBR                    
+L27808     END-EXEC.                                                            
+L27808                                                                          
+L27808     EVALUATE SQLCODE                                                     
+L27808         WHEN 0                                                           
+L27808             ADD 1 TO PA-DELETE-COUNT                                     
+L27808         WHEN +100                                                        
+L27808             DISPLAY '**  NO ROW IS FOUND FOR DELETE ON'                  
+L27808                     ' LOCATION: ' INT00000-LOC-NBR                       
+L27808                     '  SKU: ' INT00000-SKU-NBR                           
+L27808         WHEN -911                                                        
+L27808         WHEN -913                                                        
+L27808             ADD +1             TO PV-DEADLOCK-COUNT                      
+L27808             DISPLAY 'DEADLOCK -911 IN 7150-DELETE-INV-CTOFF-ROW'         
+L27808             IF PV-DEADLOCK-COUNT > PC-MAX-DEADLOCKS                      
+L27808                 MOVE '7150-DELETE-INV-CTOFF-ROW'                         
+L27808                                TO PV-PARAGRAPH-NAME                      
+L27808                 MOVE PE-MSG-12 TO PV-OPERATION-ATTEMPTED                 
+L27808                 PERFORM 9000-DEADLOCK-ERROR                              
+L27808             ELSE                                                         
+L27808                 PERFORM 7999-RESTART-PROCESS                             
+L27808             END-IF                                                       
+L27808         WHEN OTHER                                                       
+L27808             MOVE '7150-DELETE-INV-CTOFF-ROW'                             
+L27808                                TO PV-PARAGRAPH-NAME                      
+L27808             MOVE PE-MSG-12     TO PV-OPERATION-ATTEMPTED                 
+L27808             PERFORM 9999-SQL-ABEND                                       
+L27808     END-EVALUATE.                                                        
+                                                                                
+      ***************************************************************** 03300000
+      * INSERT AN INVENTORY CUTOFF TABLE ROW WITH NEW COUNTS.           03310000
+      ***************************************************************** 03330000
+       7200-INSERT-INV-CTOFF-ROW.                                       03350000
+                                                                        03360000
+           MOVE IN050-LOC-NBR            TO INT00000-LOC-NBR.           03520000
+           MOVE IN050-SKU-NBR            TO INT00000-SKU-NBR.           03530000
+           MOVE IN050-CTOFF-OH-QTY       TO INT00000-CTOFF-OH-QTY.      03540000
+           MOVE IN050-PROCESS-DATE       TO INT00000-LAST-UPD-DTE.      03551000
+           MOVE PC-PROGRAM-NAME          TO INT00000-LAST-UPD-BY-USR-ID.03551000
+                                                                        03390000
+L27808     MOVE ZERO                     TO INT00000-IN-TRNST-CTOFF-QTY         
+L27808                                      INT00000-POST-FSH-RCPT-QTY          
+L27808                                      INT00000-STR-EXPTED-OH-QTY.         
+L27808                                                                          
+L27808     IF INVPAR-MFSTNG-IND = 'Y'                                           
+L27808* REPLACE THE VALUE ON THE INVENTORY DATE                                 
+L27808         IF IN050-PROCESS-DATE = INVPAR-PLND-INV-DTE                      
+L27808             MOVE IN050-IN-TRNST-CTOFF-QTY                                
+L27808                    TO INT00000-IN-TRNST-CTOFF-QTY                        
+L27808             MOVE IN050-STR-EXPTED-OH-QTY                                 
+L27808                    TO INT00000-STR-EXPTED-OH-QTY                         
+L27808         ELSE                                                             
+L27808* CARRY-FORWARD THE VALUE AFTER THE INVENTORY DATE                        
+L27808             IF IN050-PROCESS-DATE > INVPAR-PLND-INV-DTE                  
+L27808                 MOVE IN050-OLD-IN-TRNST-CTOFF-QTY                        
+L27808                        TO INT00000-IN-TRNST-CTOFF-QTY                    
+L27808                 MOVE IN050-OLD-STR-EXPTED-OH-QTY                         
+L27808                        TO INT00000-STR-EXPTED-OH-QTY                     
+L27808             END-IF                                                       
+L27808         END-IF                                                           
+L27808     ELSE                                                                 
+L27808         IF IN050-PROCESS-DATE > INVPAR-ACTL-DC-CTOFF-DTE                 
+L27808             MOVE IN050-POST-FSH-RCPT-QTY                                 
+L27808                    TO INT00000-POST-FSH-RCPT-QTY                         
+L27808         END-IF                                                           
+L27808     END-IF.                                                              
+                                                                                
+           EXEC SQL                                                     03400000
+               INSERT INTO INT_INV_CTOFF                                        
+                      (LOC_NBR,                                         03520000
+                       SKU_NBR,                                         03530000
+                       CTOFF_OH_QTY,                                    03421000
+                       IN_TRNST_CTOFF_QTY,                              03422000
+                       POST_FSH_RCPT_QTY,                               03423000
+                       LAST_UPD_DTE,                                    03424000
+                       LAST_UPD_BY_USR_ID,                              03425000
+                       STR_EXPTED_OH_QTY)                               03425000
+               VALUES (:INT00000-LOC-NBR,                                       
+                       :INT00000-SKU-NBR,                                       
+                       :INT00000-CTOFF-OH-QTY,                                  
+                       :INT00000-IN-TRNST-CTOFF-QTY,                            
+                       :INT00000-POST-FSH-RCPT-QTY,                             
+                       :INT00000-LAST-UPD-DTE,                                  
+                       :INT00000-LAST-UPD-BY-USR-ID,                            
+                       :INT00000-STR-EXPTED-OH-QTY)                             
+           END-EXEC                                                     03560000
+                                                                        03570000
+           EVALUATE SQLCODE                                             03580000
+               WHEN 0                                                   03590000
+                   ADD 1 TO PA-INSERT-COUNT                             03591000
+               WHEN -911                                                03610000
+                   ADD +1             TO PV-DEADLOCK-COUNT              03620000
+                   DISPLAY 'DEADLOCK -911 IN 7200-INSERT-INV-CTOFF-ROW' 03621000
+                   IF PV-DEADLOCK-COUNT > PC-MAX-DEADLOCKS              03630000
+                       MOVE '7200-INSERT-INV-CTOFF-ROW'                 03640000
+                                      TO PV-PARAGRAPH-NAME              03650000
+                       MOVE PE-MSG-11 TO PV-OPERATION-ATTEMPTED         03720000
+                       PERFORM 9000-DEADLOCK-ERROR                      03660000
+                   ELSE                                                 03670000
+                       PERFORM 7999-RESTART-PROCESS                     03680000
+                   END-IF                                               03690000
+               WHEN OTHER                                               03700000
+                   DISPLAY '**  INT_INV_CTOFF INSERT FAILED FOR LOC: '  03621000
+                         INT00000-LOC-NBR '  STORE: ' INT00000-SKU-NBR          
+                   MOVE '7200-INSERT-INV-CTOFF-ROW'                     03640000
+                                      TO PV-PARAGRAPH-NAME              03650000
+                   MOVE PE-MSG-11     TO PV-OPERATION-ATTEMPTED         03720000
+                   PERFORM 9999-SQL-ABEND                               03730000
+           END-EVALUATE.                                                03740000
+                                                                        03750000
+      ******************************************************************04630000
+      * 7300-GET-COMMIT-TIMESTAMP.                                     *04640000
+      * PROCESSES: GET THE COMMIT TIMESTAMP FROM THE CHECKPOINT        *04650000
+      *            CONTROL TABLE                                       *04660000
+      ******************************************************************04670000
+       7300-GET-COMMIT-TIMESTAMP.                                       04680000
+                                                                        04690000
+      * CHECKPOINT TAKEN BASED ON DB2 CHECKPOINT RESTART TABLE          04691000
+           EXEC SQL                                                     04700000
+             SELECT (CURRENT TIMESTAMP + CKPT_FRQNCY_QTY SECONDS)       04720000
+               INTO :PV-COMMIT-TIMESTAMP                                04730000
+               FROM TCKRSTCNTL                                          04740000
+              WHERE JOB_NAME  = :PV-PROCESS-JOB-NAME                    04750000
+                AND PLAN_NAME = :PC-PROGRAM-NAME                        04760000
+           END-EXEC.                                                    04770000
+                                                                        04780000
+           EVALUATE TRUE                                                04790000
+               WHEN SQLCODE = 0                                         04800000
+                   CONTINUE                                             04820000
+               WHEN SQLCODE NOT EQUAL ZERO                              04830000
+                   MOVE '7300-GET-COMMIT-TIMESTAMP' TO PV-PARAGRAPH-NAME04840000
+                   MOVE 'SELECT TMSTMP FROM TCKRSTCNTL'                 04841000
+                                      TO PV-OPERATION-ATTEMPTED         04842000
+                   PERFORM 9999-SQL-ABEND                               04850000
+           END-EVALUATE.                                                04860000
+                                                                        04870000
+      ******************************************************************04890000
+      * 7400-INIT-CHECKPOINT-SELECT                                    *04900000
+      * PROCESSES: SELECTS FROM THE CHECKPOINT RESTART CONTROL TABLE   *04910000
+      *            IF WE ARE IN A RESTART CONDITION.                   *04920000
+      ******************************************************************04930000
+       7400-INIT-CHECKPOINT-SELECT.                                     04940000
+                                                                        04950000
+           EXEC SQL                                                     04960000
+             SELECT  CKPT_STAT_CODE                                     04970000
+                    ,CKPT_FRQNCY_QTY                                    04980000
+               INTO  :TCKRSTCNTL-CKPT-STAT-CODE                         04990000
+                    ,:TCKRSTCNTL-CKPT-FRQNCY-QTY                        05000000
+               FROM  TCKRSTCNTL                                         05010000
+              WHERE  JOB_NAME  = :PV-PROCESS-JOB-NAME                   05020000
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                       05030000
+           END-EXEC.                                                    05040000
+                                                                        05050000
+           IF SQLCODE = 0                                               05060000
+               CONTINUE                                                 05070000
+           ELSE                                                         05080000
+               MOVE '7400-INIT-CHECKPOINT-SELECT' TO PV-PARAGRAPH-NAME  05090000
+               MOVE PE-MSG-03             TO PV-OPERATION-ATTEMPTED     05100000
+               PERFORM 9999-SQL-ABEND                                   05110000
+           END-IF.                                                      05120000
+                                                                        05140000
+      ******************************************************************05150000
+      * 7500-SELECT-RESTART-INFO                                       *05160000
+      * PROCESSES: SELECTS FROM THE CHECKPOINT RESTART INFORMATION     *05170000
+      *            TABLE TO OBTAIN THE PROGRAMS SAVED VARIABLES.       *05180000
+      ******************************************************************05190000
+       7500-SELECT-RESTART-INFO.                                        05200000
+                                                                        05210000
+           EXEC SQL                                                     05220000
+             SELECT  WORK_STRG_DESC                                     05230000
+               INTO  :TCKRSTINF-WORK-STRG-DESC                          05240000
+               FROM  TCKRSTINF                                          05250000
+              WHERE  JOB_NAME  = :PV-PROCESS-JOB-NAME                   05260000
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                       05270000
+           END-EXEC.                                                    05280000
+                                                                        05290000
+           IF SQLCODE = 0                                               05300000
+               CONTINUE                                                 05310000
+           ELSE                                                         05320000
+               MOVE '*7500-SELECT-RESTART-INFO*' TO PV-PARAGRAPH-NAME   05330000
+               MOVE 'SELECT  FROM TCKRSTINF'                            05331000
+                                      TO PV-OPERATION-ATTEMPTED         05332000
+               PERFORM 9999-SQL-ABEND                                   05340000
+           END-IF.                                                      05350000
+                                                                        05360000
+      ******************************************************************05370000
+      * 7600-SET-CURRENT-TIMESTAMP.                                    *05380000
+      * PROCESSES: GET THE CURRENT TIMESTAMP FROM DB2.                 *05390000
+      ******************************************************************05400000
+       7600-SET-CURRENT-TIMESTAMP.                                      05410000
+                                                                        05420000
+           EXEC SQL                                                     05430000
+                SET :PV-CURRENT-TIMESTAMP = CURRENT TIMESTAMP           05440000
+           END-EXEC.                                                    05450000
+           IF SQLCODE = 0                                               05490000
+               CONTINUE                                                 05500000
+           ELSE                                                         05510000
+               MOVE '*7600-SET-CURRENT-TIMESTAMP*' TO PV-PARAGRAPH-NAME 05520000
+               MOVE 'SET TIMESTAMP'                                     05521000
+                                      TO PV-OPERATION-ATTEMPTED         05522000
+               PERFORM 9999-SQL-ABEND                                   05530000
+           END-IF.                                                      05540000
+                                                                        05560000
+      ******************************************************************05570000
+      * 7700-COMMIT-PROCESSING.                                        *05580000
+      * PROCESSES: CHECK IF WE NEED TO TAKE A COMMIT.                  *05590000
+      *          PREPARE CHECKPOINT RECORD FOR UPDATE OF WORK_STRG_DESC*05600000
+      ******************************************************************05610000
+       7700-COMMIT-PROCESSING.                                          05620000
+           MOVE '*7700-COMMIT-PROCESSING*'    TO PV-PARAGRAPH-NAME.     05630000
+                                                                        05640000
+           PERFORM 7600-SET-CURRENT-TIMESTAMP.                          05650000
+                                                                        05660000
+      * PREPARE COMMIT RECORD FOR UPDATE                                05670000
+           IF PV-CURRENT-TIMESTAMP > PV-COMMIT-TIMESTAMP                05680000
+               MOVE IN050-LOC-NBR             TO CR-LOC-NBR             05720000
+               MOVE IN050-SKU-NBR             TO CR-SKU-NBR             05721000
+               MOVE PA-INPUT-COUNT            TO CR-INPUT-READ-COUNT    05730000
+               MOVE PA-UPDATE-COUNT           TO CR-UPDATE-COUNT        05730000
+L27808         MOVE PA-DELETE-COUNT           TO CR-DELETE-COUNT                
+               MOVE PA-INSERT-COUNT           TO CR-INSERT-COUNT        05730000
+      *        MOVE COMMIT INFO TO WORKING STORAGE ROW                  05740000
+               MOVE CR-CHECKPOINT-RESTART-AREA TO                       05750000
+                                             TCKRSTINF-WORK-STRG-DESC   05760000
+               IF PS-FIRST-COMMIT                                       05770000
+                   MOVE '9' TO TCKRSTCNTL-CKPT-STAT-CODE                05780000
+                   PERFORM 7900-UPDATE-CHECKPOINT-STATUS                05790000
+                   MOVE 'N' TO PS-FIRST-COMMIT-SW                       05800000
+               END-IF                                                   05810000
+               PERFORM 7800-COMMIT-CHANGES                              05820000
+               PERFORM 7300-GET-COMMIT-TIMESTAMP                        05830000
+           END-IF.                                                      05840000
+                                                                        05850000
+      ******************************************************************05870000
+      * 7800-COMMIT-CHANGES.                                            05880000
+      * PROCESSES: PERFORM UPDATE OF CHECKPOINT INFORMATION TABLE.      05890000
+      *            TAKE A COMMIT.                                       05900000
+      *  ==> PERFORMED FROM: 7700-COMMIT-PROCESSING.                    05910000
+      ******************************************************************05920000
+       7800-COMMIT-CHANGES.                                             05930000
+                                                                        05940000
+           EXEC SQL                                                     05950000
+             UPDATE TCKRSTINF                                           05960000
+                SET WORK_STRG_DESC = :TCKRSTINF-WORK-STRG-DESC          05970000
+              WHERE JOB_NAME       = :PV-PROCESS-JOB-NAME               05980000
+                AND PLAN_NAME      = :PC-PROGRAM-NAME                   05990000
+           END-EXEC.                                                    06000000
+                                                                        06010000
+           IF SQLCODE = 0                                               06020000
+               CONTINUE                                                 06150000
+           ELSE                                                         06040000
+               MOVE PE-MSG-05                  TO PV-OPERATION-ATTEMPTED06050000
+               MOVE  '* 7800-COMMIT-CHANGES *' TO PV-PARAGRAPH-NAME     06060000
+               PERFORM 9999-SQL-ABEND                                   06070000
+           END-IF.                                                      06080000
+                                                                        06090000
+           EXEC SQL                                                     06100000
+               COMMIT                                                   06110000
+           END-EXEC.                                                    06120000
+                                                                        06130000
+           IF SQLCODE = 0                                               06140000
+               ADD +1 TO PA-COMMIT-COUNT                                06030000
+           ELSE                                                         06160000
+               MOVE PE-MSG-05                  TO PV-OPERATION-ATTEMPTED06170000
+               MOVE  '* 7800-COMMIT-CHANGES *' TO PV-PARAGRAPH-NAME     06180000
+               PERFORM 9999-SQL-ABEND                                   06190000
+           END-IF.                                                      06200000
+                                                                        06220000
+      ******************************************************************06230000
+      * 7900-UPDATE-CHECKPOINT-STATUS                                   06240000
+      * PROCESSES: UPDATES THE STATUS ON THE CHECKPOINT CONTROL TABLE   06250000
+      *                                                                 06260000
+      ******************************************************************06270000
+       7900-UPDATE-CHECKPOINT-STATUS.                                   06280000
+                                                                        06290000
+           EXEC SQL                                                     06300000
+             UPDATE  TCKRSTCNTL                                         06310000
+                SET  CKPT_STAT_CODE = :TCKRSTCNTL-CKPT-STAT-CODE        06320000
+              WHERE  JOB_NAME  = :PV-PROCESS-JOB-NAME                   06330000
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                       06340000
+           END-EXEC.                                                    06350000
+                                                                        06360000
+           IF SQLCODE = 0                                               06370000
+               CONTINUE                                                 06380000
+           ELSE                                                         06390000
+               MOVE '7900-UPDATE-CHECKPOINT-STATUS' TO PV-PARAGRAPH-NAME06400000
+               PERFORM 9999-SQL-ABEND                                   06410000
+           END-IF.                                                      06420000
+                                                                        06430000
+           EJECT                                                        06440000
+                                                                        06460000
+      ******************************************************************06470000
+      * PROGRAM RESTART DUE TO A DEADLOCK AGAINST TINSCL ROW FOR UPDATE 06480000
+      *  FIND RESTART RECORD AND CKPT RESTART AT POINT OF LAST COMMIT.  06490000
+      ******************************************************************06500000
+       7999-RESTART-PROCESS.                                            06510000
+                                                                        06520000
+           SET PS-PROGRAM-DEADLOCKED TO TRUE.                           06530000
+                                                                        06540000
+           CLOSE CUTOFF-UPDATES-FILE.                                   06550000
+W29225     CLOSE REPORT-AUDIT-FILE.                                             
+                                                                        06560000
+           PERFORM 7500-SELECT-RESTART-INFO.                            06570000
+                                                                        06580000
+           DISPLAY '**** RESTART **** '.                                06590000
+           MOVE PV-DEADLOCK-COUNT TO PD-DEADLOCK-COUNT.                 06600000
+           DISPLAY '** SQLCODE -911 **  ' PD-DEADLOCK-COUNT ' TIMES'.   06610000
+      *-- THIS CHECK WILL PREVENT THE FILE FROM BEING RESTARTED IN      06610100
+      *-- THE WRONG POSITION IF NO COMMITS HAVE OCCURRED AND THE        06610200
+      *-- RESTART INFORMATION IN NOT CLEARED OUT.                       06610300
+           IF PS-FIRST-COMMIT                                           06611000
+               INITIALIZE TCKRSTINF-WORK-STRG-DESC (1:30)               06612000
+L27808         MOVE ZERO TO PA-UPDATE-COUNT                             01970000
+L27808                      PA-DELETE-COUNT                                     
+L27808                      PA-INSERT-COUNT                                     
+               DISPLAY 'NO COMMITS HAVE OCCURRED YET; RESTART FROM'     06613000
+                      ' BEGINNING'                                      06614000
+           ELSE                                                         06615000
+               DISPLAY 'TCKRSTINF-LAST CKPT '                           06620000
+                        TCKRSTINF-WORK-STRG-DESC (1:30)                 06621000
+      * INFO ON LAST CHECKPOINT TAKEN IS IN CR-CHECKPOINT-RESTART-AREA. 06650000
+               MOVE TCKRSTINF-WORK-STRG-DESC TO                         06651000
+                    CR-CHECKPOINT-RESTART-AREA                          06651100
+               MOVE CR-UPDATE-COUNT          TO PA-UPDATE-COUNT         01970000
+L27808         MOVE CR-DELETE-COUNT          TO PA-DELETE-COUNT                 
+               MOVE CR-INSERT-COUNT          TO PA-INSERT-COUNT         01970000
+               DISPLAY 'CHECKPOINT RESTART INFORMATION:'                06651200
+               DISPLAY 'LOCATION NUMBER:   ' CR-LOC-NBR                 06720800
+               DISPLAY 'SKU NUMBER:        ' CR-SKU-NBR                 06720900
+               DISPLAY 'INPUT RECS READ:   ' CR-INPUT-READ-COUNT        06652000
+               DISPLAY 'INSERTS PROCESSED: ' CR-INSERT-COUNT            06652000
+               DISPLAY 'UPDATES PROCESSED: ' CR-UPDATE-COUNT            06652000
+L27808         DISPLAY 'DELETES PROCESSED: ' CR-DELETE-COUNT                    
+           END-IF.                                                      06661000
+                                                                        06662000
+           OPEN INPUT CUTOFF-UPDATES-FILE.                              06670000
+W29225     OPEN OUTPUT REPORT-AUDIT-FILE.                                       
+           MOVE ZEROES                          TO PA-INPUT-COUNT.      06680000
+                                                                        06690000
+      *POSITION INPUT FILE TO 1ST RECORD AFTER LAST CHECKPOINT          06700000
+           PERFORM 4100-READ-CUTOFF-UPDATES-FILE                        06710000
+               UNTIL PA-INPUT-COUNT > CR-INPUT-READ-COUNT               06720000
+               OR PS-EOF-CUTOFF-UPDATES-FILE.                           06720100
+                                                                        06720200
+           IF PS-EOF-CUTOFF-UPDATES-FILE                                06720300
+               DISPLAY 'END OF INPUT FILE ON RESTART'                   06720400
+           ELSE                                                         06720500
+               DISPLAY 'INPUT RECORD RESTARTED ON RECORD '              06720600
+                        PA-INPUT-COUNT                                  06720700
+               DISPLAY 'LOCATION NUMBER: ' IN050-LOC-NBR                06720800
+               DISPLAY 'SKU NUMBER:      ' IN050-SKU-NBR                06720900
+           END-IF.                                                      06723000
+                                                                        06730000
+      ******************************************************************06740000
+      *  RESET STATUS CODE, DISPLAY FINAL COUNTS , CLOSE INPUT FILE    *06750000
+      ******************************************************************06760000
+       8000-EOJ-ROUTINE.                                                06770000
+                                                                        06780000
+           PERFORM 7800-COMMIT-CHANGES.                                         
+           MOVE '0' TO TCKRSTCNTL-CKPT-STAT-CODE.                       06790000
+           PERFORM 7900-UPDATE-CHECKPOINT-STATUS.                       06800000
+                                                                        06810000
+           DISPLAY '**********************************'.                06840000
+           DISPLAY '******* INKUP010 RUN STATS *******'.                06840000
+           DISPLAY '**********************************'.                06840000
+           DISPLAY 'INPUT RECORDS PROCESSED: ' PA-INPUT-COUNT.          06830000
+           DISPLAY 'INSERTS PROCESSED:       ' PA-INSERT-COUNT.         06840000
+           DISPLAY 'UPDATES PROCESSED:       ' PA-UPDATE-COUNT.         06840000
+L27808     DISPLAY 'DELETES PROCESSED:       ' PA-DELETE-COUNT.                 
+           DISPLAY 'COMMITS TAKEN:           ' PA-COMMIT-COUNT.         06840000
+800497     DISPLAY ' '                                                          
+800497     DISPLAY 'MISSING SKU UPDTS WHERE INSERT RQRD:  ',                    
+800497              PA-UPDT-INS-COUNT.                                          
+                                                                        06850000
+           CLOSE CUTOFF-UPDATES-FILE                                    06861000
+W29225           REPORT-AUDIT-FILE.                                             
+                                                                        06870000
+      ******************************************************************06890000
+      *  THIS ROUTINE FORCES AN ABEND DUE TO A SQLCODE -911 (3 TIMES)   06910000
+      ******************************************************************06920000
+       9000-DEADLOCK-ERROR.                                             06930000
+                                                                        06940000
+               MOVE PE-MSG-06             TO PV-OPERATION-ATTEMPTED     06950000
+               PERFORM 9999-SQL-ABEND.                                  06960000
+                                                                        06970000
+      ******************************************************************06980000
+      *  STANDARD DB2 ERROR ABEND ROUTINE                               06990000
+      *  THIS ROUTINE FORCES AN ABEND DUE TO A DB2 PROBLEM.             07000000
+      ******************************************************************07010000
+       9999-SQL-ABEND.                                                  07020000
+                                                                        07030000
+           MOVE +4013                 TO ABEND-CODE.                    07040000
+           DISPLAY '**  ABEND     **'.                                  07050000
+           DISPLAY '**  PROGRAM   ** => ' PC-PROGRAM-NAME.              07060000
+           DISPLAY '**  PARAGRAPH **  = ' PV-PARAGRAPH-NAME.            07070000
+           DISPLAY '**  OPERATION **  = ' PV-OPERATION-ATTEMPTED.       07080000
+                                                                        07090000
+      *    THE FOLLOWING COPYBOOK UTILIZES THE DB2 ABEND MODULE         07100000
+      *    DSNTIAR TO CONVERT SQLCA INTO UNDERSTANDABLE VERBAGE.        07110000
+                                                                        07120000
+           COPY DPPD004.                                                07130000
+           CALL 'ILBOABN0'  USING ABEND-CODE.                           07140000

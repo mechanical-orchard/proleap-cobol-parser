@@ -1,0 +1,1577 @@
+      ******************************************************************        
+       IDENTIFICATION DIVISION.                                                 
+      ******************************************************************        
+       PROGRAM-ID.      INKUP143.                                               
+       AUTHOR.          JAN BLAZICH.                                            
+       DATE-WRITTEN.    01/16/06.                                               
+      *                                                                         
+      ******************************************************************        
+      * PURPOSE. TSUMINV UPDATE WITH NEW SKU ATTRIBUTES                         
+      *      COMPILE WITH DB2 OPTION.                                           
+      *                                                                         
+      *    CREATE AN EXTRACT FILE THAT CONTAINS ALL THE INFORMATION             
+      *    FOR INKRP150 REPORTS WITH OLD AND NEW ATTRIBUTES FOR EACH            
+      *    SKU                                                                  
+      *                                                                         
+      *    CREATE A SECOND EXTRACT FILE CONTAINING THE SAME INFORMATION         
+      *    EXCEPT FOR THE OLD ATTRIBUTES                                        
+      *                                                                         
+      ******************************************************************        
+      *       DB2 TABLES: TDTATTR, TSUMINV, TINVPAR                             
+W28545*                   IMT_RECLS (IMT00015)                                  
+      *                   XMT_LOC (XMT00001)                                    
+      *      DB2 CURSORS: STORE_CSR                                             
+      *                   SKU_UPDATE_CSR                                        
+W28545*                   LATE_STORE_CSR                                        
+W28545*                   LATE_RECLS_CSR                                        
+      ******************************************************************        
+W28545* 06-29-2004  J BLAZICH    LATE RECLASS CHANGES --                        
+W28545*                          MAKE SURE DEPT/MCL/SCL VALUES ARE              
+W28545*                          SET ACCORDING TO THE VALUES IN EFFECT          
+W28545*                          ON THE PLANNED INVENTORY DATE                  
+W30692* W30692  06-26-2006 ROD JANSSEN CHECKPOINT ISSUE WITH MRK013.            
+W28545* W28545  08-10-2006 ADD LOGIC FOR DEPARTMENT LEVEL                       
+W28545*                    INVENTORY PROCESS. JOIN TINVPAR/TINCNTL              
+W28545*                    -B. GRAHAM - STRATAGEM                               
+W33304* W33304  09-17-2008 SATHISH/INFOSYS                                      
+W33304*                    HOLDING INVENTORY LEDGER OPEN - HILO                 
+W28545*-----------------------------------------------------------------        
+201762* JUNE, 2018  CHANGE MADE: MAINFRAME REFACTORING -                        
+201762* DELETE DUPLICATE DEFINITIONS OF PS-SAME-COMMIT-FIELDS-SW                
+201762* MADE BY: JIM HUNTER              WR/IR #: CHG0201762                    
+201762*****************************************************************         
+                                                                                
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+                                                                                
+       CONFIGURATION SECTION.                                                   
+                                                                                
+       SOURCE-COMPUTER.    IBM-3090.                                            
+       OBJECT-COMPUTER.    IBM-3090.                                            
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT RECLS-DATE-CNTL-FILE    ASSIGN TO INP01.                      
+           SELECT RECLS-EXTRACT-FILE      ASSIGN TO INP02.                      
+           SELECT SKU-RECLASS-RPT-FILE    ASSIGN TO OUT01.                      
+           SELECT SKU-RECLASS-COMBO-FILE  ASSIGN TO OUT02.                      
+                                                                                
+       DATA DIVISION.                                                           
+                                                                                
+       FILE SECTION.                                                            
+                                                                                
+       FD  RECLS-DATE-CNTL-FILE                                                 
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  RECLS-DATE-CNTL-REC              PIC  X(80).                         
+                                                                                
+       FD  RECLS-EXTRACT-FILE                                                   
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  RECLS-EXTRACT-REC                PIC  X(56).                         
+                                                                                
+       FD  SKU-RECLASS-RPT-FILE                                                 
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+W28545 01  SKU-RECLASS-RPT-REC              PIC  X(131).                        
+                                                                                
+       FD  SKU-RECLASS-COMBO-FILE                                               
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+W28545 01  SKU-RECLASS-COMBO-REC            PIC  X(119).                        
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  ABEND-CODE                       PIC S9(4)  COMP   VALUE +0          
+                                                       SYNC.                    
+       01  PROGRAM-ACCUMULATORS.                                                
+           05  PA-EXTRACT-OUT-COUNT         PIC S9(09) COMP-3 VALUE +0.         
+           05  PA-TOTAL-RECS-READ           PIC S9(09) COMP-3 VALUE +0.         
+           05  PA-TOTAL-COMMITS             PIC S9(13) COMP-3 VALUE +0.         
+                                                                                
+       01  PROGRAM-CONSTANTS.                                                   
+           05  PC-MAX-RETRIES               PIC S9(04) COMP SYNC                
+                                                       VALUE +2.                
+           05  PC-PROGRAM-NAME              PIC X(08)  VALUE 'INKUP143'.        
+           05  PC-JOB-NAME                  PIC X(08)  VALUE 'INK143  '.        
+           05  PC-IN-PROCESS-CODE           PIC X(01)  VALUE '9'.               
+           05  PC-PROCESS-COMPLETE          PIC X(01)  VALUE '0'.               
+           05  PC-HOLD-TRANS-QTY            PIC S9(9)  COMP-3                   
+                                                       VALUE +10.               
+                                                                                
+       01  CKPT-RESTART-INFO.                                                   
+           05  CR-LEN                       PIC S9(4)  COMP VALUE +47.          
+           05  CR-SKU-RECLS-RECS-WORKED     PIC 9(11)  VALUE ZERO.              
+           05  CR-RECLS-DATE                PIC X(10).                          
+           05  CR-SKU-NBR                   PIC 9(8).                           
+           05  CR-DEPT-NBR                  PIC 9(4).                           
+           05  CR-MAJ-CL-NBR                PIC 9(4).                           
+           05  CR-SUB-CL-NBR                PIC 9(4).                           
+           05  CR-LOC-NBR                   PIC 9(4).                           
+                                                                                
+       01  PROGRAM-VARIABLES.                                                   
+           05  PV-CKPT-STAT-CODE            PIC X(01)  VALUE ' '.               
+               88  NORMAL-RUN                          VALUE '0'.               
+               88  RESTART-RUN                         VALUE '9'.               
+           05  PV-IN143-SKU                 PIC S9(8)  COMP-3 VALUE +0.         
+           05  PV-DEPT-NBR                  PIC S9(4)V COMP-3 VALUE 0.          
+           05  PV-MAJ-CL-NBR                PIC S9(4)V COMP-3 VALUE 0.          
+           05  PV-SUB-CL-NBR                PIC S9(4)V COMP-3 VALUE 0.          
+           05  PV-SB-DEPT-NBR               PIC S9(4)V COMP-3 VALUE 0.          
+           05  PV-SB-MAJ-CL-NBR             PIC S9(4)V COMP-3 VALUE 0.          
+           05  PV-SB-SUB-CL-NBR             PIC S9(4)V COMP-3 VALUE 0.          
+                                                                                
+           05  PV-DB2-OPER-ATTEMPTED        PIC  X(30) VALUE SPACE.             
+           05  PV-PARAGRAPH-NAME            PIC  X(30) VALUE SPACE.             
+           05  PV-RETRY-COUNTER             PIC S9(04) VALUE +0.                
+           05  PV-PROCESS-TMST.                                                 
+               10  PV-PROCESS-DATE          PIC X(10)  VALUE SPACES.            
+               10  FILLER REDEFINES PV-PROCESS-DATE.                            
+                   15  PV-PROCESS-CCYY      PIC X(04).                          
+                   15  PV-PROCESS-HYPHEN1   PIC X(01).                          
+                   15  PV-PROCESS-MM        PIC X(02).                          
+                   15  PV-PROCESS-HYPHEN2   PIC X(01).                          
+                   15  PV-PROCESS-DD        PIC X(02).                          
+               10  FILLER                   PIC X(16)                           
+                   VALUE '-00.00.00.000000'.                                    
+                                                                                
+       01  PROGRAM-SWITCHES.                                                    
+                                                                                
+           05  PS-SAME-COMMIT-FIELDS-SW     PIC  X(01)    VALUE 'N'.            
+               88  PS-SAME-COMMIT-FIELDS                  VALUE 'Y'.            
+               88  PS-NOT-SAME-COMMIT-FIELDS              VALUE 'N'.            
+           05  PS-END-OF-INPUT-SW           PIC X         VALUE 'N'.            
+               88  PS-END-OF-INPUT                        VALUE 'Y'.            
+               88  PS-NOT-END-OF-INPUT                    VALUE 'N'.            
+           05  PS-END-OF-PROCESS-SW         PIC X         VALUE 'N'.            
+               88  PS-END-OF-PROCESS                      VALUE 'Y'.            
+               88  PS-NOT-END-OF-PROCESS                  VALUE 'N'.            
+           05  PS-RECORD-FOUND-SW           PIC X         VALUE 'N'.            
+               88  PS-RECORD-FOUND                        VALUE 'Y'.            
+               88  PS-RECORD-NOT-FOUND                    VALUE 'N'.            
+           05  PS-STORE-FOUND-SW            PIC X         VALUE SPACE.          
+               88  PS-STORE-FOUND                         VALUE 'Y'.            
+               88  PS-STORE-FOUND-NO                      VALUE 'N'.            
+           05  PS-TDTATTR-FOUND-SW          PIC X         VALUE 'N'.            
+               88  PS-TDTATTR-FOUND                       VALUE 'Y'.            
+               88  PS-TDTATTR-FOUND-NO                    VALUE 'N'.            
+           05  PS-SUMINV-FOUND-SW           PIC X         VALUE SPACE.          
+               88  PS-SUMINV-FOUND                        VALUE 'Y'.            
+               88  PS-SUMINV-FOUND-NO                     VALUE 'N'.            
+           05  PS-SUMINV-UPDATED-SW         PIC X         VALUE SPACE.          
+               88  PS-SUMINV-UPDATED                      VALUE 'Y'.            
+               88  PS-SUMINV-UPDATED-NO                   VALUE 'N'.            
+W28545     05  PS-IMT-RECLS-FOUND-SW        PIC X         VALUE SPACE.          
+W28545         88  PS-IMT-RECLS-FOUND                     VALUE 'Y'.            
+W28545         88  PS-IMT-RECLS-FOUND-NO                  VALUE 'N'.            
+W28545     05  PS-LATE-RECLS-FOUND-SW       PIC X         VALUE SPACE.          
+W28545         88  PS-LATE-RECLS-FOUND                    VALUE 'Y'.            
+W28545         88  PS-LATE-RECLS-FOUND-NO                 VALUE 'N'.            
+W28545     05  PS-RECLS-2-ROW-FOUND-SW      PIC X         VALUE SPACE.          
+W28545         88  PS-RECLS-2-ROW-FOUND                   VALUE 'Y'.            
+W28545         88  PS-RECLS-2-ROW-FOUND-NO                VALUE 'N'.            
+W28545     05  PS-SUMINV-ATTR-CHGD-SW       PIC X         VALUE SPACE.          
+W28545         88  PS-SUMINV-ATTR-CHGD                    VALUE 'Y'.            
+W28545         88  PS-SUMINV-ATTR-CHGD-NO                 VALUE 'N'.            
+W28545     05  PS-PHASE-SW                  PIC X         VALUE '1'.            
+W28545         88  PS-PHASE-1                             VALUE '1'.            
+W28545         88  PS-PHASE-2                             VALUE '2'.            
+                                                                                
+      ******************************************************************        
+      *  DATE CONTROL CARD                                                      
+      *  IN143-TEST IS USED FOR TESTING ONLY.  IF USED, THE                     
+      *  PROGRAM WILL NOT UPDATE TSUMINV.                                       
+      ******************************************************************        
+       01  IN143-CONTROL-RECORD.                                                
+           05  IN143-CC-DATE                PIC X(10).                          
+W28545     05  IN143-TEST-IND               PIC X(04).                          
+W28545         88  IN143-TEST               VALUE 'TEST'.                       
+W28545     05  FILLER                       PIC X(66).                          
+      *****************************************************************         
+      * INVENTORY SKU RECLASS EXTRACT FROM INKUP143                             
+      *****************************************************************         
+      *01  IN143-SKU-RECLASS-EXTRACT.                                           
+           COPY INRD143.                                                        
+                                                                                
+      ******************************************************************        
+      *  SKU RECLASS REPORT EXTRACT FILE OUTPUT                                 
+      ******************************************************************        
+      *01  IN144-SKU-RECLASS-EXTRACT.                                           
+           COPY INRD144.                                                        
+                                                                                
+      ******************************************************************        
+      *  SKU RECLASS REPORT COMBO FILE OUTPUT                                   
+      *  FROM AND TO DEPTS ARE IN ONE FIELD WITH THE EXTD AMT                   
+      *  OF FROM DEPTS MULTIPLIED BY A -1                                       
+      ******************************************************************        
+      *01  IN145-SKU-RECLASS-COMBO.                                             
+           COPY INRD145.                                                        
+                                                                                
+      ******************************************************************        
+      *  DB2 FORMATTED MESSAGE AREA                                             
+      ******************************************************************        
+      *01  DP004-DB2-ERROR-FIELDS.                                              
+           COPY DPWS004.                                                        
+                                                                                
+      ******************************************************************        
+      *  DB2 TABLE DECLARATION - CHECKPOINT RESTART CONTROL (TCKRSTCNTL)        
+      *  THIS TABLE IS BEING USED IN THIS PROGRAM TO CONTROL COMMIT             
+      *  INTERVALS.                                                             
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TCKRSTCN                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  DB2 TABLE DECLARATION - CHECKPOINT RESTART         (TCKRSTINF)         
+      *  THIS TABLE IS BEING USED IN THIS PROGRAM TO CONTROL COMMIT             
+      *  INTERVALS.                                                             
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TCKRSTIN                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  COMMUNICATIONS AREA FOR DB2                                            
+      ******************************************************************        
+           EXEC SQL                                                             
+                INCLUDE SQLCA                                                   
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+                INCLUDE TDTATTR                                                 
+           END-EXEC.                                                            
+28545                                                                           
+28545 *****************************************************************         
+28545 * TINCNTL DCLGEN                                                *         
+28545 *****************************************************************         
+28545      EXEC SQL                                                             
+28545          INCLUDE TINCNTL                                                  
+28545      END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+                INCLUDE TINVPAR                                                 
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+                INCLUDE TSUMINV                                                 
+           END-EXEC.                                                            
+W28545                                                                          
+W28545     EXEC SQL                                                             
+W28545          INCLUDE IMT00015                                                
+W28545     END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+                INCLUDE XMT00001                                                
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+             DECLARE STORE_CSR CURSOR FOR                                       
+               SELECT LOC_NBR                                                   
+                    , PLND_INV_DTE                                              
+28545            FROM TINVPAR A                                                 
+28545                ,TINCNTL B                                                 
+                WHERE ACTL_FIN_BK_DTE   = '9999-09-09'                          
+                  AND (PLND_INV_DTE    >= :IN143-RECLASS-EFF-DATE               
+                  AND  PLND_INV_DTE    <= :DTATTR-FSCL-WK-END-DTE)              
+W33304            AND SCHD_PHY_CNT_CDE IN ('PI' ,'NS','CL')                     
+W33304            AND A.LOC_INV_STAT_CDE = 'IN'                                 
+28545             AND A.INV_ID = B.INV_ID                                       
+28545             AND B.ACTV_IND = 'Y'                                          
+                ORDER BY PLND_INV_DTE                                           
+                        ,LOC_NBR                                                
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+             DECLARE SKU_UPDATE_CSR CURSOR WITH HOLD FOR                        
+               SELECT   LOC_NBR                                                 
+                     ,  AREA_NBR                                                
+                     ,  SKU_NBR                                                 
+                     ,  UPC_NBR                                                 
+                     ,  INV_UNIT_PR_AMT                                         
+                     ,  INV_QTY                                                 
+                     ,  DEPT_NBR                                                
+                     ,  MAJ_CL_NBR                                              
+                     ,  SUB_CL_NBR                                              
+                     ,  EXTD_AMT                                                
+                 FROM TSUMINV                                                   
+                WHERE   SKU_NBR    = :PV-IN143-SKU                              
+                  AND   LOC_NBR    = :INVPAR-LOC-NBR                            
+                  AND   DEPT_NBR   = :IN143-OLD-DEPT                            
+                  AND   MAJ_CL_NBR = :IN143-OLD-MCL                             
+                  AND   SUB_CL_NBR = :IN143-OLD-SCL                             
+                  FOR UPDATE OF   DEPT_NBR                                      
+                               ,  MAJ_CL_NBR                                    
+                               ,  SUB_CL_NBR                                    
+           END-EXEC.                                                            
+                                                                                
+W28545     EXEC SQL                                                             
+W28545       DECLARE LATE_STORE_CSR CURSOR FOR                                  
+W28545         SELECT LOC_NBR                                                   
+W28545              , PLND_INV_DTE                                              
+28545            FROM TINVPAR A                                                 
+28545                ,TINCNTL B                                                 
+W28545          WHERE ACTL_FIN_BK_DTE   = '9999-09-09'                          
+28545             AND A.INV_ID = B.INV_ID                                       
+28545             AND B.ACTV_IND = 'Y'                                          
+W28545            AND :IN143-RECLASS-EFF-DATE > PLND_INV_DTE                    
+W28545            AND (PLND_INV_DTE    >= :DTATTR-FSCL-WK-BEG-DTE               
+W28545            AND  PLND_INV_DTE    <= :DTATTR-FSCL-WK-END-DTE)              
+W33304            AND SCHD_PHY_CNT_CDE IN ('PI' ,'NS','CL')                     
+W33304            AND A.LOC_INV_STAT_CDE = 'IN'                                 
+W28545          ORDER BY PLND_INV_DTE                                           
+W28545                  ,LOC_NBR                                                
+W28545     END-EXEC.                                                            
+W28545                                                                          
+W28545     EXEC SQL                                                             
+W28545       DECLARE LATE_RECLS_CSR CURSOR FOR                                  
+W28545         SELECT C.LOC_NBR                                                 
+W28545               ,C.SKU_NBR                                                 
+W28545               ,C.AREA_NBR                                                
+W28545               ,C.UPC_NBR                                                 
+W28545               ,C.INV_UNIT_PR_AMT                                         
+W28545               ,C.INV_QTY                                                 
+W28545               ,C.DEPT_NBR                                                
+W28545               ,C.MAJ_CL_NBR                                              
+W28545               ,C.SUB_CL_NBR                                              
+W28545               ,C.EXTD_AMT                                                
+W28545               ,C.CHG_TMST                                                
+W28545               ,A.RECLS_TMST                                              
+W28545               ,A.SKU_NBR                                                 
+W28545               ,A.OLD_DEPT_NBR                                            
+W28545               ,A.OLD_MAJ_CL_NBR                                          
+W28545               ,A.OLD_SUB_CL_NBR                                          
+W28545               ,A.NW_DEPT_NBR                                             
+W28545               ,A.NW_MAJ_CL_NBR                                           
+W28545               ,A.NW_SUB_CL_NBR                                           
+W28545           FROM IMT_RECLS  A                                              
+W28545               ,TSUMINV    C                                              
+W28545          WHERE C.LOC_NBR         = :INVPAR-LOC-NBR                       
+W28545            AND A.SKU_NBR         = :PV-IN143-SKU                         
+W28545            AND A.SKU_NBR         = C.SKU_NBR                             
+W28545            AND C.DEPT_NBR        = :IN143-NEW-DEPT                       
+W28545            AND C.MAJ_CL_NBR      = :IN143-NEW-MCL                        
+W28545            AND C.SUB_CL_NBR      = :IN143-NEW-SCL                        
+W28545            AND C.DEPT_NBR        = A.NW_DEPT_NBR                         
+W28545            AND C.MAJ_CL_NBR      = A.NW_MAJ_CL_NBR                       
+W28545            AND C.SUB_CL_NBR      = A.NW_SUB_CL_NBR                       
+W28545            AND DATE(A.RECLS_TMST) >=                                     
+W28545                                    :DTATTR-FSCL-WK-BEG-DTE               
+W28545            AND DATE(A.RECLS_TMST) <=                                     
+W28545                                    :DTATTR-FSCL-WK-END-DTE               
+W28545     END-EXEC.                                                            
+W28545                                                                          
+W28545     EXEC SQL                                                             
+W28545       DECLARE RECLS_CSR_2 CURSOR FOR                                     
+W28545         SELECT                                                           
+W28545                RECLS_TMST                                                
+W28545              , SKU_NBR                                                   
+W28545              , OLD_DEPT_NBR                                              
+W28545              , OLD_MAJ_CL_NBR                                            
+W28545              , OLD_SUB_CL_NBR                                            
+W28545              , NW_DEPT_NBR                                               
+W28545              , NW_MAJ_CL_NBR                                             
+W28545              , NW_SUB_CL_NBR                                             
+W28545           FROM IMT_RECLS                                                 
+W28545         WHERE  DATE(RECLS_TMST) >= :DTATTR-FSCL-WK-BEG-DTE               
+W28545            AND DATE(RECLS_TMST) <= :DTATTR-FSCL-WK-END-DTE               
+W28545            AND DATE(RECLS_TMST) >= :INVPAR-PLND-INV-DTE                  
+W28545            AND SKU_NBR = :SUMINV-SKU-NBR                                 
+W28545          ORDER BY RECLS_TMST DESC                                        
+W28545                 , SKU_NBR                                                
+W28545     END-EXEC.                                                            
+       PROCEDURE DIVISION.                                                      
+      ************************                                                  
+      **  PROGRAM MAINLINE  **                                                  
+      ************************                                                  
+       0000-MAINLINE.                                                           
+                                                                                
+           OPEN INPUT  RECLS-DATE-CNTL-FILE                                     
+                       RECLS-EXTRACT-FILE                                       
+                OUTPUT SKU-RECLASS-RPT-FILE                                     
+                       SKU-RECLASS-COMBO-FILE.                                  
+                                                                                
+           PERFORM 8000-INITIALIZE-PROGRAM.                                     
+           PERFORM 2500-READ-EXTRACT.                                           
+                                                                                
+           PERFORM 2000-MAIN-PROCESS                                            
+               UNTIL PS-END-OF-INPUT.                                           
+                                                                                
+W28545     CLOSE RECLS-EXTRACT-FILE                                             
+W28545     OPEN INPUT  RECLS-EXTRACT-FILE                                       
+W28545                                                                          
+W28545     SET PS-PHASE-2          TO TRUE.                                     
+W28545     SET PS-NOT-END-OF-INPUT TO TRUE.                                     
+W28545     PERFORM 2500-READ-EXTRACT.                                           
+W28545     PERFORM 4000-LATE-PROCESS                                            
+W28545         UNTIL PS-END-OF-INPUT.                                           
+                                                                                
+           PERFORM 9000-EOJ-ROUTINE.                                            
+                                                                                
+           CLOSE RECLS-DATE-CNTL-FILE                                           
+                 RECLS-EXTRACT-FILE                                             
+                 SKU-RECLASS-RPT-FILE                                           
+                 SKU-RECLASS-COMBO-FILE.                                        
+           GOBACK.                                                              
+                                                                                
+      ******************************************************************        
+      *  USING THE EXTRACT FILE FROM INKUP143, GET THE STORES (LOC)             
+      *  WITH AN INVENTORY DATE EQUAL TO THE RECLASS DATE                       
+      ******************************************************************        
+       2000-MAIN-PROCESS.                                                       
+                                                                                
+           PERFORM 3000-OPEN-STORE-CSR.                                         
+                                                                                
+           SET PS-STORE-FOUND            TO TRUE.                               
+           PERFORM 2100-PROCESS-STORE-CSR                                       
+               UNTIL PS-STORE-FOUND-NO                                          
+                                                                                
+           IF PS-SUMINV-UPDATED                                                 
+               PERFORM 8620-UPDATE-TCKRSTINF                                    
+               PERFORM 8700-COMMIT                                              
+               SET PS-SUMINV-UPDATED-NO TO TRUE                                 
+           ELSE                                                                 
+               PERFORM 3400-CLOSE-STORE-CSR.                                    
+                                                                                
+           PERFORM 2500-READ-EXTRACT.                                           
+                                                                                
+      ******************************************************************        
+      *  LOOK FOR LOCATIONS (STORES) SCHEDULED FOR PHYSICAL COUNT ON            
+      *  THIS DAY.  THE ATTRIBUTES ARE COMPARED TO THE OLD ATTRIBUTES           
+      *  ON THE INCOMING RECLASS SKU EXTRACT.                                   
+      ******************************************************************        
+       2100-PROCESS-STORE-CSR.                                                  
+                                                                                
+           PERFORM 3200-FETCH-STORE-CSR.                                        
+                                                                                
+           IF PS-STORE-FOUND                                                    
+               MOVE IN143-SKU            TO PV-IN143-SKU                        
+               PERFORM 5000-OPEN-SKU-UPDATE-CSR                                 
+               SET PS-SUMINV-FOUND       TO TRUE                                
+               PERFORM 5200-FETCH-SKU-UPDATE-CSR                                
+                   UNTIL PS-SUMINV-FOUND-NO                                     
+               PERFORM 5400-CLOSE-SKU-UPDATE-CSR                                
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  READ EXTRACT RECORDS CREATED IN INKUT143                               
+      ******************************************************************        
+       2500-READ-EXTRACT.                                                       
+                                                                                
+W28545     IF NOT PS-END-OF-INPUT                                               
+               READ RECLS-EXTRACT-FILE                                          
+                   INTO IN143-SKU-RECLASS-EXTRACT                               
+               AT END                                                           
+                   SET PS-END-OF-INPUT        TO TRUE                           
+W28545         END-READ                                                         
+W28545     END-IF.                                                              
+                                                                                
+           IF PS-NOT-END-OF-INPUT                                               
+W28545         ADD +1                     TO PA-TOTAL-RECS-READ                 
+W28545         MOVE IN143-SKU            TO PV-IN143-SKU                        
+W28545     END-IF.                                                              
+      ******************************************************************        
+      *  OPEN THE STORE CURSOR FOR THE PURPOSE OF FINDING STORES                
+      *  THAT ARE SCHEDULED FOR INVENTORY THIS MONTH                            
+      ******************************************************************        
+       3000-OPEN-STORE-CSR.                                                     
+           EXEC SQL                                                             
+               OPEN STORE_CSR                                                   
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLWARN0 NOT EQUAL SPACE                                     
+              WHEN SQLCODE NOT EQUAL ZERO                                       
+                 DISPLAY '** ABEND                             '                
+                 DISPLAY '** PROGRAM = INKUP143                '                
+                 DISPLAY '** PARAGRAPH = 3000-OPEN-STORE-CSR.  '                
+                 DISPLAY '** DTATTR-FSCL-MN-BEG-DTE = '                         
+                             DTATTR-FSCL-MN-BEG-DTE                             
+                 DISPLAY '** DTATTR-FSCL-MN-END-DTE = '                         
+                             DTATTR-FSCL-MN-END-DTE                             
+                 PERFORM 9999-SQL-ABEND                                         
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  FETCH THE STORES THAT ARE SCHEDULED FOR INVENTORY DURING THE           
+      *  SELECTED WEEK.  THE RECLASS IS NOT RETROACTIVE. SO USE T               
+      *  ONLY THE ROW THAT ARE >= THE RECLASS-EFF-DATE                          
+      ******************************************************************        
+       3200-FETCH-STORE-CSR.                                                    
+           EXEC SQL                                                             
+               FETCH STORE_CSR                                                  
+               INTO  :INVPAR-LOC-NBR                                            
+                    ,:INVPAR-PLND-INV-DTE                                       
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = ZERO                                               
+                 SET PS-STORE-FOUND TO TRUE                                     
+                 IF (IN143-RECLASS-EFF-DATE < INVPAR-PLND-INV-DTE               
+                      OR IN143-RECLASS-EFF-DATE = INVPAR-PLND-INV-DTE)          
+                     SET PS-STORE-FOUND TO TRUE                                 
+                 ELSE                                                           
+                     SET PS-STORE-FOUND-NO    TO TRUE                           
+                 END-IF                                                         
+              WHEN SQLCODE = +100                                               
+                 SET PS-STORE-FOUND-NO        TO TRUE                           
+              WHEN SQLWARN0 NOT EQUAL SPACE                                     
+              WHEN SQLCODE NOT EQUAL ZERO                                       
+                 DISPLAY '** ABEND                              '               
+                 DISPLAY '** PROGRAM = INKUP143                 '               
+                 DISPLAY '** PARAGRAPH = 3200-FETCH-STORE-CSR.  '               
+                 PERFORM 9999-SQL-ABEND                                         
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *  CLOSE THE STORE CURSOR                                                 
+      ******************************************************************        
+       3400-CLOSE-STORE-CSR.                                                    
+           EXEC SQL                                                             
+               CLOSE STORE_CSR                                                  
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLWARN0 NOT EQUAL SPACE                                     
+              WHEN SQLCODE NOT EQUAL ZERO                                       
+                 DISPLAY '** ABEND                             '                
+                 DISPLAY '** PROGRAM = INKUP143                '                
+                 DISPLAY '** PARA = 3400-CLOSE-STORE-CSR'                       
+                 PERFORM 9999-SQL-ABEND                                         
+           END-EVALUATE.                                                        
+                                                                                
+W28545******************************************************************        
+W28545*  USING THE EXTRACT FILE FROM INKUP143, GET THE STORES (LOC)             
+W28545*  WITH A RECLASS DATE GREATER THAN THE INVENTORY DATE                    
+W28545******************************************************************        
+W28545 4000-LATE-PROCESS.                                                       
+W28545                                                                          
+W28545     PERFORM 4800-OPEN-LATE-STORE-CSR.                                    
+W28545                                                                          
+W28545     PERFORM 4100-PROCESS-LATE-STORE-CSR                                  
+W28545         UNTIL PS-STORE-FOUND-NO                                          
+W28545                                                                          
+W28545     IF PS-SUMINV-UPDATED                                                 
+W28545         PERFORM 8620-UPDATE-TCKRSTINF                                    
+W28545         PERFORM 8700-COMMIT                                              
+W28545         SET PS-SUMINV-UPDATED-NO TO TRUE                                 
+W28545     ELSE                                                                 
+W28545         PERFORM 4900-CLOSE-LATE-STORE-CSR.                               
+W28545                                                                          
+W28545     PERFORM 2500-READ-EXTRACT.                                           
+W28545                                                                          
+W28545******************************************************************        
+W28545*  LOOK FOR LOCATIONS (STORES) SCHEDULED FOR PHYSICAL COUNT ON            
+W28545*  THIS DAY.                                                              
+W28545******************************************************************        
+W28545 4100-PROCESS-LATE-STORE-CSR.                                             
+W28545                                                                          
+W28545     PERFORM 4200-FETCH-LATE-STORE-CSR.                                   
+W28545                                                                          
+W28545     IF PS-STORE-FOUND                                                    
+W28545         MOVE IN143-SKU            TO PV-IN143-SKU                        
+W28545         PERFORM 6000-OPEN-LATE-RECLS-CSR                                 
+W28545         SET PS-LATE-RECLS-FOUND TO TRUE                                  
+W28545         PERFORM 6100-FETCH-LATE-RECLS-CSR                                
+W28545           UNTIL PS-LATE-RECLS-FOUND-NO                                   
+W28545         PERFORM 6200-CLOSE-LATE-RECLS-CSR                                
+W28545     END-IF.                                                              
+W28545                                                                          
+W28545******************************************************************        
+W28545*  FETCH THE STORES THAT ARE SCHEDULED FOR INVENTORY DURING THE           
+W28545*  SELECTED WEEK.                                                         
+W28545******************************************************************        
+W28545 4200-FETCH-LATE-STORE-CSR.                                               
+W28545     EXEC SQL                                                             
+W28545         FETCH LATE_STORE_CSR                                             
+W28545         INTO  :INVPAR-LOC-NBR                                            
+W28545              ,:INVPAR-PLND-INV-DTE                                       
+W28545     END-EXEC.                                                            
+W28545                                                                          
+W28545     EVALUATE TRUE                                                        
+W28545        WHEN SQLCODE = ZERO                                               
+W28545           SET PS-STORE-FOUND TO TRUE                                     
+W28545        WHEN SQLCODE = +100                                               
+W28545           SET PS-STORE-FOUND-NO        TO TRUE                           
+W28545        WHEN SQLWARN0 NOT EQUAL SPACE                                     
+W28545        WHEN SQLCODE NOT EQUAL ZERO                                       
+W28545           DISPLAY '** ABEND                              '               
+W28545           DISPLAY '** PROGRAM = INKUP143                 '               
+W28545           DISPLAY '** PARAGRAPH = 4200-FETCH-LATE-STORE-CSR.  '          
+W28545           PERFORM 9999-SQL-ABEND                                         
+W28545     END-EVALUATE.                                                        
+W28545******************************************************************        
+W28545*  OPEN THE STORE CURSOR FOR THE PURPOSE OF FINDING STORES                
+W28545*  THAT ARE SCHEDULED FOR INVENTORY THIS MONTH                            
+W28545******************************************************************        
+W28545 4800-OPEN-LATE-STORE-CSR.                                                
+W28545     EXEC SQL                                                             
+W28545         OPEN LATE_STORE_CSR                                              
+W28545     END-EXEC.                                                            
+W28545                                                                          
+W28545     EVALUATE TRUE                                                        
+W28545        WHEN SQLCODE = ZERO                                               
+W28545           SET PS-STORE-FOUND     TO TRUE                                 
+W28545        WHEN SQLCODE = +100                                               
+W28545        WHEN SQLCODE = -181                                               
+W28545           SET PS-STORE-FOUND-NO  TO TRUE                                 
+W28545        WHEN SQLWARN0 NOT EQUAL SPACE                                     
+W28545        WHEN SQLCODE NOT EQUAL ZERO                                       
+W28545           DISPLAY '** ABEND                             '                
+W28545           DISPLAY '** PROGRAM = INKUP143                '                
+W28545           DISPLAY '** PARAGRAPH = 4800-OPEN-LATE-STORE-CSR.  '           
+W28545           DISPLAY '** DTATTR-FSCL-MN-BEG-DTE = '                         
+W28545                       DTATTR-FSCL-MN-BEG-DTE                             
+W28545           DISPLAY '** DTATTR-FSCL-MN-END-DTE = '                         
+W28545                       DTATTR-FSCL-MN-END-DTE                             
+W28545           DISPLAY '** SQLCODE = ' SQLCODE                                
+W28545           PERFORM 9999-SQL-ABEND                                         
+W28545     END-EVALUATE.                                                        
+W28545                                                                          
+W28545                                                                          
+W28545******************************************************************        
+W28545*  CLOSE THE STORE CURSOR                                                 
+W28545******************************************************************        
+W28545 4900-CLOSE-LATE-STORE-CSR.                                               
+W28545     EXEC SQL                                                             
+W28545         CLOSE LATE_STORE_CSR                                             
+W28545     END-EXEC.                                                            
+W28545                                                                          
+W28545     EVALUATE TRUE                                                        
+W28545        WHEN SQLWARN0 NOT EQUAL SPACE                                     
+W28545        WHEN SQLCODE NOT EQUAL ZERO                                       
+W28545           DISPLAY '** ABEND                           '                  
+W28545           DISPLAY '** PROGRAM = INKUP143              '                  
+W28545           DISPLAY '** PARA = 4900-CLOSE-LATE-STORE-CSR'                  
+W28545           PERFORM 9999-SQL-ABEND                                         
+W28545     END-EVALUATE.                                                        
+                                                                                
+      ************************************************************              
+      * OPEN SKU_UPDATE_CSR CURSOR                                              
+      *    THIS CURSOR DEFINES SKUS WITHIN THE STORE THAT WILL                  
+      *    BE UPDATED WITH NEW DEPT, MCL, AND/OR SCL INFORMATION.               
+      ************************************************************              
+       5000-OPEN-SKU-UPDATE-CSR.                                                
+           EXEC SQL                                                             
+               OPEN SKU_UPDATE_CSR                                              
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLWARN0 NOT EQUAL SPACE                                     
+              WHEN SQLCODE NOT EQUAL ZERO                                       
+                 DISPLAY '** ABEND                             '                
+                 DISPLAY '** PROGRAM = INKUP143                '                
+                 DISPLAY '** PARAGRAPH = 5000-OPEN-SKU-UPDATE-CSR'              
+                 PERFORM 9999-SQL-ABEND                                         
+           END-EVALUATE.                                                        
+                                                                                
+                                                                                
+      ************************************************************              
+      * FETCH SKU_UPDATE_CSR CURSOR                                             
+      * FETCH THE SKUS WITHIN THE STORE THAT WILL                               
+      *    BE UPDATED WITH NEW DEPT, MCL, AND/OR SCL INFORMATION.               
+      ************************************************************              
+       5200-FETCH-SKU-UPDATE-CSR.                                               
+           EXEC SQL                                                             
+               FETCH SKU_UPDATE_CSR                                             
+                    INTO :SUMINV-LOC-NBR                                        
+                        ,:SUMINV-AREA-NBR                                       
+                        ,:SUMINV-SKU-NBR                                        
+                        ,:SUMINV-UPC-NBR                                        
+                        ,:SUMINV-INV-UNIT-PR-AMT                                
+                        ,:SUMINV-INV-QTY                                        
+                        ,:SUMINV-DEPT-NBR                                       
+                        ,:SUMINV-MAJ-CL-NBR                                     
+                        ,:SUMINV-SUB-CL-NBR                                     
+                        ,:SUMINV-EXTD-AMT                                       
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = ZERO                                               
+                  PERFORM 5600-COMPARE-ATTRIBUTES                               
+                  SET PS-SUMINV-FOUND         TO TRUE                           
+              WHEN SQLCODE = +100                                               
+                  SET PS-SUMINV-FOUND-NO         TO TRUE                        
+              WHEN SQLWARN0 NOT EQUAL SPACE                                     
+              WHEN SQLCODE NOT EQUAL ZERO                                       
+                 DISPLAY '** ABEND                              '               
+                 DISPLAY '** PROGRAM = INKUP143                 '               
+                 DISPLAY '** PARAGRAPH = 5200-FETCH-SKU-UPDATE-CSR  '           
+                 PERFORM 9999-SQL-ABEND                                         
+           END-EVALUATE.                                                        
+                                                                                
+      *****************************************************************         
+      * CLOSE THE SKU_UPDATE_CSR                                                
+      *****************************************************************         
+       5400-CLOSE-SKU-UPDATE-CSR.                                               
+           EXEC SQL                                                             
+               CLOSE SKU_UPDATE_CSR                                             
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLWARN0 NOT EQUAL SPACE                                     
+              WHEN SQLCODE NOT EQUAL ZERO                                       
+                 DISPLAY '** ABEND                             '                
+                 DISPLAY '** PROGRAM = INKUP143                '                
+                 DISPLAY '** PARA  = 5400-CLOSE-SKU-UPDATE-CSR '                
+                 PERFORM 9999-SQL-ABEND                                         
+           END-EVALUATE.                                                        
+                                                                                
+      *****************************************************************         
+      * COMPARE DATABASE ATTRIBUTES TO NEW INFORMATION ON THE INPUT             
+      * FILE TO DETERMINE IF AN UPDATE SHOULD OCCUR.                            
+      *****************************************************************         
+       5600-COMPARE-ATTRIBUTES.                                                 
+                                                                                
+           IF  SUMINV-DEPT-NBR   = IN143-NEW-DEPT                               
+           AND SUMINV-MAJ-CL-NBR = IN143-NEW-MCL                                
+           AND SUMINV-SUB-CL-NBR = IN143-NEW-SCL                                
+           AND SUMINV-LOC-NBR    = INVPAR-LOC-NBR                               
+               CONTINUE                                                         
+           ELSE                                                                 
+              PERFORM 5700-CREATE-SKU-REPORT-REC                                
+           END-IF.                                                              
+                                                                                
+      *****************************************************************         
+      * CREATE REPORT RECORDS CONTAINING AUDIT INFORMATION FOR THE              
+      * CHANGING INFORMATION                                                    
+      *****************************************************************         
+       5700-CREATE-SKU-REPORT-REC.                                              
+                                                                                
+           INITIALIZE IN144-SKU-RECLASS-EXTRACT.                                
+                                                                                
+           MOVE INVPAR-PLND-INV-DTE       TO  IN144-INV-DATE                    
+           MOVE SUMINV-LOC-NBR            TO  IN144-LOC-NBR                     
+           MOVE SUMINV-AREA-NBR           TO  IN144-AREA-NUMBER                 
+           MOVE SUMINV-SKU-NBR            TO  IN144-SKU                         
+           MOVE SUMINV-UPC-NBR            TO  IN144-UPC                         
+           MOVE SUMINV-INV-UNIT-PR-AMT    TO  IN144-UNIT-RETAIL                 
+           MOVE SUMINV-INV-QTY            TO  IN144-QUANTITY                    
+           MOVE IN143-OLD-DEPT            TO  IN144-OLD-DEPT                    
+           MOVE IN143-OLD-MCL             TO  IN144-OLD-MCL                     
+           MOVE IN143-OLD-SCL             TO  IN144-OLD-SCL                     
+           MOVE IN143-NEW-DEPT            TO  IN144-NEW-DEPT                    
+           MOVE IN143-NEW-MCL             TO  IN144-NEW-MCL                     
+           MOVE IN143-NEW-SCL             TO  IN144-NEW-SCL                     
+           MOVE SUMINV-EXTD-AMT           TO  IN144-EXTD-AMT                    
+           MOVE SPACE                     TO  IN144-REPORT-IND                  
+                                              IN144-LATE-RECLS-IND.             
+                                                                                
+           PERFORM 7200-GET-STORE-NAME.                                         
+           MOVE XMT00001-LOC-NM           TO  IN144-LOC-NM.                     
+                                                                                
+           PERFORM 7000-UPDATE-SUMINV.                                          
+           WRITE SKU-RECLASS-RPT-REC FROM IN144-SKU-RECLASS-EXTRACT.            
+           ADD 1                          TO  PA-EXTRACT-OUT-COUNT.             
+                                                                                
+W28545     PERFORM 5800-WRITE-COMBO-FILE.                                       
+                                                                                
+      *****************************************************************         
+      * WRITE TWO RECORDS TO THE DEBIT/CREDIT COMBINATION FILE                  
+      *   ONE WITH NEW ATTRIBUTES AND ONE WITH OLD ATTRIBUTES.                  
+      *****************************************************************         
+W28545 5800-WRITE-COMBO-FILE.                                                   
+           MOVE IN144-INV-DATE             TO IN145-INV-DATE                    
+           MOVE IN144-LOC-NBR              TO IN145-LOC-NBR                     
+           MOVE IN144-AREA-NUMBER          TO IN145-AREA-NUMBER                 
+           MOVE IN144-SKU                  TO IN145-SKU                         
+           MOVE IN144-UPC                  TO IN145-UPC                         
+           MOVE IN144-UNIT-RETAIL          TO IN145-UNIT-RETAIL                 
+           MOVE IN144-QUANTITY             TO IN145-QUANTITY                    
+           MOVE IN144-NEW-DEPT             TO IN145-DEPT                        
+           MOVE IN144-NEW-MCL              TO IN145-MCL                         
+           MOVE IN144-NEW-SCL              TO IN145-SCL                         
+           MOVE IN144-EXTD-AMT             TO IN145-EXTD-AMT                    
+           MOVE IN144-LOC-NM               TO IN145-LOC-NM                      
+           MOVE IN144-REPORT-IND           TO IN145-REPORT-IND                  
+           MOVE SPACES                     TO IN145-LATE-RECLS-IND.             
+           WRITE SKU-RECLASS-COMBO-REC                                          
+               FROM IN145-SKU-RECLASS-COMBO.                                    
+           MOVE IN144-OLD-DEPT             TO IN145-DEPT                        
+           MOVE IN144-OLD-MCL              TO IN145-MCL                         
+           MOVE IN144-OLD-SCL              TO IN145-SCL                         
+           COMPUTE IN145-EXTD-AMT = IN144-EXTD-AMT * -1.                        
+           WRITE SKU-RECLASS-COMBO-REC                                          
+               FROM IN145-SKU-RECLASS-COMBO.                                    
+                                                                                
+W28545******************************************************************        
+W28545*  OPEN THE LATE_RECLS CURSOR FOR THE PURPOSE OF FINDING SKUS             
+W28545*  THAT WERE RECLASSED AFTER THE PLANNED INVENTORY DATE BUT               
+W28545*  DURING THE SAME WEEK.                                                  
+W28545******************************************************************        
+W28545 6000-OPEN-LATE-RECLS-CSR.                                                
+W28545     EXEC SQL                                                             
+W28545         OPEN LATE_RECLS_CSR                                              
+W28545     END-EXEC.                                                            
+W28545                                                                          
+W28545     EVALUATE TRUE                                                        
+W28545        WHEN SQLWARN0 NOT EQUAL SPACE                                     
+W28545        WHEN SQLCODE NOT EQUAL ZERO                                       
+W28545           DISPLAY '** ABEND                             '                
+W28545           DISPLAY '** PROGRAM = INKUP143                '                
+W28545           DISPLAY '** PARAGRAPH = 6000-OPEN-LATE-RECLS-CSR.  '           
+W28545           DISPLAY '** DTATTR-FSCL-WK-BEG-DTE = '                         
+W28545                       DTATTR-FSCL-WK-BEG-DTE                             
+W28545           DISPLAY '** DTATTR-FSCL-WK-END-DTE = '                         
+W28545                       DTATTR-FSCL-WK-END-DTE                             
+W28545           PERFORM 9999-SQL-ABEND                                         
+W28545     END-EVALUATE.                                                        
+W28545                                                                          
+W28545******************************************************************        
+W28545*  FETCH THE STORES THAT ARE SCHEDULED FOR INVENTORY DURING THE           
+W28545*  SELECTED WEEK BUT THAT HAPPENED AFTER THE PLANNED INVENTORY            
+W28545*  DATE.                                                                  
+W28545******************************************************************        
+W28545 6100-FETCH-LATE-RECLS-CSR.                                               
+W28545     EXEC SQL                                                             
+W28545         FETCH LATE_RECLS_CSR                                             
+W28545         INTO   :SUMINV-LOC-NBR                                           
+W28545              , :SUMINV-SKU-NBR                                           
+W28545              , :SUMINV-AREA-NBR                                          
+W28545              , :SUMINV-UPC-NBR                                           
+W28545              , :SUMINV-INV-UNIT-PR-AMT                                   
+W28545              , :SUMINV-INV-QTY                                           
+W28545              , :SUMINV-DEPT-NBR                                          
+W28545              , :SUMINV-MAJ-CL-NBR                                        
+W28545              , :SUMINV-SUB-CL-NBR                                        
+W28545              , :SUMINV-EXTD-AMT                                          
+W28545              , :SUMINV-CHG-TMST                                          
+W28545              , :IMT00015-RECLS-TMST                                      
+W28545              , :IMT00015-SKU-NBR                                         
+W28545              , :IMT00015-OLD-DEPT-NBR                                    
+W28545              , :IMT00015-OLD-MAJ-CL-NBR                                  
+W28545              , :IMT00015-OLD-SUB-CL-NBR                                  
+W28545              , :IMT00015-NW-DEPT-NBR                                     
+W28545              , :IMT00015-NW-MAJ-CL-NBR                                   
+W28545              , :IMT00015-NW-SUB-CL-NBR                                   
+W28545     END-EXEC.                                                            
+W28545                                                                          
+W28545     EVALUATE TRUE                                                        
+W28545        WHEN SQLCODE = ZERO                                               
+W28545           SET PS-LATE-RECLS-FOUND TO TRUE                                
+W28545           PERFORM 6300-LATE-RECLS-ATTR                                   
+W28545        WHEN SQLCODE = +100                                               
+W28545           SET PS-LATE-RECLS-FOUND-NO   TO TRUE                           
+W28545        WHEN SQLWARN0 NOT EQUAL SPACE                                     
+W28545        WHEN SQLCODE NOT EQUAL ZERO                                       
+W28545           DISPLAY '** ABEND                              '               
+W28545           DISPLAY '** PROGRAM = INKUP143                 '               
+W28545           DISPLAY '** PARAGRAPH = 6100-FETCH-LATE-RECLS-CSR'             
+W28545           PERFORM 9999-SQL-ABEND                                         
+W28545     END-EVALUATE.                                                        
+W28545                                                                          
+W28545******************************************************************        
+W28545*  CLOSE THE LATE-RECLS CURSOR                                            
+W28545******************************************************************        
+W28545 6200-CLOSE-LATE-RECLS-CSR.                                               
+W28545     EXEC SQL                                                             
+W28545         CLOSE LATE_RECLS_CSR                                             
+W28545     END-EXEC.                                                            
+W28545                                                                          
+W28545     EVALUATE TRUE                                                        
+W28545        WHEN SQLWARN0 NOT EQUAL SPACE                                     
+W28545        WHEN SQLCODE NOT EQUAL ZERO                                       
+W28545           DISPLAY '** ABEND                             '                
+W28545           DISPLAY '** PROGRAM = INKUP143                '                
+W28545           DISPLAY '** PARA = 6200-CLOSE-LATE-RECLS-CSR'                  
+W28545           PERFORM 9999-SQL-ABEND                                         
+W28545     END-EVALUATE.                                                        
+W28545                                                                          
+W28545*****************************************************************         
+W28545* COMPARE SUMINV ATTRIBUTES TO NEW ATTRIBUTES ON IMT_RECLS.               
+W28545* IF THE RECLS_TMST IS GREATER THAN THE PLND_INV_DTE AND THE              
+W28545* ATTRIBUTES ARE EQUAL, WRITE REPORT RECORDS                              
+W28545*****************************************************************         
+W28545 6300-LATE-RECLS-ATTR.                                                    
+W28545                                                                          
+W28545     SET PS-RECLS-2-ROW-FOUND  TO TRUE.                                   
+W28545     PERFORM 6320-OPEN-RECLS-CSR-2                                        
+W28545                                                                          
+W28545*    SAVE THE ORIGINAL VALUE (FROM ATTR)                                  
+W28545*    AND SAVE IT TO A SHOULD-BE (SB) AREA                                 
+W28545*    KEEP CHANGING THE SB AREA UNTIL NO MORE MATCHES                      
+W28545                                                                          
+W28545     MOVE SUMINV-DEPT-NBR   TO PV-DEPT-NBR                                
+W28545                               PV-SB-DEPT-NBR                             
+W28545     MOVE SUMINV-MAJ-CL-NBR TO PV-MAJ-CL-NBR                              
+W28545                               PV-SB-MAJ-CL-NBR                           
+W28545     MOVE SUMINV-SUB-CL-NBR TO PV-SUB-CL-NBR                              
+W28545                               PV-SB-SUB-CL-NBR.                          
+W28545     SET PS-SUMINV-ATTR-CHGD-NO  TO TRUE.                                 
+W28545                                                                          
+W28545     PERFORM 6340-FETCH-RECLS-CSR-2                                       
+W28545        UNTIL PS-RECLS-2-ROW-FOUND-NO                                     
+W28545                                                                          
+W28545     IF PS-SUMINV-ATTR-CHGD                                               
+W28545         MOVE PV-DEPT-NBR       TO IMT00015-NW-DEPT-NBR                   
+W28545         MOVE PV-MAJ-CL-NBR     TO IMT00015-NW-MAJ-CL-NBR                 
+W28545         MOVE PV-SUB-CL-NBR     TO IMT00015-NW-SUB-CL-NBR                 
+W28545         MOVE PV-SB-DEPT-NBR    TO IMT00015-OLD-DEPT-NBR                  
+W28545         MOVE PV-SB-MAJ-CL-NBR  TO IMT00015-OLD-MAJ-CL-NBR                
+W28545         MOVE PV-SB-SUB-CL-NBR  TO IMT00015-OLD-SUB-CL-NBR                
+W28545     END-IF.                                                              
+W28545                                                                          
+W28545     PERFORM 6400-LATE-SKU-REPORT-REC                                     
+W28545     PERFORM 6380-CLOSE-RECLS-CSR-2.                                      
+W28545                                                                          
+W28545******************************************************************        
+W28545*  OPEN THE RECLS_CSR_2 CURSOR FOR THE PURPOSE OF FINDING                 
+W28545*  MULTIPLE RECLASS RECORDS DURING INVENTORY WEEK.  THE SKU               
+W28545*  NEEDS TO HAVE THE ATTRIBUTES THAT WERE IN EXISTENCE ON                 
+W28545*  THE PLANNED INVENTORY DATE                                             
+W28545******************************************************************        
+W28545 6320-OPEN-RECLS-CSR-2.                                                   
+W28545     EXEC SQL                                                             
+W28545         OPEN RECLS_CSR_2                                                 
+W28545     END-EXEC.                                                            
+W28545                                                                          
+W28545     EVALUATE TRUE                                                        
+W28545        WHEN SQLWARN0 NOT EQUAL SPACE                                     
+W28545        WHEN SQLCODE NOT EQUAL ZERO                                       
+W28545           DISPLAY '** ABEND                             '                
+W28545           DISPLAY '** PROGRAM = INKUP143                '                
+W28545           DISPLAY '** PARAGRAPH = 6320-OPEN-RECLS-CSR-2.'                
+W28545           DISPLAY '** DTATTR-FSCL-WK-BEG-DTE = '                         
+W28545                       DTATTR-FSCL-WK-BEG-DTE                             
+W28545           DISPLAY '** DTATTR-FSCL-WK-END-DTE = '                         
+W28545                       DTATTR-FSCL-WK-END-DTE                             
+W28545           PERFORM 9999-SQL-ABEND                                         
+W28545     END-EVALUATE.                                                        
+W28545                                                                          
+W28545******************************************************************        
+W28545*  FETCH THE STORES THAT ARE SCHEDULED FOR INVENTORY DURING THE           
+W28545*  SELECTED WEEK BUT THAT HAPPENED AFTER THE PLANNED INVENTORY            
+W28545*  DATE.                                                                  
+W28545******************************************************************        
+W28545 6340-FETCH-RECLS-CSR-2.                                                  
+W28545     EXEC SQL                                                             
+W28545         FETCH RECLS_CSR_2                                                
+W28545         INTO   :IMT00015-RECLS-TMST                                      
+W28545              , :IMT00015-SKU-NBR                                         
+W28545              , :IMT00015-OLD-DEPT-NBR                                    
+W28545              , :IMT00015-OLD-MAJ-CL-NBR                                  
+W28545              , :IMT00015-OLD-SUB-CL-NBR                                  
+W28545              , :IMT00015-NW-DEPT-NBR                                     
+W28545              , :IMT00015-NW-MAJ-CL-NBR                                   
+W28545              , :IMT00015-NW-SUB-CL-NBR                                   
+W28545     END-EXEC.                                                            
+W28545                                                                          
+W28545     EVALUATE TRUE                                                        
+W28545        WHEN SQLCODE = ZERO                                               
+W28545           SET PS-RECLS-2-ROW-FOUND TO TRUE                               
+W28545           IF SUMINV-LOC-NBR = INVPAR-LOC-NBR                             
+W28545              IF IMT00015-NW-DEPT-NBR    = PV-SB-DEPT-NBR                 
+W28545              AND IMT00015-NW-MAJ-CL-NBR = PV-SB-MAJ-CL-NBR               
+W28545              AND IMT00015-NW-SUB-CL-NBR = PV-SB-SUB-CL-NBR               
+W28545                 MOVE IMT00015-OLD-DEPT-NBR   TO PV-SB-DEPT-NBR           
+W28545                 MOVE IMT00015-OLD-MAJ-CL-NBR TO PV-SB-MAJ-CL-NBR         
+W28545                 MOVE IMT00015-OLD-SUB-CL-NBR TO PV-SB-SUB-CL-NBR         
+W28545                 SET PS-SUMINV-ATTR-CHGD      TO TRUE                     
+W28545              END-IF                                                      
+W28545           END-IF                                                         
+W28545        WHEN SQLCODE = +100                                               
+W28545           SET PS-RECLS-2-ROW-FOUND-NO TO TRUE                            
+W28545        WHEN SQLWARN0 NOT EQUAL SPACE                                     
+W28545        WHEN SQLCODE NOT EQUAL ZERO                                       
+W28545           DISPLAY '** ABEND                              '               
+W28545           DISPLAY '** PROGRAM = INKUP143                 '               
+W28545           DISPLAY '** PARAGRAPH = 6340-FETCH-RECLS-CSR-2.'               
+W28545           PERFORM 9999-SQL-ABEND                                         
+W28545     END-EVALUATE.                                                        
+W28545                                                                          
+W28545******************************************************************        
+W28545*  CLOSE THE LATE-RECLS CURSOR                                            
+W28545******************************************************************        
+W28545 6380-CLOSE-RECLS-CSR-2.                                                  
+W28545     EXEC SQL                                                             
+W28545         CLOSE RECLS_CSR_2                                                
+W28545     END-EXEC.                                                            
+W28545                                                                          
+W28545     EVALUATE TRUE                                                        
+W28545        WHEN SQLWARN0 NOT EQUAL SPACE                                     
+W28545        WHEN SQLCODE NOT EQUAL ZERO                                       
+W28545           DISPLAY '** ABEND                             '                
+W28545           DISPLAY '** PROGRAM = INKUP143                '                
+W28545           DISPLAY '** PARA = 6380-CLOSE-RECLS-CSR-2.    '                
+W28545           PERFORM 9999-SQL-ABEND                                         
+W28545     END-EVALUATE.                                                        
+W28545                                                                          
+W28545*****************************************************************         
+W28545* CREATE REPORT RECORDS CONTAINING AUDIT INFORMATION FOR THE              
+W28545* LATE CHANGING INFORMATION                                               
+W28545*****************************************************************         
+W28545 6400-LATE-SKU-REPORT-REC.                                                
+W28545                                                                          
+W28545     INITIALIZE IN144-SKU-RECLASS-EXTRACT.                                
+W28545                                                                          
+W28545     MOVE INVPAR-PLND-INV-DTE       TO  IN144-INV-DATE                    
+W28545     MOVE SUMINV-LOC-NBR            TO  IN144-LOC-NBR                     
+W28545     MOVE SUMINV-AREA-NBR           TO  IN144-AREA-NUMBER                 
+W28545     MOVE SUMINV-SKU-NBR            TO  IN144-SKU                         
+W28545     MOVE SUMINV-UPC-NBR            TO  IN144-UPC                         
+W28545     MOVE SUMINV-INV-UNIT-PR-AMT    TO  IN144-UNIT-RETAIL                 
+W28545     MOVE SUMINV-INV-QTY            TO  IN144-QUANTITY                    
+W28545     MOVE IMT00015-NW-DEPT-NBR      TO  IN144-OLD-DEPT                    
+W28545     MOVE IMT00015-NW-MAJ-CL-NBR    TO  IN144-OLD-MCL                     
+W28545     MOVE IMT00015-NW-SUB-CL-NBR    TO  IN144-OLD-SCL                     
+W28545     MOVE IMT00015-OLD-DEPT-NBR     TO  IN144-NEW-DEPT                    
+W28545     MOVE IMT00015-OLD-MAJ-CL-NBR   TO  IN144-NEW-MCL                     
+W28545     MOVE IMT00015-OLD-SUB-CL-NBR   TO  IN144-NEW-SCL                     
+W28545     MOVE SUMINV-EXTD-AMT           TO  IN144-EXTD-AMT                    
+W28545     MOVE SPACE                     TO  IN144-REPORT-IND                  
+W28545     MOVE '*'                       TO  IN144-LATE-RECLS-IND.             
+W28545                                                                          
+W28545     PERFORM 7200-GET-STORE-NAME.                                         
+W28545     MOVE XMT00001-LOC-NM           TO  IN144-LOC-NM.                     
+W28545     WRITE SKU-RECLASS-RPT-REC FROM IN144-SKU-RECLASS-EXTRACT.            
+W28545                                                                          
+W28545     ADD 1                          TO  PA-EXTRACT-OUT-COUNT.             
+W28545                                                                          
+W28545     PERFORM 6500-WRITE-LATE-COMBO-FILE.                                  
+W28545                                                                          
+W28545     PERFORM 7100-UPDATE-LATE-RECLS.                                      
+W28545*****************************************************************         
+W28545* WRITE TWO RECORDS TO THE DEBIT/CREDIT COMBINATION FILE                  
+W28545*   ONE WITH NEW ATTRIBUTES AND ONE WITH OLD ATTRIBUTES.                  
+W28545*****************************************************************         
+W28545 6500-WRITE-LATE-COMBO-FILE.                                              
+W28545     MOVE INVPAR-PLND-INV-DTE        TO IN145-INV-DATE                    
+W28545     MOVE SUMINV-LOC-NBR             TO IN145-LOC-NBR                     
+W28545     MOVE SUMINV-AREA-NBR            TO IN145-AREA-NUMBER                 
+W28545     MOVE SUMINV-SKU-NBR             TO IN145-SKU                         
+W28545     MOVE SUMINV-UPC-NBR             TO IN145-UPC                         
+W28545     MOVE SUMINV-INV-UNIT-PR-AMT     TO IN145-UNIT-RETAIL                 
+W28545     MOVE SUMINV-INV-QTY             TO IN145-QUANTITY                    
+W28545     MOVE IMT00015-NW-DEPT-NBR       TO IN145-DEPT                        
+W28545     MOVE IMT00015-NW-MAJ-CL-NBR     TO IN145-MCL                         
+W28545     MOVE IMT00015-NW-SUB-CL-NBR     TO IN145-SCL                         
+W28545     MOVE SUMINV-EXTD-AMT            TO IN145-EXTD-AMT                    
+W28545     MOVE XMT00001-LOC-NM            TO IN145-LOC-NM                      
+W28545     MOVE SPACE                      TO IN145-REPORT-IND                  
+W28545     MOVE '*'                        TO IN145-LATE-RECLS-IND              
+W28545     WRITE SKU-RECLASS-COMBO-REC                                          
+W28545         FROM IN145-SKU-RECLASS-COMBO.                                    
+W28545     MOVE IMT00015-OLD-DEPT-NBR      TO IN145-DEPT                        
+W28545     MOVE IMT00015-OLD-MAJ-CL-NBR    TO IN145-MCL                         
+W28545     MOVE IMT00015-OLD-SUB-CL-NBR    TO IN145-SCL                         
+W28545     COMPUTE IN145-EXTD-AMT = SUMINV-EXTD-AMT * -1.                       
+W28545     WRITE SKU-RECLASS-COMBO-REC                                          
+W28545         FROM IN145-SKU-RECLASS-COMBO.                                    
+W28545                                                                          
+W28545 6700-SET-RECLS-ATTR.                                                     
+W28545     IF IMT00015-RECLS-TMST(1:10) >= INVPAR-PLND-INV-DTE                  
+W28545         IF SUMINV-DEPT-NBR    = IMT00015-NW-DEPT-NBR                     
+W28545         AND SUMINV-MAJ-CL-NBR = IMT00015-NW-MAJ-CL-NBR                   
+W28545         AND SUMINV-SUB-CL-NBR = IMT00015-NW-SUB-CL-NBR                   
+W28545             PERFORM 6500-WRITE-LATE-COMBO-FILE                           
+W28545         END-IF                                                           
+W28545     END-IF.                                                              
+      *****************************************************************         
+      * UPDATE THE DATABASE                                                     
+      *****************************************************************         
+       7000-UPDATE-SUMINV.                                                      
+                                                                                
+W28545     IF IN143-TEST                                                        
+W28545        MOVE ZEROS          TO SQLCODE                                    
+W28545       ELSE                                                               
+               EXEC SQL                                                         
+                   UPDATE TSUMINV                                               
+                     SET DEPT_NBR     =  :IN143-NEW-DEPT                        
+                       , MAJ_CL_NBR   =  :IN143-NEW-MCL                         
+                       , SUB_CL_NBR   =  :IN143-NEW-SCL                         
+                   WHERE CURRENT OF SKU_UPDATE_CSR                              
+W28545         END-EXEC                                                         
+W28545     END-IF.                                                              
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = ZERO                                               
+                  SET PS-SUMINV-UPDATED    TO TRUE                              
+              WHEN SQLCODE = -803                                               
+                  DISPLAY 'TRYING TO UPDATE A NON-UNIQUE KEY'                   
+                  PERFORM 9999-SQL-ABEND                                        
+              WHEN SQLWARN0 NOT EQUAL SPACE                                     
+              WHEN SQLCODE NOT EQUAL ZERO                                       
+                  DISPLAY '** ABEND                              '              
+                  DISPLAY '** PROGRAM = INKUP143                 '              
+                  DISPLAY '** PARAGRAPH = 7000-UPDATE-SUMINV     '              
+                  PERFORM 9999-SQL-ABEND                                        
+           END-EVALUATE.                                                        
+                                                                                
+W28545******************************************************************        
+W28545*  UPDATE THE SUMINV RECORD WITH THE DEPT, MCL, AND SCL                   
+W28545*  THAT WAS IN AFFECT ON THE INVENTORY DATE.                              
+W28545*  IN143-TEST IS USED FOR TESTING ONLY.  IF USED, THE                     
+W28545*  PROGRAM WILL NOT UPDATE TSUMINV BUT THE OUTPUT REPORT FILES            
+W28545*  WILL REFLECT ALL CHANGES TO THE DATA.                                  
+W28545******************************************************************        
+W28545 7100-UPDATE-LATE-RECLS.                                                  
+W28545                                                                          
+W28545     IF IN143-TEST                                                        
+W28545        MOVE ZEROS          TO SQLCODE                                    
+W28545     ELSE                                                                 
+W28545         EXEC SQL                                                         
+W28545             UPDATE TSUMINV                                               
+W28545                SET DEPT_NBR   = :IMT00015-OLD-DEPT-NBR                   
+W28545                   ,MAJ_CL_NBR = :IMT00015-OLD-MAJ-CL-NBR                 
+W28545                   ,SUB_CL_NBR = :IMT00015-OLD-SUB-CL-NBR                 
+W28545                   ,CHG_ID_NBR = 'INKUP143'                               
+W28545                   ,CHG_TMST   = CURRENT TIMESTAMP                        
+W28545             WHERE LOC_NBR     = :SUMINV-LOC-NBR                          
+W28545               AND AREA_NBR    = :SUMINV-AREA-NBR                         
+W28545               AND SKU_NBR     = :SUMINV-SKU-NBR                          
+W28545               AND UPC_NBR     = :SUMINV-UPC-NBR                          
+W28545               AND EXTD_AMT    = :SUMINV-EXTD-AMT                         
+W28545               AND CHG_TMST    = :SUMINV-CHG-TMST                         
+W28545         END-EXEC                                                         
+W28545     END-IF.                                                              
+W28545                                                                          
+W28545     EVALUATE TRUE                                                        
+W28545        WHEN SQLWARN0 NOT EQUAL SPACE                                     
+W28545        WHEN SQLCODE NOT EQUAL ZERO                                       
+W28545           DISPLAY '** ABEND                             '                
+W28545           DISPLAY '** PROGRAM = INKUP143                '                
+W28545           DISPLAY '** PARA = 6150-GET-SUMINV-4-UPDT     '                
+W28545           PERFORM 9999-SQL-ABEND                                         
+W28545     END-EVALUATE.                                                        
+W28545                                                                          
+      *****************************************************************         
+      * GET STORE NAME                                                          
+      *****************************************************************         
+       7200-GET-STORE-NAME.                                                     
+           EXEC SQL                                                             
+               SELECT LOC_NM                                                    
+                 INTO :XMT00001-LOC-NM                                          
+                 FROM XMT_LOC                                                   
+                WHERE LOC_NBR = :SUMINV-LOC-NBR                                 
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = ZERO                                               
+                  CONTINUE                                                      
+              WHEN SQLWARN0 NOT EQUAL SPACE                                     
+              WHEN SQLCODE NOT EQUAL ZERO                                       
+                  DISPLAY '** ABEND                              '              
+                  DISPLAY '** PROGRAM = INKUP143                 '              
+                  DISPLAY '** PARAGRAPH = 7200-GET-STORE-NAME    '              
+                  PERFORM 9999-SQL-ABEND                                        
+           END-EVALUATE.                                                        
+                                                                                
+      *****************************************************************         
+      * INITIALIZE AND START CHECKPOINTING                                      
+      *****************************************************************         
+       8000-INITIALIZE-PROGRAM.                                                 
+                                                                                
+           PERFORM 8400-GET-CHECKPOINT-CNTL.                                    
+           PERFORM 8010-CONTINUE-INITIALIZE.                                    
+                                                                                
+           IF RESTART-RUN                                                       
+               PERFORM 8420-RESTART                                             
+           END-IF.                                                              
+                                                                                
+           MOVE PC-IN-PROCESS-CODE TO PV-CKPT-STAT-CODE                         
+           PERFORM 8600-UPDATE-TCKRSTCNTL.                                      
+W30692     PERFORM 8700-COMMIT.                                                 
+                                                                                
+      *****************************************************************         
+      * MORE INITIALIZATION AND GETTING STARTED                                 
+      *****************************************************************         
+       8010-CONTINUE-INITIALIZE.                                                
+           READ RECLS-DATE-CNTL-FILE                                            
+               INTO IN143-CONTROL-RECORD                                        
+           AT END                                                               
+               MOVE +4001                     TO ABEND-CODE                     
+               DISPLAY '**  ABEND     **'                                       
+               DISPLAY '**  PROGRAM   **  =  INKUP143'                          
+               DISPLAY '**  EMPTY DATE CONTROL FILE'                            
+               CALL 'ILBOABN0'      USING ABEND-CODE                            
+           END-READ.                                                            
+                                                                                
+           MOVE IN143-CC-DATE               TO PV-PROCESS-DATE.                 
+           PERFORM 8200-GET-CONTROL-DATES.                                      
+                                                                                
+      ******************************************************************        
+      *    GET BEGINNING AND END OF WEEK DATES FROM TDTATTR                     
+      ******************************************************************        
+       8200-GET-CONTROL-DATES.                                                  
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRY-COUNTER FROM 1 BY 1                             
+               UNTIL   PV-RETRY-COUNTER > PC-MAX-RETRIES                        
+                  OR   SQLCODE = ZERO                                           
+                  OR   SQLCODE = +100                                           
+                                                                                
+             EXEC SQL                                                           
+               SELECT FSCL_WK_BEG_DTE                                           
+                     ,FSCL_WK_END_DTE                                           
+                     ,FSCL_MN_BEG_DTE                                           
+                     ,FSCL_MN_END_DTE                                           
+                 INTO                                                           
+                     :DTATTR-FSCL-WK-BEG-DTE                                    
+                    ,:DTATTR-FSCL-WK-END-DTE                                    
+                    ,:DTATTR-FSCL-MN-BEG-DTE                                    
+                    ,:DTATTR-FSCL-MN-END-DTE                                    
+                 FROM TDTATTR                                                   
+                WHERE KY_DTE = :PV-PROCESS-DATE                                 
+             END-EXEC                                                           
+                                                                                
+             EVALUATE TRUE                                                      
+                 WHEN SQLCODE = ZERO                                            
+                     SET PS-TDTATTR-FOUND TO TRUE                               
+                 WHEN SQLCODE = +100                                            
+                     SET PS-TDTATTR-FOUND-NO TO TRUE                            
+                                                                                
+                 WHEN SQLWARN0 NOT EQUAL SPACE                                  
+                 WHEN SQLCODE NOT EQUAL ZERO                                    
+                     DISPLAY '****************************************'         
+                     DISPLAY '** ABEND                              **'         
+                     DISPLAY '** PROGRAM = INKUP143                 **'         
+                     DISPLAY '** PARAGRAPH = 8200-GET-CONTROL-DATE  **'         
+                     DISPLAY '** SELECT TDTATTR                     **'         
+                     DISPLAY '****************************************'         
+                     PERFORM 9999-SQL-ABEND                                     
+             END-EVALUATE                                                       
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-RETRY-COUNTER > PC-MAX-RETRIES AND                            
+               SQLCODE NOT = ZERO                                               
+               DISPLAY '****************************************'               
+               DISPLAY '** MAX RETRIES EXCEEDED ON SELECT     **'               
+               DISPLAY '** FROM TDTATTR                       **'               
+               DISPLAY '** PARAGRAPH = 8200-GET-CONTROL-DATE  **'               
+               DISPLAY '****************************************'               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      ******************************************************************        
+      *    SELECT CHECKPOINT RESTART CONTROL INFORMATION.              *        
+      ******************************************************************        
+       8400-GET-CHECKPOINT-CNTL.                                                
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-RETRY-COUNTER FROM 1 BY 1                             
+               UNTIL   PV-RETRY-COUNTER > PC-MAX-RETRIES OR                     
+                       SQLCODE = ZERO                                           
+                                                                                
+               EXEC SQL                                                         
+                 SELECT  CKPT_STAT_CODE                                         
+                   INTO :PV-CKPT-STAT-CODE                                      
+                   FROM  TCKRSTCNTL                                             
+                  WHERE  PLAN_NAME = :PC-PROGRAM-NAME                           
+                    AND  JOB_NAME  = :PC-JOB-NAME                               
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -913                                          
+                        CONTINUE                                                
+                                                                                
+                   WHEN SQLWARN0 NOT EQUAL SPACE                                
+                   WHEN SQLCODE NOT EQUAL ZERO                                  
+                       DISPLAY '**************************************'         
+                       DISPLAY '** ABEND                            **'         
+                       DISPLAY '** PROGRAM = INKUP143               **'         
+                       DISPLAY '** PARAGRAPH = 8400-GET-CHECKPOINT- **'         
+                       DISPLAY '**                  CNTL            **'         
+                       DISPLAY '** SELECT FROM TCKRSTCNTL           **'         
+                       DISPLAY '**CKPT-STAT-CODE ='                             
+                       DISPLAY              TCKRSTCNTL-CKPT-STAT-CODE           
+                       DISPLAY '**************************************'         
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-RETRY-COUNTER > PC-MAX-RETRIES AND                            
+               SQLCODE NOT = ZERO                                               
+               DISPLAY '****************************************'               
+               DISPLAY '** MAX RETRIES EXCEEDED ON SELECT     **'               
+               DISPLAY '** FROM TCKRSTCNTL                    **'               
+               DISPLAY '** PARAGRAPH = 8400-GET-CHECKPOINT-CNTL*'               
+               DISPLAY '****************************************'               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+       EJECT                                                                    
+                                                                                
+      ******************************************************************        
+      *    CHECK TO SEE IF A CHECKPOINT RESTART SHOULD BE DONE.        *        
+      ******************************************************************        
+       8420-RESTART.                                                            
+                                                                                
+           PERFORM 8440-GET-CHECKPOINT-INFO.                                    
+           MOVE TCKRSTINF-WORK-STRG-DESC      TO CKPT-RESTART-INFO.             
+                                                                                
+           IF CR-SKU-RECLS-RECS-WORKED > ZERO                                   
+               PERFORM 2500-READ-EXTRACT                                        
+                  CR-SKU-RECLS-RECS-WORKED  TIMES                               
+               IF PS-NOT-END-OF-INPUT                                           
+                   DISPLAY '*************************************'              
+                   DISPLAY '** INKUP143 CHECKPOINT RESTART     **'              
+                   DISPLAY '** RESTARTING WITH SKU = '                          
+                       IN143-SKU  '  **'                                        
+                   DISPLAY '** RECORD NUMBER = '                                
+                       CR-SKU-RECLS-RECS-WORKED  '     **'                      
+                   DISPLAY '*************************************'      ***'.   
+                   IF CR-SKU-NBR      = IN143-SKU                               
+                   AND CR-DEPT-NBR    = IN143-OLD-DEPT                          
+                   AND CR-MAJ-CL-NBR  = IN143-OLD-MCL                           
+                   AND CR-SUB-CL-NBR  = IN143-OLD-SCL                           
+                       SET PS-NOT-END-OF-INPUT TO TRUE                          
+                   ELSE                                                         
+                       DISPLAY '**************************************'         
+                       DISPLAY '** ABEND                            **'         
+                       DISPLAY '** PROGRAM = INKUP143               **'         
+                       DISPLAY '** PARAGRAPH = 8420-RESTART'                    
+                       DISPLAY '** RESTART FAILED ********************'         
+                       DISPLAY CR-SKU-NBR    ' = ' IN143-SKU      ' ?'          
+                       DISPLAY CR-DEPT-NBR   ' = ' IN143-OLD-DEPT ' ?'          
+                       DISPLAY CR-MAJ-CL-NBR ' = ' IN143-OLD-MCL  ' ?'          
+                       DISPLAY CR-SUB-CL-NBR ' = ' IN143-OLD-SCL  ' ?'          
+                       DISPLAY '**************************************'         
+                       PERFORM 9999-SQL-ABEND                                   
+                   END-IF                                                       
+               END-IF                                                           
+           ELSE                                                                 
+               SET PS-END-OF-INPUT TO TRUE                                      
+           END-IF.                                                              
+       EJECT                                                                    
+      ******************************************************************        
+      *    SELECT CHECKPOINT RESTART WORKING STORAGE DESCRIPTION INFO  *        
+      ******************************************************************        
+       8440-GET-CHECKPOINT-INFO.                                                
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRY-COUNTER FROM 1 BY 1                             
+               UNTIL   PV-RETRY-COUNTER > PC-MAX-RETRIES  OR                    
+                       SQLCODE = ZERO                                           
+                                                                                
+               EXEC SQL                                                         
+                 SELECT WORK_STRG_DESC                                          
+                 INTO :TCKRSTINF-WORK-STRG-DESC                                 
+                 FROM TCKRSTINF                                                 
+                 WHERE PLAN_NAME = :PC-PROGRAM-NAME                             
+                   AND JOB_NAME  = :PC-JOB-NAME                                 
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -913                                          
+                        CONTINUE                                                
+                                                                                
+                   WHEN SQLWARN0 NOT EQUAL SPACE                                
+                   WHEN SQLCODE NOT EQUAL ZERO                                  
+                       DISPLAY '**************************************'         
+                       DISPLAY '** ABEND                            **'         
+                       DISPLAY '** PROGRAM = INKUP143               **'         
+                       DISPLAY '** PARAGRAPH = 8440-GET-CHECKPOINT- **'         
+                       DISPLAY '**                  INFO            **'         
+                       DISPLAY '** SELECT FROM TCKRSTINF            **'         
+                       DISPLAY '**************************************'         
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-RETRY-COUNTER > PC-MAX-RETRIES AND                            
+               SQLCODE NOT = ZERO                                               
+               DISPLAY '****************************************'               
+               DISPLAY '** MAX RETRIES EXCEEDED ATTEMPTING TO **'               
+               DISPLAY '** SELECT FROM TCKRSTINF              **'               
+               DISPLAY '** PARAGRAPH = 8440-GET-CHECKPOINT-INFO*'               
+               DISPLAY '****************************************'               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+       EJECT                                                                    
+      ******************************************************************        
+      *    UPDATES THE CHECKPOINT RESTART CONTROL TABLE.  THE STATUS   *        
+      *    CODE IS SET TO '9' (RUN IN PROGRESS) OR '0' (RUN COMPLETE). *        
+      ******************************************************************        
+       8600-UPDATE-TCKRSTCNTL.                                                  
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+                   VARYING PV-RETRY-COUNTER FROM 1 BY 1                         
+                   UNTIL   PV-RETRY-COUNTER > PC-MAX-RETRIES OR                 
+                           SQLCODE = ZERO                                       
+                                                                                
+               EXEC SQL                                                         
+                   UPDATE TCKRSTCNTL                                            
+                   SET CKPT_STAT_CODE = :PV-CKPT-STAT-CODE                      
+                   WHERE PLAN_NAME    = :PC-PROGRAM-NAME                        
+                     AND JOB_NAME     = :PC-JOB-NAME                            
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -913                                          
+                        CONTINUE                                                
+                                                                                
+                   WHEN SQLWARN0 NOT EQUAL SPACE                                
+                   WHEN SQLCODE NOT EQUAL ZERO                                  
+                       DISPLAY '**************************************'         
+                       DISPLAY '** ABEND                            **'         
+                       DISPLAY '** PROGRAM = INKUP143               **'         
+                       DISPLAY '** PARAGRAPH = 8600-UPDATE-TCKRSTCNTL*'         
+                       DISPLAY '** UPDATE TCKRSTCNTL                **'         
+                       DISPLAY '**' PV-CKPT-STAT-CODE                           
+                       DISPLAY '**************************************'         
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-RETRY-COUNTER > PC-MAX-RETRIES AND                            
+               SQLCODE NOT = ZERO                                               
+               DISPLAY '****************************************'               
+               DISPLAY '** MAX RETRIES EXCEEDED ATTEMPTING TO **'               
+               DISPLAY '** UPDATE TO TCKRSTCNTL               **'               
+               DISPLAY '** PARAGRAPH = 8600-UPDATE-TCKRSTCNTL **'               
+               DISPLAY '**' PV-CKPT-STAT-CODE                                   
+               DISPLAY '****************************************'               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+       EJECT                                                                    
+      ******************************************************************        
+      *    UPDATES THE CHECKPOINT RESTART INFO TABLE.  THE CHECKPOINT           
+      *    RESTART INFO IS UPDATED WITH THE CURRENT INPUT RECORD                
+      *    INFORMATION AND NUMBER AS A MARKER THAT CAN BE FOUND.                
+      ******************************************************************        
+       8620-UPDATE-TCKRSTINF.                                                   
+                                                                                
+           IF PA-TOTAL-RECS-READ > 0                                            
+               MOVE PA-TOTAL-RECS-READ    TO CR-SKU-RECLS-RECS-WORKED           
+               MOVE INVPAR-PLND-INV-DTE   TO CR-RECLS-DATE                      
+               MOVE INVPAR-LOC-NBR        TO CR-LOC-NBR                         
+               MOVE IN143-SKU             TO CR-SKU-NBR                         
+               MOVE IN143-OLD-DEPT        TO CR-DEPT-NBR                        
+               MOVE IN143-OLD-MCL         TO CR-MAJ-CL-NBR                      
+               MOVE IN143-OLD-SCL         TO CR-SUB-CL-NBR                      
+           ELSE                                                                 
+               INITIALIZE CKPT-RESTART-INFO                                     
+           END-IF.                                                              
+           MOVE CKPT-RESTART-INFO   TO TCKRSTINF-WORK-STRG-DESC.                
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+                   VARYING PV-RETRY-COUNTER FROM 1 BY 1                         
+                   UNTIL   PV-RETRY-COUNTER > PC-MAX-RETRIES OR                 
+                           SQLCODE = ZERO                                       
+                                                                                
+               EXEC SQL                                                         
+                   UPDATE TCKRSTINF                                             
+                   SET WORK_STRG_DESC   = :TCKRSTINF-WORK-STRG-DESC             
+                   WHERE PLAN_NAME      = :PC-PROGRAM-NAME                      
+                     AND JOB_NAME       = :PC-JOB-NAME                          
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -913                                          
+                        CONTINUE                                                
+                   WHEN SQLWARN0 NOT EQUAL SPACE                                
+                   WHEN SQLCODE NOT EQUAL ZERO                                  
+                       DISPLAY '**************************************'         
+                       DISPLAY '** ABEND                            **'         
+                       DISPLAY '** PROGRAM = INKUP143               **'         
+                       DISPLAY '** PARAGRAPH = 8620-UPDATE-TCKRSTINF**'         
+                       DISPLAY '** UPDATE TCKRSTINF                 **'         
+                       DISPLAY '**' TCKRSTINF-WORK-STRG-DESC                    
+                       DISPLAY '** SQLCODE = ' SQLCODE                          
+                       DISPLAY '**************************************'         
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-RETRY-COUNTER > PC-MAX-RETRIES AND                            
+               SQLCODE NOT = ZERO                                               
+               DISPLAY '****************************************'               
+               DISPLAY '** MAX RETRIES EXCEEDED ATTEMPTING TO **'               
+               DISPLAY '** UPDATE TCKRSTINF                   **'               
+               DISPLAY '** PARAGRAPH = 8620-UPDATE-TCKRSTINF  **'               
+               DISPLAY '**' TCKRSTINF-WORK-STRG-DESC                            
+               DISPLAY '****************************************'               
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+       EJECT                                                                    
+      ******************************************************************        
+      *  ISSUES AN SQL COMMIT AFTER A LOGICAL UNIT OF WORK HAS BEEN    *        
+      *  COMPLETED.                                                    *        
+      ******************************************************************        
+       8700-COMMIT.                                                             
+                                                                                
+           EXEC SQL                                                             
+               COMMIT                                                           
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLWARN0 NOT EQUAL SPACE                                    
+               WHEN SQLCODE NOT EQUAL ZERO                                      
+           DISPLAY '**********************************'                         
+           DISPLAY '**********************************'                         
+           DISPLAY '** ABEND **'                                                
+           DISPLAY '** PROGRAM = INKUP143 **'                                   
+           DISPLAY '** PARAGRAPH = 8700-COMMIT**'                               
+           DISPLAY '**UNSUCCESSFUL COMMIT**'                                    
+           DISPLAY '**********************************'                         
+                   PERFORM 9999-SQL-ABEND                                       
+               WHEN SQLCODE EQUAL ZERO                                          
+                   ADD +1 TO PA-TOTAL-COMMITS                                   
+           END-EVALUATE.                                                        
+                                                                                
+       EJECT                                                                    
+      ******************************************************************        
+      * - TAKES A FINAL COMMIT                                                  
+      * - CLOSES THE FILES PROCESSED BY PROGRAM                                 
+      * - DISPLAYS MISCELLANEOUS JOB SUMMARY INFORMATION.                       
+      ******************************************************************        
+       9000-EOJ-ROUTINE.                                                        
+                                                                                
+           MOVE PC-PROCESS-COMPLETE    TO PV-CKPT-STAT-CODE                     
+           PERFORM 8620-UPDATE-TCKRSTINF.                                       
+           PERFORM 8600-UPDATE-TCKRSTCNTL.                                      
+                                                                                
+           PERFORM 8700-COMMIT.                                                 
+           DISPLAY 'COMMIT TAKEN AT EOJ'.                                       
+                                                                                
+           DISPLAY SPACE.                                                       
+           DISPLAY '*** NUMBER OF RECLASS RECORDS READ = '                      
+               PA-TOTAL-RECS-READ.                                              
+                                                                                
+           DISPLAY SPACE.                                                       
+           DISPLAY '*** NUMBER OF SKU RECLASS REPORT RECORDS WRITTEN = '        
+               PA-EXTRACT-OUT-COUNT.                                            
+           DISPLAY SPACE.                                                       
+                                                                                
+           DISPLAY '*** TOTAL NUMBER OF COMMITS = '                             
+               PA-TOTAL-COMMITS.                                                
+           DISPLAY SPACE.                                                       
+                                                                                
+      ******************************************************************        
+      * ABEND ROUTINE FOR DB2 CALL ERRORS.                                      
+      ******************************************************************        
+       9999-SQL-ABEND.                                                          
+                                                                                
+           DISPLAY '** ABEND     **'.                                           
+           DISPLAY '** PROGRAM   ** = ' PC-PROGRAM-NAME.                        
+           DISPLAY '** PARAGRAPH ** = ' PV-PARAGRAPH-NAME.                      
+           DISPLAY '** OPERATION ** = ' PV-DB2-OPER-ATTEMPTED.                  
+                                                                                
+      *--------------------------------------------------------------*          
+      * THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-            
+      * MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE                 
+      * 'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE             
+      * FORMAT.                                                                 
+      *--------------------------------------------------------------*          
+                                                                                
+           COPY DPPD004.                                                        
+                                                                                
+           MOVE +4013 TO ABEND-CODE.                                            
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    

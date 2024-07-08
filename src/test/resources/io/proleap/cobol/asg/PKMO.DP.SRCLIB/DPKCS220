@@ -1,0 +1,502 @@
+*--------------------------------------------------------------------           
+* THIS EXIT PROGRAM ADDS A SYSID TO ALL EXEC CICS TS Q REQUESTS                 
+* THIS VERSION IS FOR CICSPX TO ROUTE TO CICSP1                                 
+*--------------------------------------------------------------------           
+         DFHUEXIT TYPE=EP,ID=(XTSEREQ,XTSEREQC)                                 
+         DFHUEXIT TYPE=XPIENV       EXIT PROGRAMMING INTERFACE (XPI)            
+         COPY  DFHTRPTY             TRACE XPI DEFINITIONS                       
+         COPY  DFHTSUED             COMMAND LEVEL PLIST DEFINITIONS             
+*                                                                               
+*--------------------------------------------------------------------           
+* THE FOLLOWING DSECT MAPS THE SHARED STORAGE OBTAINED BY THE                   
+* EXEC CICS GETMAIN API CALL. THIS STORAGE IS USED TO STORE THE                 
+* MODIFIED SYSID AND/OR TS QNAME THAT IS PASSED TO CICS ON RETURN               
+* FROM THE EXIT PROGRAM.                                                        
+*--------------------------------------------------------------------           
+SHARED_STORAGE    DSECT                                                         
+SHARED_EYECATCHER DS CL16                                                       
+SHARED_NAME       DS CL8                                                        
+SHARED_SYSID      DS CL4                                                        
+*                                                                               
+*--------------------------------------------------------------------           
+* THE FOLLOWING DEFINITIONS ARE FOR PROGRAM WORKING STORAGE.                    
+*--------------------------------------------------------------------           
+DFHEISTG DSECT                                                                  
+RETCODE      DS XL4                    PROGRAM RETURN CODE                      
+TR_ERROR_N   DS X                      ERROR NUMBER FOR TRACE ENTRY             
+RESP         DS F                      API RESPONSE                             
+         EJECT ,                                                                
+*********************************************************************           
+*  PROGRAM REGISTER USAGE :                                                     
+*  R0 - WORK REGISTER                                                           
+*  R1 - POINTS TO DFHUEPAR PLIST ON ENTRY                                       
+*       WORK REGISTER                                                           
+*  R2 - DFHUEPAR PARAMETER LIST                                                 
+*  R3 - CODE BASE REGISTER                                                      
+*  R4 -  <UNUSED>                                                               
+*  R5 -  <UNUSED>                                                               
+*  R6 - SUBROUTINE LINKAGE REGISTER                                             
+*  R7 - ADDRESS OF TS QUEUE NAME FROM COMMAND PLIST                             
+*  R8 - COMMAND PARAMETER LIST UEPCLPS                                          
+*  R9 - ADDRESS OF TABLE_ENTRY IN TS_ROUTING_TABLE                              
+*  R10-  <UNUSED>                                                               
+*  R11- EIB REGISTER                                                            
+*  R12- WORK REGISTER                                                           
+*  R13- DFHEISTG FOR API CALLS                                                  
+*       KERNEL STACK FOR XPI CALLS                                              
+*  R14- WORK REGISTER                                                           
+*  R15- WORK REGISTER                                                           
+*********************************************************************           
+         EJECT ,                                                                
+*********************************************************************           
+*  DPKCS220 - MAIN ROUTINE                                                      
+*    THIS IS THE ENTRY POINT FOR THE EXIT PROGRAM. CONTROL IS PASSED            
+*    TO THE TS_REQUEST OR TS_REQUEST_COMPLETE ROUTINES DEPENDING                
+*    ON WHETHER THE EXIT WAS INVOKED AT THE XTSEREQ OR XTSEREQC EXIT            
+*    POINTS                                                                     
+*                                                                               
+*  REGISTERS:                                                                   
+*    R1 = UEPAR PLIST (SET ON ENTRY)                                            
+*       = WORK REGISTER                                                         
+*    R2 = UEPAR PLIST                                                           
+*    R3 = PROGRAM BASE REGISTER (SET BY DFHEIENT)                               
+*    R6 = LINKAGE REGISTER                                                      
+*    R11= EIB REGISTER                                                          
+*    R13= EISTG REGISTER (SET BY DFHEIENT)                                      
+*    R15= WORK REGISTER                                                         
+*         USER EXIT RETURN CODE                                                 
+*                                                                               
+*  LOGIC:                                                                       
+*    DPKCS220:                                                                  
+*      EXEC INTERFACE ENTRY                                                     
+*      ADDRESS DFHUEPAR PLIST                                                   
+*      SET OK RETURN CODE                                                       
+*      ADDRESS THE EIB                                                          
+*      TRACE ENTRY                                                              
+*      SELECT EXITID                                                            
+*        WHEN(XTSEREQ) THEN CALL TS_REQUEST                                     
+*        WHEN(XTSEREQC) THEN CALL TS_REQUEST_COMPLETE                           
+*        OTHERWISE CALL ERROR(INVALID_EXIT)                                     
+*      END SELECT                                                               
+*      TRACE EXIT                                                               
+*      SET EXIT RETURN CODE                                                     
+*    RETURN                                                                     
+*********************************************************************           
+DPKCS220 DFHEIENT                                                               
+DPKCS220 AMODE 31                                                               
+DPKCS220 RMODE ANY                                                              
+         LR    R2,R1               DFHUEPAR PLIST PROVIDED BY CALLER            
+         USING DFHUEPAR,R2         USE R2 TO ADDRESS UEPAR PLIST                
+*                                                                               
+         LA    R15,UERCNORM        SET OK RESPONSE                              
+         ST    R15,RETCODE           IN WORKING STORAGE                         
+*                                                                               
+         EXEC CICS ADDRESS EIB(R11)                                             
+         USING DFHEIBLK,R11                                                     
+*        EXEC CICS WRITEQ TD QUEUE('CSSL') FROM(MESSAGE1) LENGTH(13)            
+*                                                                               
+         BAL   R6,TRACE_ENTRY      TRACE PROGRAM ENTRY                          
+*                                                                               
+         L     R1,UEPEXN           ADDRESS OF THE 1 BYTE EXIT ID                
+         CLI   0(R1),XTSEREQ       IS THIS XTSEREQ EXIT?                        
+         BE    TS_REQUEST          ..YES BRANCH TO ROUTINE                      
+         CLI   0(R1),XTSEREQC      IS THIS XTSEREQC EXIT?                       
+         BE    TS_REQUEST_COMPLETE .. YES BRANCH TO ROUTINE                     
+         B     ERROR1              OTHERWISE BRANCH TO ERROR ROUTINE            
+*                                                                               
+RETURN   DS    0H                  RETURN POINT                                 
+         BAL   R6,TRACE_EXIT       TRACE PROGRAM EXIT                           
+*                                                                               
+         L     R15,RETCODE         FETCH RETURN CODE                            
+         DFHEIRET RCREG=15         RETURN TO CICS                               
+         EJECT ,                                                                
+*====================================================================           
+*  TS_REQUEST - INVOKED AT XTSEREQ EXIT POINT                                   
+*    DETERMINE THE TS QUEUE NAME AND SCAN THE TS_ROUTING_TABLE FOR              
+*    A MATCH. IF AN ENTRY EXISTS IN THE TABLE, THEN CHECK THE ACTION            
+*    FIELD AND CALL THE ROUTE_REQUEST OR LOCAL_REQUEST ROUTINES.                
+*                                                                               
+*    THE TS_TOUTING_TABLE IS MADE UP OF ENTRIES WITH THE FOLLOWING              
+*    STRUCTURE:                                                                 
+*                                                                               
+*   TABLE_ENTRY:                                                                
+*    ----------------------------------------------------------                 
+*   | ENTRY_NAME | NEW_NAME |  QOR_SYSID |  ACTION |  *FILLER* |                
+*   | CHAR 8     | CHAR 8   |  CHAR 4    |  BIN 1  |  CHAR 3   |                
+*    ----------------------------------------------------------                 
+*    LAST ENTRY IS INDICATED BY SPECIAL TS_QUEUE NAME                           
+*                                                                               
+*  REGISTERS:                                                                   
+*    R1 = WORK REGISTER                                                         
+*    R7 = SET TO THE TS QUEUE NAME                                              
+*    R8 = COMMAND PARAMETER LIST (CLPS)                                         
+*    R9 = POINTS TO THE NEXT ENTRY IN THE TS_ROUTING_TABLE                      
+*    R15= WORK REGISTER                                                         
+*                                                                               
+*  LOGIC:                                                                       
+*    TS_REQUEST:                                                                
+*       IF CALLED RECURSIVELY THEN                                              
+*         CALL ERROR(RECURSIVE_CALL1)                                           
+*       ELSE                                                                    
+*         IF THE COMMAND GROUP CODE IS NOT A TS REQUEST THEN                    
+*           CALL ERROR(INVALID_GROUP_CODE1)                                     
+*         ELSE                                                                  
+*           CLEAR THE UEPTQTOK                                                  
+*           ADDRESS THE COMMAND PLIST UEPCLPS                                   
+*           FETCH TSQ_NAME                                                      
+*           FETCH START OF TS_ROUTING_TABLE                                     
+*    CHECK_NEXT_ENTRY:                                                          
+*           GET THE NEXT TABLE ENTRY                                            
+*           SELECT (ENTRY_NAME)                                                 
+*             WHEN (LAST_ENTRY) CALL ENTRY_NOT_FOUND                            
+*             WHEN (TSQ_NAME)                                                   
+*               SELECT (ENTRY_ACTION)                                           
+*                 WHEN (ROUTE) CALL ROUTE_REQUEST                               
+*                 WHEN (LOCAL) CALL LOCAL_REQUEST                               
+*                 OTHERWISE CALL ERROR(INVALID_TABLE_ACTION)                    
+*               END SELECT                                                      
+*             OTHERWISE                                                         
+*               GOTO CHECK_NEXT_ENTRY                                           
+*           END SELECT                                                          
+*         END IF                                                                
+*       END IF                                                                  
+*    RETURN                                                                     
+*====================================================================           
+TS_REQUEST DS  0H                                                               
+*        CHECK FOR POSSIBLE RECURSION                                           
+         L     R1,UEPRECUR         ADDRESS OF RECURSIVE COUNT                   
+         LH    R1,0(R1)            FETCH COUNT                                  
+         LTR   R1,R1               HAS EXIT BEEN INVOKED RECURSIVELY?           
+         BNZ   ERROR2              ..YES BRANCH TO ERROR ROUTINE                
+*                                                                               
+*        EXTRACT POINTER TO THE EID AND TS QUEUE NAME FROM CLPS                 
+         L     R8,UEPCLPS          FETCH ADDRESS OF COMMAND PLIST               
+         USING TS_ADDR_LIST,R8     USE R8 TO ADDRESS CLPS                       
+         L     R1,TS_ADDR0         ADDRESS THE EID..                            
+         L     R7,TS_ADDR1         FETCH ADDRESS OF TS QUEUE                    
+         CLC   =CL5'TCPIP',0(R7)   CHECK FOR TCPIP Q'S                          
+         BZ    RETURN              YES, DO NOT ROUTE                            
+         CLC   =CL2'DR',0(R7)      CHECK FOR DRS Q'S                            
+         BZ    RETURN              YES, DO NOT ROUTE                            
+         CLC   =CL4'CAFC',0(R7)    CHECK FOR CAFC Q'S                           
+         BZ    RETURN              YES, DO NOT ROUTE                            
+         DROP  R8                  DROP ADDRESSABILITY TO CLPS                  
+*                                                                               
+*        CHECK THAT THE COMMAND GROUP CODE CORRESPONDS TO A TS REQUES           
+         USING TS_EID,R1           ..WITH REGISTER 1                            
+         CLI   TS_GROUP,TS_TEMPSTOR_GROUP IS THIS A TS REQUEST?                 
+         BNE   ERROR3              ..NO  BRANCH TO ERROR ROUTINE                
+         DROP  R1                  DROP ADDRESSABILITY TO EID                   
+*                                                                               
+*        CLEAR THE TS REQUEST TOKEN                                             
+         L     R1,UEPTQTOK         FETCH ADDRESS OF TOKEN                       
+         XC    0(4,R1),0(R1)       CLEAR TOKEN FOR XTSEREQC                     
+         B     ENTRY_NOT_FOUND     ..YES TAKE DEFAULT ROUTING ACTION            
+*====================================================================           
+*  TS_REQUEST_COMPLETE - INVOKED AT XTSEREQC EXIT POINT                         
+*    FREE ANY SHARED STORAGE THAT WAS ACQUIRED DURING PREVIOUS                  
+*    INVOCATION AT XTSEREQ                                                      
+*                                                                               
+*  REGISTERS:                                                                   
+*    R1 = WORK REGISTER                                                         
+*    R6 = LINKAGE REGISTER                                                      
+*    R8 = COMMAND PARAMETER LIST (CLPS)                                         
+*                                                                               
+*  LOGIC:                                                                       
+*    TS_REQUEST_COMPLETE:                                                       
+*      IF CALLED RECURSIVELY THEN                                               
+*        CALL ERROR(RECURSIVE_CALL2)                                            
+*      ELSE                                                                     
+*        IF THE COMMAND GROUP CODE IS NOT A TS REQUEST THEN                     
+*          CALL ERROR(INVALID_GROUP_CODE2)                                      
+*        ELSE                                                                   
+*          IF UEPTQTOK->TOKEN ,= 0 THEN CALL FREEMAIN_SHARED_PLIST              
+*        END IF                                                                 
+*      END IF                                                                   
+*    RETURN                                                                     
+*====================================================================           
+TS_REQUEST_COMPLETE DS  0H                                                      
+*        CHECK FOR POSSIBLE RECURSION                                           
+         L     R1,UEPRECUR         ADDRESS OF RECURSIVE COUNT                   
+         LH    R1,0(R1)            FETCH COUNT                                  
+         LTR   R1,R1               HAS EXIT BEEN INVOKED RECURSIVELY?           
+         BNZ   ERROR5              ..YES BRANCH TO ERROR ROUTINE                
+*                                                                               
+*        CHECK THAT THE COMMAND GROUP CODE CORRESPONDS TO A TS REQUES           
+         L     R8,UEPCLPS          FETCH ADDRESS OF COMMAND PLIST               
+         USING TS_ADDR_LIST,R8     USE R8 TO ADDRESS CLPS                       
+         L     R1,TS_ADDR0         ADDRESS THE EID..                            
+         USING TS_EID,R1           ..WITH REGISTER 1                            
+         CLI   TS_GROUP,TS_TEMPSTOR_GROUP IS THIS A TS REQUEST?                 
+         BNE   ERROR6              ..NO  BRANCH TO ERROR ROUTINE                
+         DROP  R1                  DROP ADDRESSABILITY TO EID                   
+         DROP  R8                  DROP ADDRESSABILITY TO CLPS                  
+*                                                                               
+         L     R1,UEPTQTOK         FETCH ADDRESS OF TOKEN                       
+         L     R1,0(R1)            FETCH ACTUAL TOKEN                           
+         LTR   R1,R1               DID XTSEREQ GETMAIN ANY STORAGE?             
+         BZ    RETURN              ..NO  RETURN TO CALLER                       
+         BAL   R6,FREEMAIN_SHARED  ..YES ISSUE FREEMAIN                         
+         B     RETURN              RETURN TO CALLER                             
+         EJECT ,                                                                
+*                                                                               
+*====================================================================           
+* ENTRY_NOT_FOUND - NO ENTRY WAS FOUND IN THE TS_ROUTING_TABLE                  
+*   NO ENTRY FOUND IN ROUTING TABLE FOR THIS TS QUEUE NAME. IN THE              
+*   SAMPLE PROGRAM, ALL SUCH REQUESTS ARE ROUTED.                               
+*                                                                               
+*  REGISTERS:                                                                   
+*    R1 = WORK REGISTER                                                         
+*    R6 = LINK REGISTER                                                         
+*    R8 = COMMAND PARAMETER LIST (CLPS)                                         
+*    R12= WORK REGISTER (SHARED_STORAGE)                                        
+*                                                                               
+*  LOGIC:                                                                       
+*    ENTRY_NOT_FOUND:                                                           
+*      CALL GETMAIN_SHARED                                                      
+*      COPY DEFAULT_SYSID INTO SHARED STORAGE                                   
+*      ADDRESS THE COMMAND PLIST                                                
+*      UPDATE ADDR7 TO POINT TO THE ADDRESS OF THE DEFAULT SYSID                
+*      SET THE SYSID EXISTENCE BIT IN THE EID                                   
+*      SET THE HI-ORDER BIT IN LAST ADDRESS IN CLPS                             
+*    RETURN                                                                     
+*====================================================================           
+ENTRY_NOT_FOUND DS 0H                                                           
+         BAL   R6,GETMAIN_SHARED   GETMAIN SHARED STORAGE                       
+         L     R12,UEPTQTOK        FETCH ADDRESS OF TOKEN                       
+         L     R12,0(R12)          FETCH SHARED STORAGE ADDRESS                 
+         USING SHARED_STORAGE,R12  ADDRESS USING R12                            
+*                                                                               
+*        UPDATE THE SYSID IN CLPS                                               
+*        EXEC CICS WRITEQ TD QUEUE('CSSL') FROM(MESSAGE2) LENGTH(14)            
+         MVC   SHARED_SYSID,DEFAULT_SYSID COPY SYSID TO SHARED STORAG           
+         L     R8,UEPCLPS          ADDRESS THE CLPS..                           
+         USING TS_ADDR_LIST,R8     ..WITH REGISTER 8                            
+         L     R1,TS_ADDR0         ADDRESS THE EID..                            
+         USING TS_EID,R1           ..WITH REGISTER 1                            
+         OI    TS_BITS1,TS_SYSID_V INDICATE SYSID NOW PRESENT IN CLPS           
+         DROP  R1                  DROP ADDRESSABILITY TO EID                   
+         LA    R1,SHARED_SYSID     FETCH ADDRESS OF THE NEW SYSID               
+         ST    R1,TS_ADDR7         STORE ADDRESS IN TS_ADDR7                    
+         OI    TS_ADDR7,X'80'      INDICATE SYSID IS END OF PLIST               
+*                                                                               
+*        CLEAR HI-ORDER BITS IN ARGS 1 TO 5                                     
+         TM    TS_ADDR1,X'80'                                                   
+         BNE   NOTFND1                                                          
+         NI    TS_ADDR1,X'7F'      INDICATE NOT LAST PARAMETER IN CLP           
+NOTFND1  DS    0H                                                               
+         TM    TS_ADDR2,X'80'                                                   
+         BNE   NOTFND2                                                          
+         NI    TS_ADDR2,X'7F'      INDICATE NOT LAST PARAMETER IN CLP           
+NOTFND2  DS    0H                                                               
+         TM    TS_ADDR3,X'80'                                                   
+         BNE   NOTFND3                                                          
+         NI    TS_ADDR3,X'7F'      INDICATE NOT LAST PARAMETER IN CLP           
+NOTFND3  DS    0H                                                               
+         TM    TS_ADDR4,X'80'                                                   
+         BNE   NOTFND4                                                          
+         NI    TS_ADDR4,X'7F'      INDICATE NOT LAST PARAMETER IN CLP           
+NOTFND4  DS    0H                                                               
+         TM    TS_ADDR5,X'80'                                                   
+         BNE   NOTFND5                                                          
+         NI    TS_ADDR5,X'7F'      INDICATE NOT LAST PARAMETER IN CLP           
+NOTFND5  DS    0H                                                               
+         B     RETURN              RETURN                                       
+         DROP  R8                  DROP TS_ADDR_LIST                            
+         DROP  R12                 DROP SHARED_STORAGE                          
+         EJECT ,                                                                
+*                                                                               
+*====================================================================           
+*  GETMAIN_SHARED - OBTAIN SHARED STORAGE                                       
+*    WE CANNOT USE TRANSACTION STORAGE TO PASS INFORMATION IN THE               
+*    COMMAND PARAMETER LIST SINCE THIS IS VOLATILE AND WILL BE                  
+*    RELEASED WHEN THE EXIT PROGRAM RETURNS TO CICS.                            
+*    WE MUST OBTAIN SHARED STORAGE HERE, AND FREE IT AT THE                     
+*    TS REQUEST COMPLETE EXIT XTSEREQC                                          
+*                                                                               
+*  REGISTERS:                                                                   
+*    R0 = USED BY EXEC CICS CALL                                                
+*    R1 = USED BY EXEC CICS CALL                                                
+*         WORK REGISTER                                                         
+*    R6 = LINK REGISTER - RETURN ADDRESS                                        
+*    R11= EIB REGISTER   (SET ON ENTRY)                                         
+*    R12= WORK REGISTER                                                         
+*    R14= USED BY EXEC CICS CALL                                                
+*    R15= USED BY EXEC CICS CALL                                                
+*                                                                               
+*  LOGIC:                                                                       
+*    GETMAIN_SHARED:                                                            
+*      EXEC CICS GETMAIN LENGTH(32) SET(UEPTQTOK) SHARED RESP(RESP)             
+*      IF RESP ,= OK THEN                                                       
+*        CALL ERROR(GETMAIN_FAILED)                                             
+*      ELSE                                                                     
+*        ADDRESS SHARED STORAGE                                                 
+*        SET EYECATCHER 'XTSEREQ STORAGE'                                       
+*      END IF                                                                   
+*    RETURN                                                                     
+*====================================================================           
+GETMAIN_SHARED DS 0H                                                            
+         L     R12,UEPTQTOK            FETCH ADDRESS OF TOKEN                   
+         L     R12,0(R12)              FETCH SHARED STORAGE ANCHOR              
+         LTR   R12,R12                 IS THE STORAGE ALREADY PRESENT           
+         BNZR  R6                      ..YES RETURN                             
+         EXEC CICS GETMAIN LENGTH(32) SET(R12) SHARED                  -        
+                   INITIMG(X'00') RESP(RESP)                                    
+         CLC   RESP,DFHRESP(NORMAL)    GETMAIN WORKED OK?                       
+         BNE   ERROR7                  ..NO GOTO ERROR ROUTINE                  
+         L     R1,UEPTQTOK             FETCH ADDRESS OF TOKEN                   
+         ST    R12,0(R1)               SAVE ADDRESS OF STORAGE                  
+         USING SHARED_STORAGE,R12                                               
+         MVC   SHARED_EYECATCHER,EYE_CATCHER SET EYECATCHER                     
+         DROP  R12                     DROP R12                                 
+         BR    R6                      RETURN TO CALLER                         
+         EJECT ,                                                                
+*                                                                               
+*====================================================================           
+*  FREEMAIN_SHARED - FREE SHARED STORAGE                                        
+*    FREE THE SHARED STORAGE ASSOCIATED WITH THIS COMMAND.                      
+*                                                                               
+*  REGISTERS:                                                                   
+*    R0 = USED BY EXEC CICS CALL                                                
+*    R1 = USED BY EXEC CICS CALL                                                
+*    R6 = LINK REGISTER - RETURN ADDRESS                                        
+*    R11= EIB REGISTER   (SET ON ENTRY)                                         
+*    R12= WORK REGISTER                                                         
+*    R14= USED BY EXEC CICS CALL                                                
+*    R15= USED BY EXEC CICS CALL                                                
+*                                                                               
+*  LOGIC:                                                                       
+*    FREEMAIN_SHARED:                                                           
+*      ADDRESS SHARED STORAGE                                                   
+*      IF EYECATCHER ,= 'XTSEREQ STORAGE' THEN                                  
+*        CALL ERROR(FREEMAIN_LOGIC_ERROR)                                       
+*      ELSE                                                                     
+*        EXEC CICS FREEMAIN DATAPOINTER(UEPTQTOK) RESP(RESP)                    
+*        IF RESP ,= OK THEN                                                     
+*          CALL ERROR(FREEMAIN_FAILED)                                          
+*        END IF                                                                 
+*      END IF                                                                   
+*    RETURN                                                                     
+*====================================================================           
+FREEMAIN_SHARED DS 0H                                                           
+         L     R12,UEPTQTOK            FETCH TOKEN ADDRESS                      
+         L     R12,0(R12)              ADDRESS SHARED STORAGE ADDRESS           
+         USING SHARED_STORAGE,R12      ..USING R12                              
+         CLC   SHARED_EYECATCHER,EYE_CATCHER IS THIS OUR STORAGE?               
+         BNE   ERROR8                  ..NO GOTO ERROR ROUTINE                  
+         DROP  R12                     DROP R12                                 
+         EXEC CICS FREEMAIN DATAPOINTER(R12) RESP(RESP)                         
+         CLC   RESP,DFHRESP(NORMAL)    FREEMAIN WORKED OK?                      
+         BNE   ERROR9                  ..NO GOTO ERROR ROUTINE                  
+         L     R12,UEPTQTOK            FETCH TOKEN ADDRESS                      
+         XC    0(4,R12),0(R12)         CLEAR TOKEN ADDRESS                      
+         BR    R6                      RETURN TO CALLER                         
+         EJECT ,                                                                
+*                                                                               
+*====================================================================           
+*  TRACE ROUTINES                                                               
+*    ISSUE A TRACE XPI CALL                                                     
+*                                                                               
+*  REGISTERS:                                                                   
+*    R0 = USED BY XPI CALL                                                      
+*    R1 = DFHTRPT PLIST                                                         
+*    R6 = LINK REGISTER - RETURN ADDRESS                                        
+*    R12= WORK REGISTER                                                         
+*    R13= EISTG REGISTER (SET BY DFHEIENT)                                      
+*         KERNEL STACK ENTRY                                                    
+*    R14= USED BY XPI CALL                                                      
+*    R15= USED BY XPI CALL                                                      
+*====================================================================           
+         USING DFHTRPT_ARG,R1                                                   
+TRACE_ENTRY DS 0H                                                               
+         L     R1,UEPXSTOR         PREPARE FOR XPI CALL                         
+         DFHTRPTX CLEAR,                                               -        
+               POINT_ID(TR_ENTRY)                                               
+         B     ISSUE_TRACE                                                      
+TRACE_EXIT DS  0H                                                               
+         L     R1,UEPXSTOR         PREPARE FOR XPI CALL                         
+         DFHTRPTX CLEAR,                                               -        
+               POINT_ID(TR_EXIT)                                                
+         B     ISSUE_TRACE                                                      
+TRACE_ERROR DS 0H                                                               
+         L     R1,UEPXSTOR         PREPARE FOR XPI CALL                         
+         DFHTRPTX CLEAR,                                               -        
+               POINT_ID(TR_ERROR),                                     -        
+               DATA1(TR_ERROR_N,1)                                              
+         BAL   R6,ISSUE_TRACE                                                   
+         B     RETURN                                                           
+*                                                                               
+*--------------------------------------------------------------------           
+* ISSUE THE TRACE XPI CALL                                                      
+*--------------------------------------------------------------------           
+ISSUE_TRACE DS 0H                                                               
+         L     R8,UEPTRACE         ADDRESS OF TRACE FLAG                        
+         TM    0(R8),UEPTRON       IS TRACE ON?                                 
+         BZ    NO_TRACE            NO - DO NOT ISSUE TRACE THEN                 
+         LR    R12,R13             SAVE R13 ROUND XPI CALL                      
+         L     R13,UEPSTACK                                                     
+         DFHTRPTX CALL,                                                -        
+               IN,                                                     -        
+               FUNCTION(TRACE_PUT),                                    -        
+               POINT_ID(*),                                            -        
+               OUT,                                                    -        
+               RESPONSE(*),                                            -        
+               REASON(*)                                                        
+         LR    R13,R12             RESTORE R13 (DFHEISTG)                       
+NO_TRACE DS    0H                                                               
+         BR    R6                  RETURN TO CALLER                             
+         DROP  R1                                                               
+*                                                                               
+*====================================================================           
+*  ERRORN                                                                       
+*    ERROR HAS OCCURRED DURING PROCESSING                                       
+*    ISSUE A TRACE POINT AND RETURN TO THE CICS                                 
+*====================================================================           
+ERROR1   DS    0H                                                               
+         MVI   TR_ERROR_N,1                                                     
+         B     TRACE_ERROR                                                      
+ERROR2   DS    0H                                                               
+         MVI   TR_ERROR_N,2                                                     
+         B     TRACE_ERROR                                                      
+ERROR3   DS    0H                                                               
+         MVI   TR_ERROR_N,3                                                     
+         B     TRACE_ERROR                                                      
+ERROR4   DS    0H                                                               
+         MVI   TR_ERROR_N,4                                                     
+         B     TRACE_ERROR                                                      
+ERROR5   DS    0H                                                               
+         MVI   TR_ERROR_N,5                                                     
+         B     TRACE_ERROR                                                      
+ERROR6   DS    0H                                                               
+         MVI   TR_ERROR_N,6                                                     
+         B     TRACE_ERROR                                                      
+ERROR7   DS    0H                                                               
+         MVI   TR_ERROR_N,7                                                     
+         B     TRACE_ERROR                                                      
+ERROR8   DS    0H                                                               
+         MVI   TR_ERROR_N,7                                                     
+         B     TRACE_ERROR                                                      
+ERROR9   DS    0H                                                               
+         MVI   TR_ERROR_N,7                                                     
+         B     TRACE_ERROR                                                      
+         EJECT ,                                                                
+         DROP  R2                      DROP DFHUEPAR                            
+         DROP  R11                     DROP EIB                                 
+         LTORG ,                                                                
+*********************************************************************           
+* CONSTANTS                                                                     
+*********************************************************************           
+                 DS 0D                                                          
+EYE_CATCHER      DC CL16'XTSEREQ STORAGE '                                      
+DEFAULT_SYSID    DC CL4'CIP1'                                                   
+LOCAL            EQU X'01'                                                      
+ROUTE            EQU X'02'                                                      
+MESSAGE1         DC CL13'ENTERING EXIT'                                         
+MESSAGE2         DC CL14'CHANGING SYSID'                                        
+*                                                                               
+* TRACE POINT IDS                                                               
+TR_ENTRY         DC XL2'120'                                                    
+TR_EXIT          DC XL2'121'                                                    
+TR_ERROR         DC XL2'122'                                                    
+*                                                                               
+         END   DPKCS220                                                         

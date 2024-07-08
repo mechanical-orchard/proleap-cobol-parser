@@ -1,0 +1,2021 @@
+000100*************************                                         00010000
+000200 IDENTIFICATION DIVISION.                                         00020000
+000300*************************                                         00030000
+000400 PROGRAM-ID.    HMKUP002.                                         00040000
+000700*                                                                 00050000
+000800***************************************************************** 00060000
+000900*         MBS DATE CHANGE PROCESS.                              * 00070000
+001000*                                                               * 00080000
+001100*    THIS SUBROUTINE PROCESSES THE SUBCLASS DELETES FROM        * 00090000
+001200*    HMKUP001. (THIS IS A CLONE OF MBKUT008)  IT WAS DEVELOPED  * 00100000
+001200*    TO ACCOMODATE THE OCCURRENCE OF A SUBCLASS BEING DELETED IN* 00110000
+001200*    RMS AND THEN REACTIVATED IN THE SAME DAY.  THE MESSAGES    * 00120000
+001200*    WILL APPEAR IN THE QUEUE ONE AFTER ANOTHER (DELETE THEN    * 00130000
+001200*    ADD).  THIS CAUSES PROBLEMS IN LEGACY BECAUSE THE MDSEAR   * 00140000
+001200*    RECORDS ARE END-DATED, WHILE THE RMS ROWS ARE DELETED AND  * 00150000
+001200*    THE CURRENT PROCESS CREATES MBKUT008 MESSAGES IN A VSAM    * 00160000
+001200*    FILE THAT ARE PROCESSED AFTER HMKUP001.                    * 00170000
+001300*                                                               * 00180000
+001400*    FOR EACH BATCH CONTROL RECORD, VALIDATE THE RECORD'S       * 00190000
+001500*    CONTENTS.  IF OK, BEGIN THE DATE CHANGES.  THERE ARE       * 00200000
+001600*    THREE TABLES THAT ARE AFFECTED: TMDSEAR, TAPLAVL, AND      * 00210000
+001700*    TRSPBAR.  THERE ARE NO INSERTS PERFORMED.  PRIMARILY,      * 00220000
+001800*    ROW WILL BE UPDATED.  THERE ARE CASES, HOWEVER, WHERE      * 00230000
+001900*    A ROW MAY BE DELETED (ITS START DATE IS BEYOND THE NEW     * 00240000
+002000*    END DATE, THEREFORE, IT WAS AND NEVER WILL BE ACTIVE).     * 00250000
+002100*                                                               * 00260000
+      ***************************************************************** 00270000
+      *    WR/PITS#     DATE     DESCRIPTION                          * 00280000
+      *    --------   ---------- -----------------------------------  * 00290000
+      *    25294      06/23/2003 INITIAL DEVELOPMENT.                 * 00300000
+      ***************************************************************** 00310000
+002700*                                                                 00320000
+002800 ENVIRONMENT DIVISION.                                            00330000
+004300 DATA DIVISION.                                                   00340000
+004400 FILE SECTION.                                                    00350000
+004500*                                                                 00360000
+004600*                                                                 00370000
+005400 WORKING-STORAGE SECTION.                                         00380000
+  5500                                                                  00390005
+005600 01  PC-PROGRAM-CONSTANTS.                                        00400000
+005700     05  PC-MAX-RETRIES            PIC S9(3)  VALUE +3            00410000
+005800                                              COMP-3.             00420000
+005900     05  PC-NINES                  PIC 9(03)  VALUE 999.          00430000
+006000     05  PC-CO                     PIC X(03)  VALUE 'CO '.        00440000
+006100     05  PC-GMA                    PIC X(03)  VALUE 'GMA'.        00450000
+006200     05  PC-DMA                    PIC X(03)  VALUE 'DMA'.        00460000
+006300     05  PC-DPT                    PIC X(03)  VALUE 'DPT'.        00470000
+006400     05  PC-MCL                    PIC X(03)  VALUE 'MCL'.        00480000
+006500     05  PC-SCL                    PIC X(03)  VALUE 'SCL'.        00490000
+006600     05  PC-COMPANY                PIC X(02)  VALUE '03'.         00500000
+006700                                                                  00510000
+006800 01  PS-PROGRAM-SWITCHES.                                         00520000
+006900     05  PS-CONTINUE-SW            PIC X      VALUE 'Y'.          00530000
+007000         88  PS-CONTINUE                      VALUE 'Y'.          00540000
+007100         88  PS-DONT-PROCESS                  VALUE 'N'.          00550000
+007200     05  PS-DATE-SW                PIC X      VALUE 'N'.          00560000
+007300         88  PS-VALID-DATE                    VALUE 'Y'.          00570000
+007400         88  PS-INVALID-DATE                  VALUE 'N'.          00580000
+007500                                                                  00590000
+007600 01  PV-PROGRAM-VARIABLES.                                        00600000
+007700     05  PV-DB2-COUNT              PIC S9(9)  VALUE ZERO          00610000
+007800                                              COMP-3.             00620000
+007900     05  PV-DELETE-COUNT           PIC S9(9)  VALUE ZERO          00630000
+008000                                              COMP-3.             00640000
+008100     05  PV-UPDATE-COUNT           PIC S9(9)  VALUE ZERO          00650000
+008200                                              COMP-3.             00660000
+008300     05  PV-UPDATE-APLAVL-COUNT    PIC S9(9)  VALUE ZERO          00670000
+008400                                              COMP-3.             00680000
+008500     05  PV-DELETE-APLAVL-COUNT    PIC S9(9)  VALUE ZERO          00690000
+008600                                              COMP-3.             00700000
+008700     05  PV-UPDATE-RSPBAR-COUNT    PIC S9(9)  VALUE ZERO          00710000
+008800                                              COMP-3.             00720000
+008900     05  PV-DELETE-RSPBAR-COUNT    PIC S9(9)  VALUE ZERO          00730000
+009000                                              COMP-3.             00740000
+009100     05  PV-BATCH-CNTL-COUNT       PIC S9(9)  VALUE ZERO          00750000
+009200                                              COMP-3.             00760000
+009300     05  PV-TOT-DELETES            PIC S9(9)  VALUE ZERO          00770000
+009400                                              COMP-3.             00780000
+009500     05  PV-TOT-UPDATES            PIC S9(9)  VALUE ZERO          00790000
+009600                                              COMP-3.             00800000
+009700     05  PV-TOT-APLAVLS-UPDATED    PIC S9(9)  VALUE ZERO          00810000
+009800                                              COMP-3.             00820000
+009900     05  PV-TOT-APLAVLS-DELETED    PIC S9(9)  VALUE ZERO          00830000
+010000                                              COMP-3.             00840000
+010100     05  PV-TOT-APLAVLS            PIC S9(9)  VALUE ZERO          00850000
+010200                                              COMP-3.             00860000
+010300     05  PV-TOT-RSPBARS-UPDATED    PIC S9(9)  VALUE ZERO          00870000
+010400                                              COMP-3.             00880000
+010500     05  PV-TOT-RSPBARS-DELETED    PIC S9(9)  VALUE ZERO          00890000
+010600                                              COMP-3.             00900000
+010700     05  PV-TOT-RSPBARS            PIC S9(9)  VALUE ZERO          00910000
+010800                                              COMP-3.             00920000
+010900     05  PV-TOT-MDSEDPS            PIC S9(9)  VALUE ZERO          00930000
+011000                                              COMP-3.             00940000
+011100     05  PV-TOT-MDSECLS            PIC S9(9)  VALUE ZERO          00950000
+011200                                              COMP-3.             00960000
+011300                                                                  00970000
+011400     05  PV-PARAGRAPH-NAME         PIC X(30)  VALUE SPACE.        00980000
+011500     05  PV-DB2-OPER-ATTEMPTED     PIC X(30)  VALUE SPACE.        00990000
+011600     05  PV-SQL-SUB                PIC S9(4)  VALUE ZERO          01000000
+011700                                              COMP.               01010000
+012400     05  PV-LIST-SEQ-NBR           PIC S9(15) VALUE ZERO          01020000
+012500                                              COMP-3.             01030000
+012600     05  PV-MAX-SEQ-NBR            PIC S9(15) VALUE ZERO          01040000
+012700                                              COMP-3.             01050000
+012800     05  PV-WORK-SEQ-NBR           PIC S9(15) VALUE ZERO.         01060000
+012900     05  FILLER  REDEFINES  PV-WORK-SEQ-NBR.                      01070000
+013000         10  PV-WS-OPERCO          PIC 99.                        01080000
+013100         10  PV-CONTROL-DATA.                                     01090000
+013200             15  PV-WS-GMA         PIC 99.                        01100000
+013300             15  PV-WS-DMA         PIC 99.                        01110000
+013400             15  PV-WS-DEPT        PIC 999.                       01120000
+013500             15  PV-WS-MAJ-CL      PIC 99.                        01130000
+013600             15  PV-WS-SUB-CL      PIC 999.                       01140000
+013700         10  PV-WS-ZERO            PIC 9.                         01150000
+           05  PV-OPERATING-CO-002       PIC X(02).                     01160007
+013800                                                                  01170000
+013900     05  PV-REQUEST-LEVEL          PIC X(3)   VALUE SPACES.       01180000
+014000         88  PV-REQUEST-GMA                   VALUE 'GMA'.        01190000
+014100         88  PV-REQUEST-DMA                   VALUE 'DMA'.        01200000
+014200         88  PV-REQUEST-DPT                   VALUE 'DPT'.        01210000
+014300         88  PV-REQUEST-MCL                   VALUE 'MCL'.        01220000
+014400         88  PV-REQUEST-SCL                   VALUE 'SCL'.        01230000
+014500     05  PV-LEVEL                  PIC X(3)   VALUE SPACES.       01240000
+014600         88  PV-CO-LIT                        VALUE 'CO '.        01250000
+014700         88  PV-GMA-LIT                       VALUE 'GMA'.        01260000
+014800         88  PV-DMA-LIT                       VALUE 'DMA'.        01270000
+014900         88  PV-DPT-LIT                       VALUE 'DPT'.        01280000
+015000         88  PV-MCL-LIT                       VALUE 'MCL'.        01290000
+015100                                                                  01300000
+015200     05  PV-LAST-LEVEL             PIC X(3)   VALUE SPACES.       01310000
+015300     05  PV-LAST-CO-DKEY           PIC S9(6)  VALUE ZERO          01320000
+015400                                              COMP-3.             01330000
+015500     05  PV-LAST-GMA-DKEY          PIC S9(6)  VALUE ZERO          01340000
+015600                                              COMP-3.             01350000
+015700     05  PV-LAST-DMA-DKEY          PIC S9(6)  VALUE ZERO          01360000
+015800                                              COMP-3.             01370000
+015900     05  PV-LAST-DPT-DKEY          PIC S9(6)  VALUE ZERO          01380000
+016000                                              COMP-3.             01390000
+016100     05  PV-LAST-MCL-DKEY          PIC S9(6)  VALUE ZERO          01400000
+016200                                              COMP-3.             01410000
+016300     05  PV-APLAVL-DKEY            PIC S9(6)  VALUE ZERO          01420000
+016400                                              COMP-3.             01430000
+016500     05  PV-APLAVL-START-DATE      PIC X(10).                     01440000
+016600     05  PV-APLAVL-END-DATE        PIC X(10).                     01450000
+016700                                                                  01460000
+016800     05  PV-PARENT-DKEY            PIC S9(15) VALUE ZERO          01470000
+016900                                              COMP-3.             01480000
+017000                                                                  01490000
+017100     05  PV-ORIG-START-DATE        PIC X(10).                     01500000
+017200     05  PV-ORIG-END-DATE          PIC X(10).                     01510000
+017300     05  PV-PARENT-START-DATE      PIC X(10).                     01520000
+017400     05  PV-PARENT-END-DATE        PIC X(10).                     01530000
+017500     05  PV-CURRENT-DATE.                                         01540000
+017600         10  PV-CD-YY              PIC 99.                        01550000
+017700         10  PV-CD-MM              PIC XX.                        01560000
+017800         10  PV-CD-DD              PIC XX.                        01570000
+017900     05  PV-DB2-WORK-DATE.                                        01580000
+018000         10  PV-WD-CCYY            PIC 9(4).                      01590000
+018100         10  FILLER  REDEFINES  PV-WD-CCYY.                       01600000
+018200             15  PV-WD-CC          PIC XX.                        01610000
+018300             15  PV-WD-YY          PIC XX.                        01620000
+018400         10  FILLER                PIC X.                         01630000
+018500         10  PV-WD-MM              PIC XX.                        01640000
+018600         10  FILLER                PIC X.                         01650000
+018700         10  PV-WD-DD              PIC XX.                        01660000
+018800                                                                  01670000
+019000 01  PV-NEW-START-DATE             PIC X(10).                     01680000
+019100 01  PV-NEW-END-DATE               PIC X(10).                     01690000
+019200                                                                  01700000
+019300 01  PV-DB2-CHANGE-DATE            PIC X(10).                     01710000
+019400*                                                                 01720000
+020500*                                                                 01730000
+021000*    WORKING STORAGE FOR THE DATE VALIDATION ROUTINE              01740000
+021100*                                                                 01750000
+021200     COPY DPWS500.                                                01760000
+021300*                                                                 01770000
+021400*    MDSEAR DCLGEN                                                01780000
+021500*                                                                 01790000
+021600     EXEC SQL                                                     01800000
+021700         INCLUDE TMDSEAR                                          01810000
+021800     END-EXEC.                                                    01820000
+021900*                                                                 01830000
+022000*    APLAVL DCLGEN                                                01840000
+022100*                                                                 01850000
+022200     EXEC SQL                                                     01860000
+022300         INCLUDE TAPLAVL                                          01870000
+022400     END-EXEC.                                                    01880000
+022500*                                                                 01890000
+022600*    RSPBAR DCLGEN                                                01900000
+022700*                                                                 01910000
+022800     EXEC SQL                                                     01920000
+022900         INCLUDE TRSPBAR                                          01930000
+023000     END-EXEC.                                                    01940000
+023100*                                                                 01950000
+023200*    SQL COMMUNICATIONS AREA DCLGEN                               01960000
+023300*                                                                 01970000
+023400     EXEC SQL                                                     01980000
+023500         INCLUDE SQLCA                                            01990000
+023600     END-EXEC.                                                    02000000
+023700*                                                                 02010000
+023800*    ERROR MESSAGE AREA FOR DB2                                   02020000
+023900*                                                                 02030000
+024000     COPY DPWS004.                                                02040000
+024100*                                                                 02050000
+024200*    MDSEAR LIST CURSOR.                                          02060000
+024300*                                                                 02070000
+024400     EXEC SQL                                                     02080000
+024500         DECLARE MDSEAR-LIST CURSOR                               02090000
+024600             FOR SELECT                                           02100000
+024700                         MDSELV_CDE                               02110000
+024800                      ,  MDSEAR_DKEY                              02120000
+024900                      ,  CHG_DTE                                  02130000
+025000                      ,  STRT_DTE                                 02140000
+025100                      ,  END_DTE                                  02150000
+025200                      ,  LIST_SEQ_NBR                             02160000
+025300         FROM                                                     02170000
+025400              TMDSEAR                                             02180000
+025500            WHERE                                                 02190000
+025600                      (OPERCO_NBR   =  :PV-OPERATING-CO-002       02200007
+025700              AND     (LIST_SEQ_NBR                               02210000
+025800                         BETWEEN       :PV-LIST-SEQ-NBR           02220000
+025900                         AND           :PV-MAX-SEQ-NBR)           02230000
+026000              AND      END_DTE      >  (CURRENT DATE))            02240000
+026100         ORDER BY                                                 02250000
+026200                       LIST_SEQ_NBR                               02260000
+026300     END-EXEC.                                                    02270000
+026400*                                                                 02280000
+026500*    APLAVL LIST CURSOR.                                          02290000
+026600*                                                                 02300000
+026700     EXEC SQL                                                     02310000
+026800         DECLARE APLAVL-LIST CURSOR                               02320000
+026900             FOR SELECT                                           02330000
+027000                         MDSEAR_STRT_DTE                          02340000
+027100                      ,  MDSEAR_END_DTE                           02350000
+027200         FROM                                                     02360000
+027300              TAPLAVL                                             02370000
+027400            WHERE                                                 02380000
+027500                     (OPERCO_NBR     = :PV-OPERATING-CO-002       02390007
+027600              AND     MDSEAR_DKEY    = :MDSEAR-DKEY               02400000
+027700              AND     MDSEAR_END_DTE > (CURRENT DATE))            02410000
+027800         FOR UPDATE OF                                            02420000
+027900                      MDSEAR_STRT_DTE                             02430000
+028000                    , MDSEAR_END_DTE                              02440000
+028100     END-EXEC.                                                    02450000
+028200*                                                                 02460000
+028300*    RSPBAR LIST CURSOR.                                          02470000
+028400*                                                                 02480000
+028500     EXEC SQL                                                     02490000
+028600         DECLARE RSPBAR-LIST CURSOR                               02500000
+028700             FOR SELECT                                           02510000
+028800                         MDSEAR_DKEY                              02520000
+028900                      ,  WORKER_NBR                               02530000
+029000                      ,  RSPLVL_CDE                               02540000
+029100                      ,  WORKER_STRT_DTE                          02550000
+029200                      ,  WORKER_END_DTE                           02560000
+029300                      ,  WORKER_FIR_NAME                          02570000
+029400                      ,  WORKER_LAST_NAME                         02580000
+029500                      ,  OPERCO_NBR                               02590000
+029600         FROM                                                     02600000
+029700              TRSPBAR                                             02610000
+029800            WHERE                                                 02620000
+029900                     (OPERCO_NBR     = :PV-OPERATING-CO-002       02630007
+030000              AND     MDSEAR_DKEY    = :MDSEAR-DKEY               02640000
+030100              AND     WORKER_END_DTE > (CURRENT DATE))            02650000
+030200     END-EXEC.                                                    02660000
+030300*                                                                 02670000
+       LINKAGE SECTION.                                                 02680000
+                                                                        02690000
+020600*    RECORD LAYOUT FOR THE BATCH CONTROL FILE                     02700000
+020700*                                                                 02710000
+020800     COPY HMWS002.                                                02720001
+020900*                                                                 02730000
+030500 PROCEDURE DIVISION USING HM002-HM-SUBR-RECORD.                   02740001
+                                                                        02750001
+030700     PERFORM 0000-HMKUP002.                                       02760000
+030800     GOBACK.                                                      02770000
+                                                                        02780001
+030900 0000-HMKUP002.                                                   02790000
+031000                                                                  02800000
+031300     PERFORM 3000-PROCESS-BATCH-CONTROL.                          02810000
+031600     PERFORM 9000-DISPLAY-TOTALS.                                 02820000
+032700                                                                  02830000
+038900****************************************************************  02840000
+039000*                                                              *  02850000
+039100*    PROCESS THE BATCH CONTROL RECORD, VALIDATE THE DATA, IF   *  02860000
+039200*    OK, UPDATE MDSEAR.                                        *  02870000
+039300*                                                              *  02880000
+039400****************************************************************  02890000
+039500*                                                                 02900000
+039600 3000-PROCESS-BATCH-CONTROL.                                      02910000
+039700*                                                                 02920000
+039800     DISPLAY '* * * * * * * * * * * * * * * * * * * * * * * * *'. 02930000
+039900     DISPLAY '* CONTROL RECORD:'.                                 02940000
+040000     DISPLAY '* ' HM002-HM-SUBR-RECORD.                           02950005
+040100     DISPLAY '*'.                                                 02960000
+040200     ADD 1                     TO  PV-BATCH-CNTL-COUNT.           02970000
+040300     MOVE HM002-OPERATING-CO-002 TO PV-OPERATING-CO-002.          02980007
+050500     SET HM002-GOOD-CALL                                          02990003
+040400         PS-CONTINUE     TO  TRUE.                                03000003
+                                                                        03010003
+040500     PERFORM 3200-VALIDATE-DATA.                                  03020007
+                                                                        03030001
+           IF HM002-GOOD-CALL                                           03040001
+040600         PERFORM 3900-OBTAIN-PARENT-DATES                         03050001
+041200     END-IF.                                                      03060001
+040700*                                                                 03070000
+040800     IF PS-CONTINUE                                               03080001
+040900         PERFORM 4000-UPDATE-MDSEAR                               03090000
+041000     ELSE                                                         03100000
+041100         SET HM002-BAD-CALL    TO  TRUE                           03110001
+041200     END-IF.                                                      03120000
+041300*                                                                 03130000
+041600*                                                                 03140000
+045200****************************************************************  03150000
+045300*                                                              *  03160000
+045400*    ENSURE THE DATA, ALBEIT PREVIOUSLY VALIDATED THRU RMS     *  03170001
+045500*    IS OKAY.                                                  *  03180000
+045600*                                                              *  03190000
+045700****************************************************************  03200000
+045800*                                                                 03210000
+045900 3200-VALIDATE-DATA.                                              03220000
+046000*                                                                 03230000
+046100     IF  HM002-OPERATING-CO-002 NOT NUMERIC                       03240004
+046200         SET PS-DONT-PROCESS   TO  TRUE                           03250000
+046300         DISPLAY '* COMPANY NUMBER NOT NUMERIC = '                03260000
+046400                 HM002-OPERATING-CO-002 '.'                       03270004
+046500         DISPLAY '*'                                              03280000
+046600     END-IF.                                                      03290000
+046700*                                                                 03300000
+046800     IF  HM002-MERCH-AREA-002 GREATER THAN SPACES                 03310004
+046900         PERFORM 3300-EXISTANCE-CHECK                             03320000
+047000     ELSE                                                         03330000
+047100         SET PS-DONT-PROCESS   TO  TRUE                           03340000
+047200         DISPLAY '* NO MERCHANDISE AREA SELECTED = '              03350000
+047300                 HM002-MERCH-AREA-002 '.'                         03360004
+047400         DISPLAY '*'                                              03370000
+047500     END-IF.                                                      03380000
+047600                                                                  03390000
+047700********************************************************          03400000
+047800*    BEGIN THE DATE CHECK                                         03410000
+047900********************************************************          03420000
+048000                                                                  03430000
+048100     INITIALIZE DPG51, DPG52, DPG53, DPG54, DPG55, DPG56.         03440000
+048200                                                                  03450000
+048300     ACCEPT PV-CURRENT-DATE      FROM DATE.                       03460000
+048400     SET PS-VALID-DATE                TO TRUE.                    03470000
+048500                                                                  03480000
+048600     SET DPG51-ACTUAL-CALENDAR-ONLY   TO TRUE.                    03490000
+048700     SET DPG52-LK-DTE-GREG            TO TRUE.                    03500000
+048800     MOVE PV-CD-MM                    TO DPG52-GREG-DATE-MO-X.    03510000
+048900     MOVE PV-CD-DD                    TO DPG52-GREG-DATE-DY-X.    03520000
+049000     MOVE PV-CD-YY                    TO DPG52-GREG-DATE-YR-X.    03530000
+049100                                                                  03540000
+049200     CALL  DP500-KOHLS-CALENDAR-ROUTINE                           03550000
+049300           USING DPG51, DPG52, DPG53, DPG54, DPG55, DPG56.        03560000
+049400                                                                  03570000
+049500     IF DPG54-SEVERE-ERROR OR DPG54-WARNING-ERROR                 03580000
+049600        DISPLAY '* * * * * * * * * * * * * * * * *'               03590000
+049700        DISPLAY '*    ***HMKUP002-1 ABEND***     *'               03600000
+049800        DISPLAY '*                               *'               03610000
+049900        DISPLAY '*                               *'               03620000
+050000        DISPLAY '*  INVALID RETURN FROM DPKUT500 *'               03630000
+050100        DISPLAY '* * * * * * * * * * * * * * * * *'               03640000
+050200        DISPLAY 'ERROR IND.:  '      DPG54-ERROR-IND              03650000
+050300        DISPLAY 'DATE IND.:   '      DPG54-DATE-VALID-IND         03660000
+050400        DISPLAY 'ERROR MSG:   '      DPG54-ERROR-MESSAGE          03670000
+050500        SET HM002-BAD-CALL        TO  TRUE                        03680001
+050700     ELSE                                                         03690000
+050800        MOVE DPG55-DB2-ISO-DATE-FMT TO PV-DB2-CHANGE-DATE         03700000
+050900     END-IF.                                                      03710000
+051000                                                                  03720000
+051100     MOVE PV-DB2-CHANGE-DATE   TO  PV-DB2-WORK-DATE.              03730000
+051200                                                                  03740000
+051800     ADD 1                     TO  PV-WD-CCYY.                    03750000
+051900                                                                  03760000
+052000     IF  HM002-NEW-START-DATE-002 GREATER THAN SPACES             03770004
+052100         IF  HM002-NEW-START-DATE-002 GREATER PV-DB2-WORK-DATE    03780004
+052200             SET PS-INVALID-DATE                                  03790000
+052300                               TO  TRUE                           03800000
+052400             DISPLAY '* START DATE MORE THAN 1 YEAR IN FUTURE, = '03810000
+052500                 HM002-NEW-START-DATE-002 '.'                     03820004
+052600             DISPLAY '*'                                          03830000
+052700         END-IF                                                   03840000
+052800     END-IF.                                                      03850000
+052900                                                                  03860000
+053000     IF  HM002-NEW-END-DATE-002 GREATER THAN SPACES               03870004
+053100         IF  HM002-NEW-END-DATE-002 = '9999-09-09'                03880004
+053200             CONTINUE                                             03890000
+053300         ELSE                                                     03900000
+053400             IF  HM002-NEW-END-DATE-002 GREATER PV-DB2-WORK-DATE  03910004
+053500                 SET PS-INVALID-DATE                              03920000
+053600                               TO  TRUE                           03930000
+053700               DISPLAY '* END DATE MORE THAN 1 YEAR IN FUTURE, = '03940000
+053800                 HM002-NEW-END-DATE-002 '.'                       03950004
+053900                 DISPLAY '*'                                      03960000
+054000             END-IF                                               03970000
+054100         END-IF                                                   03980000
+054200     END-IF.                                                      03990000
+054300                                                                  04000000
+054400     IF  PS-INVALID-DATE                                          04010000
+054500         SET PS-DONT-PROCESS   TO  TRUE                           04020000
+054600     ELSE                                                         04030000
+054700                                                                  04040000
+054800         IF  HM002-NEW-START-DATE-002 GREATER THAN SPACES         04050004
+054900             INITIALIZE DPG51, DPG52, DPG53, DPG54, DPG55, DPG56  04060000
+055000                                                                  04070000
+055100             SET DPG51-ACTUAL-CALENDAR-ONLY   TO TRUE             04080000
+055200             SET DPG52-LK-DTE-ISO-FMT         TO TRUE             04090000
+055300             MOVE HM002-NEW-START-DATE-002                        04100004
+055400                               TO DPG52-DB2-ISO-DATE-FMT          04110000
+055500                                                                  04120000
+055600             CALL  DP500-KOHLS-CALENDAR-ROUTINE                   04130000
+055700                   USING DPG51, DPG52, DPG53,                     04140000
+055800                         DPG54, DPG55, DPG56                      04150000
+055900                                                                  04160000
+056000             IF  DPG54-SEVERE-ERROR OR DPG54-WARNING-ERROR        04170000
+056100                 SET PS-DONT-PROCESS                              04180000
+056200                               TO  TRUE                           04190000
+056300                 SET PS-INVALID-DATE                              04200000
+056400                               TO  TRUE                           04210000
+056500                 DISPLAY '* INVALID START DATE. DATE = '          04220000
+056600                     HM002-NEW-START-DATE-002 '.'                 04230004
+056700                 DISPLAY '*'                                      04240000
+056800             END-IF                                               04250000
+056900         END-IF                                                   04260000
+057000                                                                  04270000
+057100         IF  HM002-NEW-END-DATE-002 GREATER THAN SPACES           04280004
+057110                 AND  HM002-NEW-END-DATE-002 NOT = '9999-09-09'   04290004
+057200             INITIALIZE DPG51, DPG52, DPG53, DPG54, DPG55, DPG56  04300000
+057300                                                                  04310000
+057400             SET DPG51-ACTUAL-CALENDAR-ONLY   TO TRUE             04320000
+057500             SET DPG52-LK-DTE-ISO-FMT         TO TRUE             04330000
+057610             MOVE HM002-NEW-END-DATE-002                          04340004
+057620                               TO DPG52-DB2-ISO-DATE-FMT          04350000
+057700                                                                  04360000
+057800             CALL  DP500-KOHLS-CALENDAR-ROUTINE                   04370000
+057900                   USING DPG51, DPG52, DPG53,                     04380000
+058000                         DPG54, DPG55, DPG56                      04390000
+058100                                                                  04400000
+058200             IF  DPG54-SEVERE-ERROR OR DPG54-WARNING-ERROR        04410000
+061500                 SET PS-DONT-PROCESS                              04420002
+061700                     PS-INVALID-DATE                              04430002
+                           HM002-BAD-CALL  TO TRUE                      04440002
+058700                 DISPLAY '* INVALID END DATE. DATE = '            04450000
+058800                     HM002-NEW-END-DATE-002 '.'                   04460004
+058900                 DISPLAY '*'                                      04470000
+059000             END-IF                                               04480000
+059100         END-IF                                                   04490000
+059200     END-IF.                                                      04500000
+059300                                                                  04510000
+059400     IF  HM002-MERCH-AREA-002 GREATER THAN SPACES                 04520004
+059500                                                                  04530000
+059600         IF  HM002-NEW-START-DATE-002 GREATER THAN SPACES         04540004
+059700             PERFORM 3500-CHECK-START-DATE-DELETES                04550000
+059800                                                                  04560000
+059900             IF  PV-DB2-COUNT GREATER THAN ZERO                   04570000
+061500                 SET PS-DONT-PROCESS                              04580002
+061700                     PS-INVALID-DATE                              04590002
+                           HM002-BAD-CALL  TO TRUE                      04600002
+060400                 DISPLAY '* A SUBORDINATE MERCHANDISE AREA '      04610000
+060500                         'ENDS BEFORE NEW START DATE.'            04620000
+060600                 DISPLAY '*'                                      04630000
+060700             END-IF                                               04640000
+060800                                                                  04650000
+060900         END-IF                                                   04660000
+061000                                                                  04670000
+061100         IF  HM002-NEW-END-DATE-002 GREATER THAN SPACES           04680004
+061200             PERFORM 3600-CHECK-END-DATE-DELETES                  04690000
+061300                                                                  04700000
+061400             IF  PV-DB2-COUNT GREATER THAN ZERO                   04710000
+061500                 SET PS-DONT-PROCESS                              04720000
+061700                     PS-INVALID-DATE                              04730002
+                           HM002-BAD-CALL  TO TRUE                      04740002
+061900                 DISPLAY '* A SUBORDINATE MERCHANDISE AREA '      04750000
+062000                         'STARTS AFTER NEW END DATE.'             04760000
+062100                 DISPLAY '*'                                      04770000
+062200             END-IF                                               04780000
+062300                                                                  04790000
+062400         END-IF                                                   04800000
+062500                                                                  04810000
+062600     END-IF.                                                      04820000
+062700                                                                  04830000
+062800 EJECT                                                            04840000
+062900******************************************************************04850000
+063000*    ENSURE THE DATA EXISTS.                                      04860000
+063100*                                                                 04870000
+063200*    PERFORMED BY 3200                                            04880000
+063300******************************************************************04890000
+063400                                                                  04900000
+063500 3300-EXISTANCE-CHECK.                                            04910000
+063600                                                                  04920000
+063700     MOVE HM002-OPERATING-CO-002                                  04930004
+063800                               TO  PV-WS-OPERCO.                  04940000
+063900     MOVE HM002-MERCH-AREA-002                                    04950004
+064000                               TO  PV-CONTROL-DATA.               04960000
+064100     MOVE ZERO                 TO  PV-WS-ZERO.                    04970000
+064200     SET PV-REQUEST-GMA        TO  TRUE.                          04980000
+064300                                                                  04990000
+064400     IF  HM002-DMA-002 NOT GREATER THAN ZERO                      05000004
+064500         MOVE ZERO             TO  PV-WS-DMA                      05010000
+064600     ELSE                                                         05020000
+064700         SET PV-REQUEST-DMA    TO  TRUE                           05030000
+064800     END-IF.                                                      05040000
+064900                                                                  05050000
+065000     IF  HM002-DEPT-002 NOT GREATER THAN ZERO                     05060004
+065100         MOVE ZERO             TO  PV-WS-DEPT                     05070000
+065200     ELSE                                                         05080000
+065300         SET PV-REQUEST-DPT    TO  TRUE                           05090000
+065400     END-IF.                                                      05100000
+065500                                                                  05110000
+065600     IF  HM002-MAJ-CL-002 NOT GREATER THAN ZERO                   05120004
+065700         MOVE ZERO             TO  PV-WS-MAJ-CL                   05130000
+065800     ELSE                                                         05140000
+065900         SET PV-REQUEST-MCL    TO  TRUE                           05150000
+066000     END-IF.                                                      05160000
+066100                                                                  05170000
+066200     IF  HM002-SUB-CL-002 NOT GREATER THAN ZERO                   05180004
+066300         MOVE ZERO             TO  PV-WS-SUB-CL                   05190000
+066400     ELSE                                                         05200000
+066500         SET PV-REQUEST-SCL    TO  TRUE                           05210000
+066600     END-IF.                                                      05220000
+066700                                                                  05230000
+066800     MOVE PV-WORK-SEQ-NBR      TO  PV-LIST-SEQ-NBR.               05240000
+066900                                                                  05250000
+067000*    NOW THE MAX SEQUENCE NUMBER.                                 05260000
+067100                                                                  05270000
+067200     MOVE PC-NINES             TO  PV-WS-ZERO.                    05280000
+067300     IF  HM002-SUB-CL-002 NOT GREATER THAN ZERO                   05290004
+067400         MOVE PC-NINES         TO  PV-WS-SUB-CL                   05300000
+067500     END-IF.                                                      05310000
+067600                                                                  05320000
+067700     IF  HM002-MAJ-CL-002 NOT GREATER THAN ZERO                   05330004
+067800         MOVE PC-NINES         TO  PV-WS-MAJ-CL                   05340000
+067900     END-IF.                                                      05350000
+068000                                                                  05360000
+068100     IF  HM002-DEPT-002 NOT GREATER THAN ZERO                     05370004
+068200         MOVE PC-NINES         TO  PV-WS-DEPT                     05380000
+068300     END-IF.                                                      05390000
+068400                                                                  05400000
+068500     IF  HM002-DMA-002 NOT GREATER THAN ZERO                      05410004
+068600         MOVE PC-NINES         TO  PV-WS-DMA                      05420000
+068700     END-IF.                                                      05430000
+068800                                                                  05440000
+068900     IF  HM002-GMA-002 NOT GREATER THAN ZERO                      05450004
+069000         MOVE PC-NINES         TO  PV-WS-GMA                      05460000
+069100     END-IF.                                                      05470000
+069200                                                                  05480000
+069300     MOVE PV-WORK-SEQ-NBR      TO  PV-MAX-SEQ-NBR.                05490000
+069400                                                                  05500000
+069500     PERFORM 3400-CHECK-EXISTANCE.                                05510000
+069600                                                                  05520000
+069700     IF  PV-DB2-COUNT EQUAL ZERO                                  05530000
+069800         SET PS-DONT-PROCESS TO  TRUE                             05540000
+               SET HM002-BAD-CALL TO TRUE                               05550002
+069900         DISPLAY '* MERCHANDISE AREA DOES NOT EXIST-'             05560000
+070000                     HM002-MERCH-AREA-002 '.'                     05570004
+070100         DISPLAY '* KEYS USED: '                                  05580000
+070200                 PV-LIST-SEQ-NBR ' - ' PV-MAX-SEQ-NBR             05590000
+070300     END-IF.                                                      05600000
+070400                                                                  05610000
+070500 EJECT                                                            05620000
+070600******************************************************************05630000
+070700*    CHECK IF THE NEW STRUCTURE ALREADY EXISTS.                   05640000
+070800*                                                                 05650000
+070900*    PERFORMED BY 3300                                            05660000
+071000******************************************************************05670000
+071100*                                                                 05680000
+071200 3400-CHECK-EXISTANCE.                                            05690000
+071300*                                                                 05700000
+071400     MOVE ZERO                 TO  PV-DB2-COUNT.                  05710000
+071500*                                                                 05720000
+071600     PERFORM                                                      05730000
+071700         WITH TEST AFTER                                          05740000
+071800         VARYING PV-SQL-SUB                                       05750000
+071900         FROM 1 BY 1                                              05760000
+072000         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       05770000
+072100                   OR SQLCODE = 0                                 05780000
+072200                   OR SQLCODE = +100)                             05790000
+072300*                                                                 05800000
+072400         EXEC SQL                                                 05810000
+072500              SELECT                                              05820000
+072600                     COUNT(DISTINCT GMA_NBR)                      05830000
+072700              INTO                                                05840000
+072800                     :PV-DB2-COUNT                                05850000
+072900              FROM                                                05860000
+073000                     TMDSEAR                                      05870000
+073100              WHERE                                               05880000
+073200                     OPERCO_NBR     = :HM002-OPERATING-CO-002     05890004
+073300                AND (LIST_SEQ_NBR                                 05900000
+073400                     BETWEEN          :PV-LIST-SEQ-NBR            05910000
+073500                     AND              :PV-MAX-SEQ-NBR)            05920000
+073600         END-EXEC                                                 05930000
+073700*                                                                 05940000
+073800         EVALUATE TRUE                                            05950000
+073900             WHEN SQLCODE = -904                                  05960000
+074000             WHEN SQLCODE = -911                                  05970000
+074100             WHEN SQLCODE = +100                                  05980000
+074200             WHEN SQLCODE = 0                                     05990000
+074300                 CONTINUE                                         06000000
+074400             WHEN SQLWARN NOT = SPACES                            06010000
+074500             WHEN SQLCODE NOT = ZERO                              06020000
+074600                 MOVE '3400-CHECK-EXISTANCE'                      06030000
+074700                               TO  PV-PARAGRAPH-NAME              06040000
+074800                 MOVE 'COUNT GMA'                                 06050000
+074900                               TO  PV-DB2-OPER-ATTEMPTED          06060000
+075000                 PERFORM 9900-SQL-ABEND                           06070000
+075100         END-EVALUATE                                             06080000
+075200     END-PERFORM.                                                 06090000
+075300*                                                                 06100000
+075400     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        06110000
+075500         MOVE '3400-CHECK-EXISTANCE'                              06120000
+075600                               TO  PV-PARAGRAPH-NAME              06130000
+075700         MOVE 'COUNT RETRIES EXCEEDED'                            06140000
+075800                               TO  PV-DB2-OPER-ATTEMPTED          06150000
+075900         PERFORM 9900-SQL-ABEND                                   06160000
+076000     END-IF.                                                      06170000
+076100                                                                  06180000
+076200 EJECT                                                            06190000
+076300******************************************************************06200000
+076400*    SEE IF THE NEW END DATE IS BEFORE A SUBORDINATE START DATE.  06210000
+076500*                                                                 06220000
+076600*    PERFORMED BY 3200                                            06230000
+076700******************************************************************06240000
+076800                                                                  06250000
+076900 3500-CHECK-START-DATE-DELETES.                                   06260000
+077000                                                                  06270000
+077100     MOVE ZERO                 TO  PV-DB2-COUNT.                  06280000
+077200     PERFORM                                                      06290000
+077300         WITH TEST AFTER                                          06300000
+077400         VARYING PV-SQL-SUB                                       06310000
+077500         FROM 1 BY 1                                              06320000
+077600         UNTIL PV-SQL-SUB GREATER THAN PC-MAX-RETRIES             06330000
+077700            OR SQLCODE = 0                                        06340000
+077800            OR SQLCODE = +100                                     06350000
+077900                                                                  06360000
+078000         EXEC SQL                                                 06370000
+078100              SELECT                                              06380000
+078200                     COUNT(*)                                     06390000
+078300              INTO                                                06400000
+078400                     :PV-DB2-COUNT                                06410000
+078500              FROM                                                06420000
+078600                     TMDSEAR                                      06430000
+078700              WHERE                                               06440000
+078800                     OPERCO_NBR     = :PC-COMPANY                 06450000
+078900                AND (LIST_SEQ_NBR                                 06460000
+079000                     BETWEEN          :PV-LIST-SEQ-NBR            06470000
+079100                     AND              :PV-MAX-SEQ-NBR)            06480000
+079200                AND (END_DTE        < :HM002-NEW-START-DATE-002)  06490004
+079300         END-EXEC                                                 06500000
+079400                                                                  06510000
+079500         EVALUATE TRUE                                            06520000
+079600             WHEN SQLCODE = -904                                  06530000
+079700             WHEN SQLCODE = -911                                  06540000
+079800             WHEN SQLCODE = +100                                  06550000
+079900             WHEN SQLCODE = 0                                     06560000
+080000                 CONTINUE                                         06570000
+080100             WHEN SQLWARN NOT = SPACES                            06580000
+080200             WHEN SQLCODE NOT = ZERO                              06590000
+080300                 MOVE '3500-CHECK-START-DATE-DELETES'             06600000
+080400                               TO  PV-PARAGRAPH-NAME              06610000
+080500                 MOVE 'COUNT GMA'                                 06620000
+080600                               TO  PV-DB2-OPER-ATTEMPTED          06630000
+080700                 PERFORM 9900-SQL-ABEND                           06640000
+080800         END-EVALUATE                                             06650000
+080900     END-PERFORM.                                                 06660000
+081000                                                                  06670000
+081100     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        06680000
+081200         MOVE '3500-CHECK-START-DATE-DELETES'                     06690000
+081300                               TO  PV-PARAGRAPH-NAME              06700000
+081400         MOVE 'COUNT RETRIES EXCEEDED'                            06710000
+081500                               TO  PV-DB2-OPER-ATTEMPTED          06720000
+081600         PERFORM 9900-SQL-ABEND                                   06730000
+081700     END-IF.                                                      06740000
+081800                                                                  06750000
+081900 EJECT                                                            06760000
+082000******************************************************************06770000
+082100*    SEE IF THE NEW START DATE IS AFTER A SUBORDINATE END DATE.   06780000
+082200*                                                                 06790000
+082300*    PERFORMED BY 3200                                            06800000
+082400******************************************************************06810000
+082500                                                                  06820000
+082600 3600-CHECK-END-DATE-DELETES.                                     06830000
+082700                                                                  06840000
+082800     MOVE ZERO                 TO  PV-DB2-COUNT.                  06850000
+082900     PERFORM                                                      06860000
+083000         WITH TEST AFTER                                          06870000
+083100         VARYING PV-SQL-SUB                                       06880000
+083200         FROM 1 BY 1                                              06890000
+083300         UNTIL PV-SQL-SUB GREATER THAN PC-MAX-RETRIES             06900000
+083400            OR SQLCODE = 0                                        06910000
+083500            OR SQLCODE = +100                                     06920000
+083600                                                                  06930000
+083700         EXEC SQL                                                 06940000
+083800              SELECT                                              06950000
+083900                     COUNT(*)                                     06960000
+084000              INTO                                                06970000
+084100                     :PV-DB2-COUNT                                06980000
+084200              FROM                                                06990000
+084300                     TMDSEAR                                      07000000
+084400              WHERE                                               07010000
+084500                     OPERCO_NBR     = :PC-COMPANY                 07020000
+084600                AND (LIST_SEQ_NBR                                 07030000
+084700                     BETWEEN          :PV-LIST-SEQ-NBR            07040000
+084800                     AND              :PV-MAX-SEQ-NBR)            07050000
+084900                AND (STRT_DTE       > :HM002-NEW-END-DATE-002)    07060004
+085000         END-EXEC                                                 07070000
+085100                                                                  07080000
+085200         EVALUATE TRUE                                            07090000
+085300             WHEN SQLCODE = -904                                  07100000
+085400             WHEN SQLCODE = -911                                  07110000
+085500             WHEN SQLCODE = +100                                  07120000
+085600             WHEN SQLCODE = 0                                     07130000
+085700                 CONTINUE                                         07140000
+085800             WHEN SQLWARN NOT = SPACES                            07150000
+085900             WHEN SQLCODE NOT = ZERO                              07160000
+086000                 MOVE '3600-CHECK-END-DATE-DELETES'               07170000
+086100                               TO  PV-PARAGRAPH-NAME              07180000
+086200                 MOVE 'COUNT GMA'                                 07190000
+086300                               TO  PV-DB2-OPER-ATTEMPTED          07200000
+086400                 PERFORM 9900-SQL-ABEND                           07210000
+086500         END-EVALUATE                                             07220000
+086600     END-PERFORM.                                                 07230000
+086700                                                                  07240000
+086800     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        07250000
+086900         MOVE '3600-CHECK-END-DATE-DELETES'                       07260000
+087000                               TO  PV-PARAGRAPH-NAME              07270000
+087100         MOVE 'COUNT RETRIES EXCEEDED'                            07280000
+087200                               TO  PV-DB2-OPER-ATTEMPTED          07290000
+087300         PERFORM 9900-SQL-ABEND                                   07300000
+087400     END-IF.                                                      07310000
+087500                                                                  07320000
+087600 EJECT                                                            07330000
+094400****************************************************************  07340000
+094500*                                                              *  07350000
+094600*    READ THE PARENT ROW FOR THE NEW DATA.  SAVE THE           *  07360000
+094700*    DATES TO ENSURE ALL NEWLY ADDED ROWS EXIST WITHIN         *  07370000
+094800*    THEIR PARENT.  FIRST, DETERMINE WHICH LEVEL WE NEED       *  07380000
+094900*    AND THEN ISSUE THE SQL.                                   *  07390000
+095000*                                                              *  07400000
+095100*    PERFORMED BY 3000                                         *  07410000
+095200****************************************************************  07420000
+095300                                                                  07430000
+095400 3900-OBTAIN-PARENT-DATES.                                        07440000
+095500                                                                  07450000
+095600     MOVE ZERO                 TO  MDSEAR-SUB-CL-NBR.             07460000
+095700     MOVE HM002-MAJ-CL-002     TO  MDSEAR-MAJ-CL-NBR.             07470004
+095800     MOVE HM002-DEPT-002       TO  MDSEAR-DEPT-NBR.               07480004
+095900     MOVE HM002-DMA-002        TO  MDSEAR-DMA-NBR.                07490004
+096000     MOVE HM002-GMA-002        TO  MDSEAR-GMA-NBR.                07500004
+096100                                                                  07510000
+096200     SET PV-MCL-LIT            TO  TRUE.                          07520000
+096300     IF  HM002-MAJ-CL-002 NOT GREATER THAN ZERO                   07530004
+096400         MOVE ZERO             TO  MDSEAR-MAJ-CL-NBR              07540000
+096500                                   MDSEAR-DEPT-NBR                07550003
+096600         SET PV-DMA-LIT        TO  TRUE                           07560000
+096700         IF  HM002-DEPT-002 NOT GREATER THAN ZERO                 07570004
+096800             SET PV-GMA-LIT    TO  TRUE                           07580000
+096900             MOVE ZERO         TO  MDSEAR-DMA-NBR                 07590000
+097000             IF  HM002-DMA-002 NOT GREATER THAN ZERO              07600004
+097100                 MOVE ZERO     TO  MDSEAR-GMA-NBR                 07610000
+097200                 SET PV-CO-LIT TO  TRUE                           07620000
+097300             END-IF                                               07630000
+097400         END-IF                                                   07640000
+097500     ELSE                                                         07650000
+097600         IF  HM002-SUB-CL-002 NOT GREATER THAN ZERO               07660004
+097700             MOVE ZERO         TO  MDSEAR-MAJ-CL-NBR              07670000
+097800             SET PV-DPT-LIT    TO  TRUE                           07680000
+097900         END-IF                                                   07690000
+098000     END-IF.                                                      07700000
+098100                                                                  07710000
+098200     PERFORM                                                      07720000
+098300         WITH TEST AFTER                                          07730000
+098400         VARYING PV-SQL-SUB                                       07740000
+098500         FROM 1 BY 1                                              07750000
+098600         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       07760000
+098700                   OR SQLCODE = 0                                 07770000
+098800                   OR SQLCODE = +100)                             07780000
+098900                                                                  07790000
+099000         EXEC SQL                                                 07800000
+099100              SELECT STRT_DTE                                     07810000
+099200                   , END_DTE                                      07820000
+099300                   , MDSEAR_DKEY                                  07830000
+099400              INTO                                                07840000
+099500                     :PV-PARENT-START-DATE                        07850007
+099600                   , :PV-PARENT-END-DATE                          07860007
+099700                   , :PV-PARENT-DKEY                              07870007
+099800              FROM                                                07880000
+099900                     TMDSEAR                                      07890000
+100000              WHERE                                               07900000
+100100                     OPERCO_NBR     =  :HM002-OPERATING-CO-002    07910004
+100200                AND  GMA_NBR        =  :MDSEAR-GMA-NBR            07920000
+100300                AND  DMA_NBR        =  :MDSEAR-DMA-NBR            07930000
+100400                AND  DEPT_NBR       =  :MDSEAR-DEPT-NBR           07940000
+100500                AND  MAJ_CL_NBR     =  :MDSEAR-MAJ-CL-NBR         07950000
+100600                AND  SUB_CL_NBR     =  :MDSEAR-SUB-CL-NBR         07960000
+100700                AND  MDSELV_CDE     =  :PV-LEVEL                  07970000
+100800         END-EXEC                                                 07980000
+100900                                                                  07990000
+101000         EVALUATE TRUE                                            08000000
+101100             WHEN SQLCODE = -904                                  08010000
+101200             WHEN SQLCODE = -911                                  08020000
+101300             WHEN SQLCODE = +100                                  08030000
+101400             WHEN SQLCODE = 0                                     08040000
+101500                 CONTINUE                                         08050000
+101600             WHEN SQLWARN NOT = SPACES                            08060000
+101700             WHEN SQLCODE NOT = ZERO                              08070000
+101800                 MOVE '3900-OBTAIN-PARENT-DATES'                  08080000
+101900                               TO  PV-PARAGRAPH-NAME              08090000
+102000                 MOVE 'SELECT TMDSEAR FOR PARENT DATES'           08100000
+102100                               TO  PV-DB2-OPER-ATTEMPTED          08110000
+102200                 PERFORM 9900-SQL-ABEND                           08120000
+102300         END-EVALUATE                                             08130000
+102400     END-PERFORM.                                                 08140000
+102500                                                                  08150000
+102600     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        08160000
+102700         MOVE '3900-OBTAIN-PARENT-DATES'                          08170000
+102800                               TO  PV-PARAGRAPH-NAME              08180000
+102900         MOVE 'SELECT FOR TMDSEAR PARENT DATES EXCEEDED'          08190000
+103000                               TO  PV-DB2-OPER-ATTEMPTED          08200000
+103100         PERFORM 9900-SQL-ABEND                                   08210000
+103200     END-IF.                                                      08220000
+103300                                                                  08230000
+103400     DISPLAY '*  KEYS USED = OPERCO ='                            08240000
+103500             HM002-OPERATING-CO-002  ', GMA='                     08250004
+103600             MDSEAR-GMA-NBR          ', DMA='                     08260000
+103700             MDSEAR-DMA-NBR          ', DPT='                     08270000
+103800             MDSEAR-DEPT-NBR         ', MCL='                     08280000
+103900             MDSEAR-MAJ-CL-NBR       ', SCL='                     08290000
+104000             MDSEAR-SUB-CL-NBR       ', LVL='                     08300000
+104100             PV-LEVEL.                                            08310000
+104200                                                                  08320000
+104300     IF  SQLCODE EQUAL ZERO                                       08330000
+104400         DISPLAY '*  PARENT START DATE = ' PV-PARENT-START-DATE   08340000
+104500         DISPLAY '*  PARENT END   DATE = ' PV-PARENT-END-DATE     08350000
+104600         PERFORM 3950-CHECK-PARENT-DATES                          08360000
+104700     ELSE                                                         08370000
+104800         SET PS-DONT-PROCESS                                      08380002
+104800             HM002-BAD-CALL  TO  TRUE                             08390002
+104900         DISPLAY '*  PARENT NOT FOUND FOR THIS CONTROL RECORD'    08400000
+105000     END-IF.                                                      08410000
+105100                                                                  08420000
+105200                                                                  08430003
+105300****************************************************************  08440000
+105400*                                                              *  08450000
+105500*    NOW ENSURE THE CHANGES DATES ARE WITHING THE PARENT       *  08460000
+105600*    DATES.                                                    *  08470000
+105700*                                                              *  08480000
+105800*    PERFORMED BY 3900                                         *  08490000
+105900****************************************************************  08500000
+106000                                                                  08510000
+106100 3950-CHECK-PARENT-DATES.                                         08520000
+106200                                                                  08530000
+106300     IF  HM002-NEW-START-DATE-002 GREATER THAN SPACES             08540004
+106400         IF  HM002-NEW-START-DATE-002 LESS PV-PARENT-START-DATE   08550004
+106500             SET PS-DONT-PROCESS                                  08560000
+106600                               TO  TRUE                           08570000
+106700             DISPLAY '* NEW START DATE LESS THAN PARENT DATE, '   08580000
+106800                     'NEW = '                                     08590000
+106900                     HM002-NEW-START-DATE-002                     08600004
+107000                     '. PARENT = '                                08610000
+107100                     PV-PARENT-START-DATE '.'                     08620000
+107200         END-IF                                                   08630000
+107300     END-IF.                                                      08640000
+107400                                                                  08650000
+107500     IF  HM002-NEW-END-DATE-002 GREATER THAN SPACES               08660004
+107600         IF  HM002-NEW-END-DATE-002 GREATER PV-PARENT-END-DATE    08670004
+107700             SET PS-DONT-PROCESS                                  08680000
+107800                 HM002-BAD-CALL  TO  TRUE                         08690003
+107900             DISPLAY '* NEW END DATE GREATER THAN PARENT DATE, '  08700000
+108000                     'NEW = '                                     08710000
+108100                     HM002-NEW-END-DATE-002                       08720004
+108200                     '. PARENT = '                                08730000
+108300                     PV-PARENT-END-DATE '.'                       08740000
+108400         END-IF                                                   08750000
+108500     END-IF.                                                      08760000
+108600                                                                  08770000
+108700     IF  PS-CONTINUE                                              08780000
+108800         EVALUATE TRUE                                            08790000
+108900                                                                  08800000
+109000             WHEN PV-CO-LIT                                       08810000
+109100                  MOVE PV-PARENT-DKEY                             08820000
+109200                               TO  PV-LAST-CO-DKEY                08830000
+109300                                                                  08840000
+109400             WHEN PV-GMA-LIT                                      08850000
+109500                  MOVE PV-PARENT-DKEY                             08860000
+109600                               TO  PV-LAST-GMA-DKEY               08870000
+109700                                                                  08880000
+109800             WHEN PV-DMA-LIT                                      08890000
+109900                  MOVE PV-PARENT-DKEY                             08900000
+110000                               TO  PV-LAST-DMA-DKEY               08910000
+110100                                                                  08920000
+110200             WHEN PV-DPT-LIT                                      08930000
+110300                  MOVE PV-PARENT-DKEY                             08940000
+110400                               TO  PV-LAST-DPT-DKEY               08950000
+110500                                                                  08960000
+110600             WHEN PV-MCL-LIT                                      08970000
+110700                  MOVE PV-PARENT-DKEY                             08980000
+110800                               TO  PV-LAST-MCL-DKEY               08990000
+110900         END-EVALUATE                                             09000000
+111000     END-IF.                                                      09010000
+111100                                                                  09020000
+111200 EJECT                                                            09030000
+111300****************************************************************  09040000
+111400*                                                              *  09050000
+111500*    HERE BEGINS THE ACTUAL UPDATE PROCESS.  FIRST, WE MUST    *  09060000
+111600*    OPEN THE CURSOR.  NEXT UPDATE THE ROW WITH THE NEW DATES. *  09070000
+111700*                                                              *  09080000
+111800*    PERFORMED BY 3000-                                        *  09090000
+111900****************************************************************  09100000
+112000                                                                  09110000
+112100 4000-UPDATE-MDSEAR.                                              09120000
+112200                                                                  09130000
+112300     PERFORM 4100-OPEN-CURSOR.                                    09140000
+112400     PERFORM 4200-PROCESS-CURSOR                                  09150000
+112500         UNTIL SQLCODE NOT EQUAL ZERO.                            09160000
+112600     PERFORM 4600-CLOSE-CURSOR.                                   09170000
+112700*    PERFORM 4800-COMMIT.                                         09180000
+112800                                                                  09190000
+112900 EJECT                                                            09200000
+113000****************************************************************  09210000
+113100*                                                              *  09220000
+113200*    OPEN THE MERCHANDISE LIST CURSOR.                         *  09230000
+113300*                                                              *  09240000
+113400****************************************************************  09250000
+113500                                                                  09260000
+113600 4100-OPEN-CURSOR.                                                09270000
+113700                                                                  09280000
+113800     PERFORM                                                      09290000
+113900         WITH TEST AFTER                                          09300000
+114000         VARYING PV-SQL-SUB                                       09310000
+114100         FROM 1 BY 1                                              09320000
+114200         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       09330000
+114300                   OR SQLCODE = 0                                 09340000
+114400                   OR SQLCODE = +100)                             09350000
+114500                                                                  09360000
+114600         EXEC SQL                                                 09370000
+114700            OPEN  MDSEAR-LIST                                     09380000
+114800         END-EXEC                                                 09390000
+114900                                                                  09400000
+115000         EVALUATE TRUE                                            09410000
+115100             WHEN SQLCODE = -904                                  09420000
+115200             WHEN SQLCODE = -911                                  09430000
+115300             WHEN SQLCODE = +100                                  09440000
+115400             WHEN SQLCODE = 0                                     09450000
+115500                 CONTINUE                                         09460000
+115600             WHEN SQLWARN NOT = SPACES                            09470000
+115700             WHEN SQLCODE NOT = ZERO                              09480000
+115800                 MOVE '4100-OPEN-CURSOR'                          09490000
+115900                               TO  PV-PARAGRAPH-NAME              09500000
+116000                 MOVE 'OPEN MDSEAR CURSOR'                        09510000
+116100                               TO  PV-DB2-OPER-ATTEMPTED          09520000
+116200                 PERFORM 9900-SQL-ABEND                           09530000
+116300         END-EVALUATE                                             09540000
+116400     END-PERFORM.                                                 09550000
+116500                                                                  09560000
+116600     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        09570000
+116700         MOVE '4100-OPEN-CURSOR'                                  09580000
+116800                               TO  PV-PARAGRAPH-NAME              09590000
+116900         MOVE 'OPEN CURSOR RETRIES EXCEEDED'                      09600000
+117000                               TO  PV-DB2-OPER-ATTEMPTED          09610000
+117100         PERFORM 9900-SQL-ABEND                                   09620000
+117200     END-IF.                                                      09630000
+117300                                                                  09640000
+117400 EJECT                                                            09650000
+117500****************************************************************  09660000
+117600*                                                              *  09670000
+117700*    FETCH THE CURSOR AND UPDATE THE ROW.                      *  09680000
+117800*                                                              *  09690000
+117900****************************************************************  09700000
+118000                                                                  09710000
+118100 4200-PROCESS-CURSOR.                                             09720000
+118200                                                                  09730000
+118300     PERFORM 4300-FETCH-CURSOR.                                   09740000
+118400                                                                  09750000
+118500     IF  SQLCODE EQUAL ZERO                                       09760000
+118600         MOVE MDSEAR-STRT-DTE  TO  PV-ORIG-START-DATE             09770000
+118700         MOVE MDSEAR-END-DTE   TO  PV-ORIG-END-DATE               09780000
+118800                                                                  09790000
+118900         IF  HM002-NEW-START-DATE-002 GREATER THAN SPACES         09800004
+119000             MOVE HM002-NEW-START-DATE-002                        09810004
+119100                               TO  PV-NEW-START-DATE              09820000
+119200         ELSE                                                     09830000
+119300             MOVE MDSEAR-STRT-DTE                                 09840000
+119400                               TO  PV-NEW-START-DATE              09850000
+119500         END-IF                                                   09860000
+119600                                                                  09870000
+119700         IF  HM002-NEW-END-DATE-002 GREATER THAN SPACES           09880004
+119800             MOVE HM002-NEW-END-DATE-002                          09890004
+119900                               TO  PV-NEW-END-DATE                09900000
+120000         ELSE                                                     09910000
+120100             MOVE MDSEAR-END-DTE                                  09920000
+120200                               TO  PV-NEW-END-DATE                09930000
+120300         END-IF                                                   09940000
+120400                                                                  09950000
+120500         IF  PV-REQUEST-LEVEL NOT EQUAL MDSEAR-MDSELV-CDE         09960000
+120600             IF  PV-NEW-START-DATE LESS THAN MDSEAR-STRT-DTE      09970000
+120700                 MOVE MDSEAR-STRT-DTE                             09980000
+120800                               TO  PV-NEW-START-DATE              09990000
+120900             END-IF                                               10000000
+121000                                                                  10010000
+121100             IF  PV-NEW-END-DATE GREATER THAN MDSEAR-END-DTE      10020000
+121200                 MOVE MDSEAR-END-DTE                              10030000
+121300                               TO  PV-NEW-END-DATE                10040000
+121400             END-IF                                               10050000
+121500         END-IF                                                   10060000
+121600                                                                  10070000
+121700         IF (PV-NEW-END-DATE   NOT EQUAL MDSEAR-END-DTE           10080003
+121800         OR  PV-NEW-START-DATE NOT EQUAL MDSEAR-STRT-DTE)         10090000
+121900             PERFORM 4700-UPDATE-CURRENT-ROW                      10100000
+122000             PERFORM 5100-PROCESS-APLAVL                          10110000
+122100             PERFORM 5200-PROCESS-RSPBAR                          10120000
+122200         END-IF                                                   10130000
+122300                                                                  10140000
+122400     END-IF.                                                      10150000
+122500                                                                  10160000
+122600 EJECT                                                            10170000
+122700****************************************************************  10180000
+122800*                                                              *  10190000
+122900*    FETCH THE MERCHANDISE LIST CURSOR.                        *  10200000
+123000*                                                              *  10210000
+123100****************************************************************  10220000
+123200                                                                  10230000
+123300 4300-FETCH-CURSOR.                                               10240000
+123400                                                                  10250000
+123500     PERFORM                                                      10260000
+123600         WITH TEST AFTER                                          10270000
+123700         VARYING PV-SQL-SUB                                       10280000
+123800         FROM 1 BY 1                                              10290000
+123900         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       10300000
+124000                   OR SQLCODE = 0                                 10310000
+124100                   OR SQLCODE = +100)                             10320000
+124200                                                                  10330000
+124300         EXEC SQL                                                 10340000
+124400            FETCH                                                 10350000
+124500                  MDSEAR-LIST                                     10360000
+124600             INTO                                                 10370000
+124700                         :MDSEAR-MDSELV-CDE                       10380000
+124800                      ,  :MDSEAR-DKEY                             10390000
+124900                      ,  :MDSEAR-CHG-DTE                          10400000
+125000                      ,  :MDSEAR-STRT-DTE                         10410000
+125100                      ,  :MDSEAR-END-DTE                          10420000
+125200                      ,  :MDSEAR-LIST-SEQ-NBR                     10430000
+125300         END-EXEC                                                 10440000
+125400                                                                  10450000
+125500         EVALUATE TRUE                                            10460000
+125600             WHEN SQLCODE = -904                                  10470000
+125700             WHEN SQLCODE = -911                                  10480000
+125800             WHEN SQLCODE = +100                                  10490000
+125900             WHEN SQLCODE = 0                                     10500000
+126000                 CONTINUE                                         10510000
+126100             WHEN SQLWARN NOT = SPACES                            10520000
+126200             WHEN SQLCODE NOT = ZERO                              10530000
+126300                 MOVE '4300-FETCH-CURSOR'                         10540000
+126400                               TO  PV-PARAGRAPH-NAME              10550000
+126500                 MOVE 'FETCH MDSEAR CURSOR'                       10560000
+126600                               TO  PV-DB2-OPER-ATTEMPTED          10570000
+126700                 PERFORM 9900-SQL-ABEND                           10580000
+126800         END-EVALUATE                                             10590000
+126900     END-PERFORM.                                                 10600000
+127000                                                                  10610000
+127100     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        10620000
+127200         MOVE '4300-FETCH-CURSOR'                                 10630000
+127300                               TO  PV-PARAGRAPH-NAME              10640000
+127400         MOVE 'FETCH CURSOR RETRIES EXCEEDED'                     10650000
+127500                               TO  PV-DB2-OPER-ATTEMPTED          10660000
+127600         PERFORM 9900-SQL-ABEND                                   10670000
+127700     END-IF.                                                      10680000
+127800                                                                  10690000
+127900 EJECT                                                            10700000
+128000****************************************************************  10710000
+128100*                                                              *  10720000
+128200*    CLOSE THE MERCHANDISE LIST CURSOR.                        *  10730000
+128300*                                                              *  10740000
+128400****************************************************************  10750000
+128500                                                                  10760000
+128600 4600-CLOSE-CURSOR.                                               10770000
+128700                                                                  10780000
+128800     PERFORM                                                      10790000
+128900         WITH TEST AFTER                                          10800000
+129000         VARYING PV-SQL-SUB                                       10810000
+129100         FROM 1 BY 1                                              10820000
+129200         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       10830000
+129300                   OR SQLCODE = 0                                 10840000
+129400                   OR SQLCODE = +100)                             10850000
+129500                                                                  10860000
+129600         EXEC SQL                                                 10870000
+129700            CLOSE MDSEAR-LIST                                     10880000
+129800         END-EXEC                                                 10890000
+129900                                                                  10900000
+130000         EVALUATE TRUE                                            10910000
+130100             WHEN SQLCODE = -904                                  10920000
+130200             WHEN SQLCODE = -911                                  10930000
+130300             WHEN SQLCODE = 0                                     10940000
+130400                 CONTINUE                                         10950000
+130500             WHEN SQLWARN NOT = SPACES                            10960000
+130600             WHEN SQLCODE NOT = ZERO                              10970000
+130700                 MOVE '4600-CLOSE-CURSOR'                         10980000
+130800                               TO  PV-PARAGRAPH-NAME              10990000
+130900                 MOVE 'CLOSE MDSEAR CURSOR'                       11000000
+131000                               TO  PV-DB2-OPER-ATTEMPTED          11010000
+131100                 PERFORM 9900-SQL-ABEND                           11020000
+131200         END-EVALUATE                                             11030000
+131300     END-PERFORM.                                                 11040000
+131400                                                                  11050000
+131500     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        11060000
+131600         MOVE '4600-CLOSE-CURSOR'                                 11070000
+131700                               TO  PV-PARAGRAPH-NAME              11080000
+131800         MOVE 'CLOSE CURSOR RETRIES EXCEEDED'                     11090000
+131900                               TO  PV-DB2-OPER-ATTEMPTED          11100000
+132000         PERFORM 9900-SQL-ABEND                                   11110000
+132100     END-IF.                                                      11120000
+132200                                                                  11130000
+132300 EJECT                                                            11140000
+132400****************************************************************  11150000
+132500*                                                              *  11160000
+132600*    UPDATE THE DATES FOR THE MDSEAR ROW.                      *  11170000
+132700*                                                              *  11180000
+132800****************************************************************  11190000
+132900                                                                  11200000
+133000 4700-UPDATE-CURRENT-ROW.                                         11210000
+133100                                                                  11220000
+133200     PERFORM                                                      11230000
+133300         WITH TEST AFTER                                          11240000
+133400         VARYING PV-SQL-SUB                                       11250000
+133500         FROM 1 BY 1                                              11260000
+133600         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       11270000
+133700                   OR SQLCODE = 0                                 11280000
+133800                   OR SQLCODE = +100)                             11290000
+133900                                                                  11300000
+134000         EXEC SQL                                                 11310000
+134100            UPDATE                                                11320000
+134200                   TMDSEAR                                        11330000
+134300              SET                                                 11340000
+134400                   STRT_DTE     =  :PV-NEW-START-DATE,            11350000
+134500                   END_DTE      =  :PV-NEW-END-DATE,              11360000
+134600                   CHG_DTE      =  CURRENT DATE                   11370000
+134700              WHERE                                               11380000
+134800                   LIST_SEQ_NBR =  :MDSEAR-LIST-SEQ-NBR           11390000
+134900         END-EXEC                                                 11400000
+135000                                                                  11410000
+135100         EVALUATE TRUE                                            11420000
+135200             WHEN SQLCODE = -904                                  11430000
+135300             WHEN SQLCODE = -911                                  11440000
+135400             WHEN SQLCODE = 0                                     11450000
+135500                 CONTINUE                                         11460000
+135600             WHEN SQLWARN NOT = SPACES                            11470000
+135700             WHEN SQLCODE NOT = ZERO                              11480000
+135800                 MOVE '4700-UPDATE-CURRENT-ROW'                   11490000
+135900                               TO  PV-PARAGRAPH-NAME              11500000
+136000                 MOVE 'UPDATE CURRENT CURSOR'                     11510000
+136100                               TO  PV-DB2-OPER-ATTEMPTED          11520000
+136200                 PERFORM 9900-SQL-ABEND                           11530000
+136300         END-EVALUATE                                             11540000
+136400     END-PERFORM.                                                 11550000
+136500                                                                  11560000
+136600     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        11570000
+136700         MOVE '4700-UPDATE-CURRENT-ROW'                           11580000
+136800                               TO  PV-PARAGRAPH-NAME              11590000
+136900         MOVE 'UPDATE CURRENT ROW RETRIES EXCEEDED'               11600000
+137000                               TO  PV-DB2-OPER-ATTEMPTED          11610000
+137100         PERFORM 9900-SQL-ABEND                                   11620000
+137200     END-IF.                                                      11630000
+137300                                                                  11640000
+137400     IF  SQLCODE EQUAL ZERO                                       11650000
+137500         ADD 1                  TO  PV-UPDATE-COUNT               11660002
+137700         MOVE PV-NEW-START-DATE TO  MDSEAR-STRT-DTE               11670002
+137800         MOVE PV-NEW-END-DATE   TO  MDSEAR-END-DTE                11680002
+137900     END-IF.                                                      11690000
+138000                                                                  11700000
+138100 EJECT                                                            11710000
+138200****************************************************************  11720000
+138300*                                                              *  11730000
+138400*    WE ARE DONE PROCESSING THIS CONTROL RECORD.  COMMIT THE   *  11740000
+138500*    DB2 CHANGES.                                              *  11750000
+138600*                                                              *  11760000
+138700****************************************************************  11770000
+138800                                                                  11780000
+138900*4800-COMMIT.                                                     11790000
+139000*                                                                 11800000
+139100*    PERFORM                                                      11810000
+139200*        WITH TEST AFTER                                          11820000
+139300*        VARYING PV-SQL-SUB                                       11830000
+139400*        FROM 1 BY 1                                              11840000
+139500*        UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       11850000
+139600*                  OR SQLCODE = 0                                 11860000
+139700*                  OR SQLCODE = +100)                             11870000
+139800*                                                                 11880000
+139900*        EXEC SQL                                                 11890000
+140000*           COMMIT                                                11900000
+140100*        END-EXEC                                                 11910000
+140200*                                                                 11920000
+140300*        EVALUATE TRUE                                            11930000
+140400*            WHEN SQLCODE = -904                                  11940000
+140500*            WHEN SQLCODE = -911                                  11950000
+140600*            WHEN SQLCODE = 0                                     11960000
+140700*                CONTINUE                                         11970000
+140800*            WHEN SQLWARN NOT = SPACES                            11980000
+140900*            WHEN SQLCODE NOT = ZERO                              11990000
+141000*                MOVE '4800-COMMIT'                               12000000
+141100*                              TO  PV-PARAGRAPH-NAME              12010000
+141200*                MOVE 'COMMIT - MDSEAR'                           12020000
+141300*                              TO  PV-DB2-OPER-ATTEMPTED          12030000
+141400*                PERFORM 9900-SQL-ABEND                           12040000
+141500*        END-EVALUATE                                             12050000
+141600*    END-PERFORM.                                                 12060000
+141700*                                                                 12070000
+141800*    IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        12080000
+141900*        MOVE '4800-COMMIT'                                       12090000
+142000*                              TO  PV-PARAGRAPH-NAME              12100000
+142100*        MOVE 'COMMIT RETRIES EXCEEDED'                           12110000
+142200*                              TO  PV-DB2-OPER-ATTEMPTED          12120000
+142300*        PERFORM 9900-SQL-ABEND                                   12130000
+142400*    END-IF.                                                      12140000
+142500                                                                  12150000
+142700****************************************************************  12160000
+142800*                                                              *  12170000
+142900*    PROCESS THE APPLICATION AVAILABLE TABLE.                  *  12180000
+143000*    OPEN THE CURSOR FIRST, THEN, FOR EACH ROW RETURNED,       *  12190000
+143100*    UPDATE THE END DATE AND/OR START DATE.                    *  12200000
+143200*                                                              *  12210000
+143300*    PERFORMED BY 4200                                         *  12220000
+143400****************************************************************  12230000
+143500                                                                  12240000
+143600 5100-PROCESS-APLAVL.                                             12250000
+143700                                                                  12260000
+143800     PERFORM 5110-OPEN-APLAVL-CURSOR.                             12270000
+143900                                                                  12280000
+144000     PERFORM                                                      12290000
+144100         UNTIL SQLCODE NOT EQUAL ZERO                             12300000
+144200             PERFORM 5120-FETCH-APLAVL-CURSOR                     12310000
+144300             IF  SQLCODE EQUAL ZERO                               12320000
+144400                                                                  12330000
+144500                 IF  HM002-NEW-START-DATE-002 GREATER SPACES      12340004
+144600                     MOVE MDSEAR-STRT-DTE                         12350000
+144700                               TO  PV-NEW-START-DATE              12360000
+144800                 ELSE                                             12370000
+144900                     MOVE APLAVL-MDSEAR-STRT-DTE                  12380000
+145000                               TO  PV-NEW-START-DATE              12390000
+145100                 END-IF                                           12400000
+145200                                                                  12410000
+145300                 IF  HM002-NEW-END-DATE-002 GREATER SPACES        12420004
+145400                     MOVE MDSEAR-END-DTE                          12430000
+145500                               TO  PV-NEW-END-DATE                12440000
+145600                 ELSE                                             12450000
+145700                     MOVE APLAVL-MDSEAR-END-DTE                   12460000
+145800                               TO  PV-NEW-END-DATE                12470000
+145900                 END-IF                                           12480000
+146000                                                                  12490000
+146100                 PERFORM 5105-DETERMINE-PROCESS                   12500000
+146200             END-IF                                               12510000
+146300     END-PERFORM.                                                 12520000
+146400                                                                  12530000
+146500     PERFORM 5150-CLOSE-APLAVL-CURSOR.                            12540000
+146600                                                                  12550000
+146700 EJECT                                                            12560000
+146800****************************************************************  12570000
+146900*                                                              *  12580000
+147000*    DETERMINE THE PROCESSING PATH FOR APLAVL ROWS.  BASED     *  12590000
+147100*    UPON THE COMBINATION OF NEW START/END AND THE CURRENT     *  12600000
+147200*    START/END DATES, DELETE UPDATE, OR IGNORE THE ROW.        *  12610000
+147300*                                                              *  12620000
+147400*    NEW START DATE GREATER CURRENT END DATE    -- DELETE.     *  12630000
+147500*    CURRENT START DATE GREATER NEW END DATE    -- DELETE.     *  12640000
+147600*    NEW END DATE LESS THAN CURRENT END DATE    -- UPDATE.     *  12650000
+147700*    NEW START DATE GREATER CURRENT START DATE  -- UPDATE.     *  12660000
+147800*    NO CHANGED TO EITHER DATE                  -- IGNORE.     *  12670000
+147900*                                                              *  12680000
+148000*    PERFORMED BY 5100                                         *  12690000
+148100****************************************************************  12700000
+148200                                                                  12710000
+148300 5105-DETERMINE-PROCESS.                                          12720000
+148400                                                                  12730000
+148500     EVALUATE TRUE                                                12740000
+148600                                                                  12750000
+148700         WHEN MDSEAR-MDSELV-CDE EQUAL PC-GMA                      12760000
+148800              MOVE PV-LAST-CO-DKEY                                12770000
+148900                               TO  PV-APLAVL-DKEY                 12780000
+149000                                                                  12790000
+149100         WHEN MDSEAR-MDSELV-CDE EQUAL PC-DMA                      12800000
+149200              MOVE PV-LAST-GMA-DKEY                               12810000
+149300                               TO  PV-APLAVL-DKEY                 12820000
+149400                                                                  12830000
+149500         WHEN MDSEAR-MDSELV-CDE EQUAL PC-DPT                      12840000
+149600              MOVE PV-LAST-DMA-DKEY                               12850000
+149700                               TO  PV-APLAVL-DKEY                 12860000
+149800                                                                  12870000
+149900         WHEN MDSEAR-MDSELV-CDE EQUAL PC-MCL                      12880000
+150000              MOVE PV-LAST-DPT-DKEY                               12890000
+150100                               TO  PV-APLAVL-DKEY                 12900000
+150200                                                                  12910000
+150300         WHEN MDSEAR-MDSELV-CDE EQUAL PC-SCL                      12920000
+150400              MOVE PV-LAST-MCL-DKEY                               12930000
+150500                               TO  PV-APLAVL-DKEY                 12940000
+150600     END-EVALUATE.                                                12950000
+150700                                                                  12960000
+150900                                                                  12970000
+151000     IF (APLAVL-MDSEAR-STRT-DTE GREATER THAN PV-NEW-END-DATE      12980000
+151100     OR  APLAVL-MDSEAR-END-DTE LESS THAN PV-NEW-START-DATE)       12990000
+151200         PERFORM 5135-DELETE-APLAVL                               13000000
+151300     ELSE                                                         13010000
+151400         IF  PV-NEW-START-DATE LESS THAN                          13020000
+151500                               APLAVL-MDSEAR-STRT-DTE             13030000
+151600             MOVE APLAVL-MDSEAR-STRT-DTE                          13040000
+151700                               TO  PV-NEW-START-DATE              13050000
+151800         END-IF                                                   13060000
+151900                                                                  13070000
+152000         IF  PV-NEW-END-DATE GREATER THAN                         13080000
+152100                               APLAVL-MDSEAR-END-DTE              13090000
+152200             MOVE APLAVL-MDSEAR-END-DTE                           13100000
+152300                               TO  PV-NEW-END-DATE                13110000
+152400         END-IF                                                   13120000
+152500                                                                  13130000
+152600         IF (PV-NEW-END-DATE NOT EQUAL APLAVL-MDSEAR-END-DTE      13140000
+152700         OR  PV-NEW-START-DATE NOT EQUAL APLAVL-MDSEAR-STRT-DTE)  13150000
+152800             PERFORM 5130-UPDATE-APLAVL                           13160000
+152900         END-IF                                                   13170000
+153000     END-IF.                                                      13180000
+153100                                                                  13190000
+153200 EJECT                                                            13200000
+153300****************************************************************  13210000
+153400*                                                              *  13220000
+153500*    OPEN THE APPLICATION AVAILABILITY CURSOR.                 *  13230000
+153600*                                                              *  13240000
+153700****************************************************************  13250000
+153800                                                                  13260000
+153900 5110-OPEN-APLAVL-CURSOR.                                         13270000
+154000                                                                  13280000
+154100     PERFORM                                                      13290000
+154200         WITH TEST AFTER                                          13300000
+154300         VARYING PV-SQL-SUB                                       13310000
+154400         FROM 1 BY 1                                              13320000
+154500         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       13330000
+154600                   OR SQLCODE = 0                                 13340000
+154700                   OR SQLCODE = +100)                             13350000
+154800                                                                  13360000
+154900         EXEC SQL                                                 13370000
+155000            OPEN APLAVL-LIST                                      13380000
+155100         END-EXEC                                                 13390000
+155200                                                                  13400000
+155300         EVALUATE TRUE                                            13410000
+155400             WHEN SQLCODE = -904                                  13420000
+155500             WHEN SQLCODE = -911                                  13430000
+155600             WHEN SQLCODE = +100                                  13440000
+155700             WHEN SQLCODE = 0                                     13450000
+155800                 CONTINUE                                         13460000
+155900             WHEN SQLWARN NOT = SPACES                            13470000
+156000             WHEN SQLCODE NOT = ZERO                              13480000
+156100                 MOVE '5110-OPEN-APLAVL'                          13490000
+156200                               TO  PV-PARAGRAPH-NAME              13500000
+156300                 MOVE 'OPEN APLAVL CURSOR'                        13510000
+156400                               TO  PV-DB2-OPER-ATTEMPTED          13520000
+156500                 PERFORM 9900-SQL-ABEND                           13530000
+156600         END-EVALUATE                                             13540000
+156700     END-PERFORM.                                                 13550000
+156800                                                                  13560000
+156900     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        13570000
+157000         MOVE '5110-OPEN-APLAVL-CURSOR'                           13580000
+157100                               TO  PV-PARAGRAPH-NAME              13590000
+157200         MOVE 'OPEN CURSOR RETRIES EXCEEDED'                      13600000
+157300                               TO  PV-DB2-OPER-ATTEMPTED          13610000
+157400         PERFORM 9900-SQL-ABEND                                   13620000
+157500     END-IF.                                                      13630000
+157600                                                                  13640000
+157700 EJECT                                                            13650000
+157800****************************************************************  13660000
+157900*                                                              *  13670000
+158000*    FETCH THE APPLICATION AVAILABILITY CURSOR.                *  13680000
+158100*                                                              *  13690000
+158200****************************************************************  13700000
+158300                                                                  13710000
+158400 5120-FETCH-APLAVL-CURSOR.                                        13720000
+158500                                                                  13730000
+158600     PERFORM                                                      13740000
+158700         WITH TEST AFTER                                          13750000
+158800         VARYING PV-SQL-SUB                                       13760000
+158900         FROM 1 BY 1                                              13770000
+159000         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       13780000
+159100                   OR SQLCODE = 0                                 13790000
+159200                   OR SQLCODE = +100)                             13800000
+159300                                                                  13810000
+159400         EXEC SQL                                                 13820000
+159500            FETCH                                                 13830000
+159600                  APLAVL-LIST                                     13840000
+159700             INTO                                                 13850000
+159800                         :APLAVL-MDSEAR-STRT-DTE                  13860000
+159900                      ,  :APLAVL-MDSEAR-END-DTE                   13870000
+160000         END-EXEC                                                 13880000
+160100                                                                  13890000
+160200         EVALUATE TRUE                                            13900000
+160300             WHEN SQLCODE = -904                                  13910000
+160400             WHEN SQLCODE = -911                                  13920000
+160500             WHEN SQLCODE = +100                                  13930000
+160600             WHEN SQLCODE = 0                                     13940000
+160700                 CONTINUE                                         13950000
+160800             WHEN SQLWARN NOT = SPACES                            13960000
+160900             WHEN SQLCODE NOT = ZERO                              13970000
+161000                 MOVE '5120-FETCH-APLAVL-CURSOR'                  13980000
+161100                               TO  PV-PARAGRAPH-NAME              13990000
+161200                 MOVE 'FETCH APLAVL CURSOR'                       14000000
+161300                               TO  PV-DB2-OPER-ATTEMPTED          14010000
+161400                 PERFORM 9900-SQL-ABEND                           14020000
+161500         END-EVALUATE                                             14030000
+161600     END-PERFORM.                                                 14040000
+161700                                                                  14050000
+161800     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        14060000
+161900         MOVE '5120-FETCH-APLAVL-CURSOR'                          14070000
+162000                               TO  PV-PARAGRAPH-NAME              14080000
+162100         MOVE 'FETCH CURSOR RETRIES EXCEEDED'                     14090000
+162200                               TO  PV-DB2-OPER-ATTEMPTED          14100000
+162300         PERFORM 9900-SQL-ABEND                                   14110000
+162400     END-IF.                                                      14120000
+162500                                                                  14130000
+162600 EJECT                                                            14140000
+162700****************************************************************  14150000
+162800*                                                              *  14160000
+162900*    UPDATE THE START AND/OR END DATE FOR THE APLAVL ROW.      *  14170000
+163000*                                                              *  14180000
+163100****************************************************************  14190000
+163200                                                                  14200000
+163300 5130-UPDATE-APLAVL.                                              14210000
+163400                                                                  14220000
+163500     PERFORM                                                      14230000
+163600         WITH TEST AFTER                                          14240000
+163700         VARYING PV-SQL-SUB                                       14250000
+163800         FROM 1 BY 1                                              14260000
+163900         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       14270000
+164000                   OR SQLCODE = 0                                 14280000
+164100                   OR SQLCODE = +100)                             14290000
+164200                                                                  14300000
+164300         EXEC SQL                                                 14310000
+164400            UPDATE                                                14320000
+164500                   TAPLAVL                                        14330000
+164600              SET                                                 14340000
+164700                   MDSEAR_STRT_DTE =  :PV-NEW-START-DATE,         14350000
+164800                   MDSEAR_END_DTE  =  :PV-NEW-END-DATE            14360000
+164900              WHERE                                               14370000
+165000                   CURRENT OF APLAVL-LIST                         14380000
+165100         END-EXEC                                                 14390000
+165200                                                                  14400000
+165300         EVALUATE TRUE                                            14410000
+165400             WHEN SQLCODE = -904                                  14420000
+165500             WHEN SQLCODE = -911                                  14430000
+165600             WHEN SQLCODE = 0                                     14440000
+165700                 CONTINUE                                         14450000
+165800             WHEN SQLWARN NOT = SPACES                            14460000
+165900             WHEN SQLCODE NOT = ZERO                              14470000
+166000                 MOVE '5130-UPDATE-APLAVL'                        14480000
+166100                               TO  PV-PARAGRAPH-NAME              14490000
+166200                 MOVE 'UPDATE APLAVL  CURSOR'                     14500000
+166300                               TO  PV-DB2-OPER-ATTEMPTED          14510000
+166400                 PERFORM 9900-SQL-ABEND                           14520000
+166500         END-EVALUATE                                             14530000
+166600     END-PERFORM.                                                 14540000
+166700                                                                  14550000
+166800     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        14560000
+166900         MOVE '5130-UPDATE-APLAVL'                                14570000
+167000                               TO  PV-PARAGRAPH-NAME              14580000
+167100         MOVE 'UPDATE APLAVL  ROW RETRIES EXCEEDED'               14590000
+167200                               TO  PV-DB2-OPER-ATTEMPTED          14600000
+167300         PERFORM 9900-SQL-ABEND                                   14610000
+167400     END-IF.                                                      14620000
+167500                                                                  14630000
+167600     ADD 1                     TO  PV-UPDATE-APLAVL-COUNT.        14640000
+167700                                                                  14650000
+167800 EJECT                                                            14660000
+167900****************************************************************  14670000
+168000*                                                              *  14680000
+168100*    DELETE THE CURRENT ROW.                                   *  14690000
+168200*                                                              *  14700000
+168300****************************************************************  14710000
+168400                                                                  14720000
+168500 5135-DELETE-APLAVL.                                              14730000
+168600                                                                  14740000
+168700     PERFORM                                                      14750000
+168800         WITH TEST AFTER                                          14760000
+168900         VARYING PV-SQL-SUB                                       14770000
+169000         FROM 1 BY 1                                              14780000
+169100         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       14790000
+169200                   OR SQLCODE = 0                                 14800000
+169300                   OR SQLCODE = +100)                             14810000
+169400                                                                  14820000
+169500         EXEC SQL                                                 14830000
+169600            DELETE                                                14840000
+169700              FROM                                                14850000
+169800                   TAPLAVL                                        14860000
+169900              WHERE                                               14870000
+170000                   CURRENT OF APLAVL-LIST                         14880000
+170100         END-EXEC                                                 14890000
+170200                                                                  14900000
+170300         EVALUATE TRUE                                            14910000
+170400             WHEN SQLCODE = -904                                  14920000
+170500             WHEN SQLCODE = -911                                  14930000
+170600             WHEN SQLCODE = 0                                     14940000
+170700                 CONTINUE                                         14950000
+170800             WHEN SQLWARN NOT = SPACES                            14960000
+170900             WHEN SQLCODE NOT = ZERO                              14970000
+171000                 MOVE '5135-DELETE-APLAVL'                        14980000
+171100                               TO  PV-PARAGRAPH-NAME              14990000
+171200                 MOVE 'DELETE CURRENT APLAVL'                     15000000
+171300                               TO  PV-DB2-OPER-ATTEMPTED          15010000
+171400                 PERFORM 9900-SQL-ABEND                           15020000
+171500         END-EVALUATE                                             15030000
+171600     END-PERFORM.                                                 15040000
+171700                                                                  15050000
+171800     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        15060000
+171900         MOVE '5135-DELETE-APLAVL'                                15070000
+172000                               TO  PV-PARAGRAPH-NAME              15080000
+172100         MOVE 'DELETE CURRENT APLAVL RETRIES EXCEEDED'            15090000
+172200                               TO  PV-DB2-OPER-ATTEMPTED          15100000
+172300         PERFORM 9900-SQL-ABEND                                   15110000
+172400     END-IF.                                                      15120000
+172500                                                                  15130000
+172600     DISPLAY '* TAPLAVL DELETED -' DCLTAPLAVL.                    15140000
+172700     ADD 1                     TO  PV-DELETE-APLAVL-COUNT.        15150000
+172800                                                                  15160000
+172900 EJECT                                                            15170000
+173000****************************************************************  15180000
+173100*                                                              *  15190000
+173200*    CLOSE THE APLAVL LIST CURSOR.                             *  15200000
+173300*                                                              *  15210000
+173400****************************************************************  15220000
+173500                                                                  15230000
+173600 5150-CLOSE-APLAVL-CURSOR.                                        15240000
+173700                                                                  15250000
+173800     PERFORM                                                      15260000
+173900         WITH TEST AFTER                                          15270000
+174000         VARYING PV-SQL-SUB                                       15280000
+174100         FROM 1 BY 1                                              15290000
+174200         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       15300000
+174300                   OR SQLCODE = 0                                 15310000
+174400                   OR SQLCODE = +100)                             15320000
+174500                                                                  15330000
+174600         EXEC SQL                                                 15340000
+174700            CLOSE APLAVL-LIST                                     15350000
+174800         END-EXEC                                                 15360000
+174900                                                                  15370000
+175000         EVALUATE TRUE                                            15380000
+175100             WHEN SQLCODE = -904                                  15390000
+175200             WHEN SQLCODE = -911                                  15400000
+175300             WHEN SQLCODE = 0                                     15410000
+175400                 CONTINUE                                         15420000
+175500             WHEN SQLWARN NOT = SPACES                            15430000
+175600             WHEN SQLCODE NOT = ZERO                              15440000
+175700                 MOVE '5150-CLOSE-APLAVL-CURSOR'                  15450000
+175800                               TO  PV-PARAGRAPH-NAME              15460000
+175900                 MOVE 'CLOSE APLAVL CURSOR'                       15470000
+176000                               TO  PV-DB2-OPER-ATTEMPTED          15480000
+176100                 PERFORM 9900-SQL-ABEND                           15490000
+176200         END-EVALUATE                                             15500000
+176300     END-PERFORM.                                                 15510000
+176400                                                                  15520000
+176500     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        15530000
+176600         MOVE '5150-CLOSE-APLAVL-CURSOR'                          15540000
+176700                               TO  PV-PARAGRAPH-NAME              15550000
+176800         MOVE 'CLOSE APLAVL CURSOR RETRIES EXCEEDED'              15560000
+176900                               TO  PV-DB2-OPER-ATTEMPTED          15570000
+177000         PERFORM 9900-SQL-ABEND                                   15580000
+177100     END-IF.                                                      15590000
+177200                                                                  15600000
+177300 EJECT                                                            15610000
+183300                                                                  15620000
+183500****************************************************************  15630000
+183600*                                                              *  15640000
+183700*    PROCESS THE RESPONSIBILITY AREA TABLE.                    *  15650000
+183800*    OPEN THE CURSOR FIRST, THEN, FOR EACH ROW RETURNED,       *  15660000
+183900*    IGNORE OR DELETE IT, OR UPDATE THE START AND/OR END       *  15670000
+184000*    DATES.                                                    *  15680000
+184100*                                                              *  15690000
+184200*    PERFORMED BY 4200                                         *  15700000
+184300****************************************************************  15710000
+184400                                                                  15720000
+184500 5200-PROCESS-RSPBAR.                                             15730000
+184600                                                                  15740000
+184700     PERFORM 5210-OPEN-RSPBAR-CURSOR.                             15750000
+184800     PERFORM                                                      15760000
+184900         UNTIL SQLCODE NOT EQUAL ZERO                             15770000
+185000             PERFORM 5220-FETCH-RSPBAR-CURSOR                     15780000
+185100             IF  SQLCODE EQUAL ZERO                               15790000
+185200                                                                  15800000
+185300                 IF  HM002-NEW-START-DATE-002 GREATER SPACES      15810004
+185400                     MOVE MDSEAR-STRT-DTE                         15820000
+185500                               TO  PV-NEW-START-DATE              15830000
+185600                 ELSE                                             15840000
+185700                     MOVE RSPBAR-WORKER-STRT-DTE                  15850000
+185800                               TO  PV-NEW-START-DATE              15860000
+185900                 END-IF                                           15870000
+186000                                                                  15880000
+186100                 IF  HM002-NEW-END-DATE-002 GREATER SPACES        15890004
+186200                     MOVE MDSEAR-END-DTE                          15900000
+186300                               TO  PV-NEW-END-DATE                15910000
+186400                 ELSE                                             15920000
+186500                     MOVE RSPBAR-WORKER-END-DTE                   15930000
+186600                               TO  PV-NEW-END-DATE                15940000
+186700                 END-IF                                           15950000
+186800                                                                  15960000
+186900                 IF (RSPBAR-WORKER-STRT-DTE GREATER THAN          15970000
+187000                               PV-NEW-END-DATE                    15980000
+187100                 OR  RSPBAR-WORKER-END-DTE LESS THAN              15990000
+187200                               PV-NEW-START-DATE)                 16000000
+187300                     PERFORM 5235-DELETE-RSPBAR                   16010000
+187400                     DISPLAY '* TRSPBAR DELETED -'                16020000
+187500                             DCLTRSPBAR                           16030000
+187600                     ADD 1     TO  PV-DELETE-RSPBAR-COUNT         16040000
+187700                                                                  16050000
+187800                 ELSE                                             16060000
+187900                                                                  16070000
+188000                     IF (PV-NEW-START-DATE LESS THAN              16080000
+188100                               RSPBAR-WORKER-STRT-DTE             16090000
+188200                     AND RSPBAR-WORKER-STRT-DTE EQUAL             16100000
+188300                               PV-ORIG-START-DATE)                16110000
+188400                     OR  RSPBAR-WORKER-STRT-DTE LESS THAN         16120000
+188500                               PV-NEW-START-DATE                  16130000
+188600                         CONTINUE                                 16140000
+188700                     ELSE                                         16150000
+188800                         MOVE RSPBAR-WORKER-STRT-DTE              16160000
+188900                               TO  PV-NEW-START-DATE              16170000
+189000                     END-IF                                       16180000
+189100                                                                  16190000
+189200                     IF (PV-NEW-END-DATE GREATER THAN             16200000
+189300                               RSPBAR-WORKER-END-DTE              16210000
+189400                     AND RSPBAR-WORKER-END-DTE EQUAL              16220000
+189500                               PV-ORIG-END-DATE)                  16230000
+189600                     OR  RSPBAR-WORKER-END-DTE GREATER THAN       16240000
+189700                               PV-NEW-END-DATE                    16250000
+189800                         CONTINUE                                 16260000
+189900                     ELSE                                         16270000
+190000                         MOVE RSPBAR-WORKER-END-DTE               16280000
+190100                               TO  PV-NEW-END-DATE                16290000
+190200                     END-IF                                       16300000
+190300                                                                  16310000
+190400                                                                  16320000
+190500                     IF (PV-NEW-END-DATE NOT EQUAL                16330000
+190600                               RSPBAR-WORKER-END-DTE              16340000
+190700                     OR  PV-NEW-START-DATE NOT EQUAL              16350000
+190800                               RSPBAR-WORKER-STRT-DTE)            16360000
+190900                                                                  16370000
+191000                         IF  PV-NEW-START-DATE EQUAL              16380000
+191100                               RSPBAR-WORKER-STRT-DTE             16390000
+191200                             PERFORM 5225-UPDATE-END-DATE         16400000
+191300                         ELSE                                     16410000
+191400                             PERFORM 5235-DELETE-RSPBAR           16420000
+191500                             PERFORM 5230-INSERT-RSPBAR           16430000
+191600                         END-IF                                   16440000
+191700                     END-IF                                       16450000
+191800                 END-IF                                           16460000
+191900             END-IF                                               16470000
+192000     END-PERFORM.                                                 16480000
+192100     PERFORM 5250-CLOSE-RSPBAR-CURSOR.                            16490000
+192200                                                                  16500000
+192300 EJECT                                                            16510000
+192400****************************************************************  16520000
+192500*                                                              *  16530000
+192600*    OPEN THE RESPONSIBILITY AREA CURSOR.                      *  16540000
+192700*                                                              *  16550000
+192800****************************************************************  16560000
+192900                                                                  16570000
+193000 5210-OPEN-RSPBAR-CURSOR.                                         16580000
+193100                                                                  16590000
+193200     PERFORM                                                      16600000
+193300         WITH TEST AFTER                                          16610000
+193400         VARYING PV-SQL-SUB                                       16620000
+193500         FROM 1 BY 1                                              16630000
+193600         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       16640000
+193700                   OR SQLCODE = 0                                 16650000
+193800                   OR SQLCODE = +100)                             16660000
+193900                                                                  16670000
+194000         EXEC SQL                                                 16680000
+194100            OPEN RSPBAR-LIST                                      16690000
+194200         END-EXEC                                                 16700000
+194300                                                                  16710000
+194400         EVALUATE TRUE                                            16720000
+194500             WHEN SQLCODE = -904                                  16730000
+194600             WHEN SQLCODE = -911                                  16740000
+194700             WHEN SQLCODE = +100                                  16750000
+194800             WHEN SQLCODE = 0                                     16760000
+194900                 CONTINUE                                         16770000
+195000             WHEN SQLWARN NOT = SPACES                            16780000
+195100             WHEN SQLCODE NOT = ZERO                              16790000
+195200                 MOVE '5210-OPEN-RSPBAR'                          16800000
+195300                               TO  PV-PARAGRAPH-NAME              16810000
+195400                 MOVE 'OPEN RSPBAR CURSOR'                        16820000
+195500                               TO  PV-DB2-OPER-ATTEMPTED          16830000
+195600                 PERFORM 9900-SQL-ABEND                           16840000
+195700         END-EVALUATE                                             16850000
+195800     END-PERFORM.                                                 16860000
+195900                                                                  16870000
+196000     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        16880000
+196100         MOVE '5210-OPEN-RSPBAR-CURSOR'                           16890000
+196200                               TO  PV-PARAGRAPH-NAME              16900000
+196300         MOVE 'OPEN CURSOR RETRIES EXCEEDED'                      16910000
+196400                               TO  PV-DB2-OPER-ATTEMPTED          16920000
+196500         PERFORM 9900-SQL-ABEND                                   16930000
+196600     END-IF.                                                      16940000
+196700                                                                  16950000
+196800 EJECT                                                            16960000
+196900****************************************************************  16970000
+197000*                                                              *  16980000
+197100*    FETCH THE RESPONSIBILITY AREA CURSOR.                     *  16990000
+197200*                                                              *  17000000
+197300****************************************************************  17010000
+197400                                                                  17020000
+197500 5220-FETCH-RSPBAR-CURSOR.                                        17030000
+197600                                                                  17040000
+197700     PERFORM                                                      17050000
+197800         WITH TEST AFTER                                          17060000
+197900         VARYING PV-SQL-SUB                                       17070000
+198000         FROM 1 BY 1                                              17080000
+198100         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       17090000
+198200                   OR SQLCODE = 0                                 17100000
+198300                   OR SQLCODE = +100)                             17110000
+198400                                                                  17120000
+198500         EXEC SQL                                                 17130000
+198600            FETCH                                                 17140000
+198700                  RSPBAR-LIST                                     17150000
+198800             INTO                                                 17160000
+198900                         :RSPBAR-MDSEAR-DKEY                      17170000
+199000                      ,  :RSPBAR-WORKER-NBR                       17180000
+199100                      ,  :RSPBAR-RSPLVL-CDE                       17190000
+199200                      ,  :RSPBAR-WORKER-STRT-DTE                  17200000
+199300                      ,  :RSPBAR-WORKER-END-DTE                   17210000
+199400                      ,  :RSPBAR-WORKER-FIR-NAME                  17220000
+199500                      ,  :RSPBAR-WORKER-LAST-NAME                 17230000
+199600                      ,  :RSPBAR-OPERCO-NBR                       17240000
+199700         END-EXEC                                                 17250000
+199800                                                                  17260000
+199900         EVALUATE TRUE                                            17270000
+200000             WHEN SQLCODE = -904                                  17280000
+200100             WHEN SQLCODE = -911                                  17290000
+200200             WHEN SQLCODE = +100                                  17300000
+200300             WHEN SQLCODE = 0                                     17310000
+200400                 CONTINUE                                         17320000
+200500             WHEN SQLWARN NOT = SPACES                            17330000
+200600             WHEN SQLCODE NOT = ZERO                              17340000
+200700                 MOVE '5220-FETCH-RSPBAR-CURSOR'                  17350000
+200800                               TO  PV-PARAGRAPH-NAME              17360000
+200900                 MOVE 'FETCH RSPBAR CURSOR'                       17370000
+201000                               TO  PV-DB2-OPER-ATTEMPTED          17380000
+201100                 PERFORM 9900-SQL-ABEND                           17390000
+201200         END-EVALUATE                                             17400000
+201300     END-PERFORM.                                                 17410000
+201400                                                                  17420000
+201500     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        17430000
+201600         MOVE '5220-FETCH-RSPBAR-CURSOR'                          17440000
+201700                               TO  PV-PARAGRAPH-NAME              17450000
+201800         MOVE 'FETCH RSPBAR CURSOR RETRIES EXCEEDED'              17460000
+201900                               TO  PV-DB2-OPER-ATTEMPTED          17470000
+202000         PERFORM 9900-SQL-ABEND                                   17480000
+202100     END-IF.                                                      17490000
+202200                                                                  17500000
+202300 EJECT                                                            17510000
+202400****************************************************************  17520000
+202500*                                                              *  17530000
+202600*    UPDATE THE END DATE FOR THE RSPBAR ROW.                   *  17540000
+202700*                                                              *  17550000
+202800****************************************************************  17560000
+202900                                                                  17570000
+203000 5225-UPDATE-END-DATE.                                            17580000
+203100                                                                  17590000
+203200     PERFORM                                                      17600000
+203300         WITH TEST AFTER                                          17610000
+203400         VARYING PV-SQL-SUB                                       17620000
+203500         FROM 1 BY 1                                              17630000
+203600         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       17640000
+203700                   OR SQLCODE = 0                                 17650000
+203800                   OR SQLCODE = +100)                             17660000
+203900                                                                  17670000
+204000         EXEC SQL                                                 17680000
+204100            UPDATE                                                17690000
+204200                   TRSPBAR                                        17700000
+204300              SET                                                 17710000
+204400                   WORKER_END_DTE  =  :PV-NEW-END-DATE            17720000
+204500              WHERE                                               17730000
+204600                   MDSEAR_DKEY     =  :RSPBAR-MDSEAR-DKEY         17740000
+204700               AND WORKER_NBR      =  :RSPBAR-WORKER-NBR          17750000
+204800               AND RSPLVL_CDE      =  :RSPBAR-RSPLVL-CDE          17760000
+204900               AND WORKER_STRT_DTE =  :RSPBAR-WORKER-STRT-DTE     17770000
+205000         END-EXEC                                                 17780000
+205100                                                                  17790000
+205200         EVALUATE TRUE                                            17800000
+205300             WHEN SQLCODE = -904                                  17810000
+205400             WHEN SQLCODE = -911                                  17820000
+205500             WHEN SQLCODE = 0                                     17830000
+205600                 CONTINUE                                         17840000
+205700             WHEN SQLWARN NOT = SPACES                            17850000
+205800             WHEN SQLCODE NOT = ZERO                              17860000
+205900                 MOVE '5225-UPDATE-END-DATE'                      17870000
+206000                               TO  PV-PARAGRAPH-NAME              17880000
+206100                 MOVE 'UPDATE RSPBAR END DATE'                    17890000
+206200                               TO  PV-DB2-OPER-ATTEMPTED          17900000
+206300                 PERFORM 9900-SQL-ABEND                           17910000
+206400         END-EVALUATE                                             17920000
+206500     END-PERFORM.                                                 17930000
+206600                                                                  17940000
+206700     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        17950000
+206800         MOVE '5225-UPDATE-END-DATE'                              17960000
+206900                               TO  PV-PARAGRAPH-NAME              17970000
+207000         MOVE 'UPDATE RSPBAR END DATE RETRIES EXCEEDED'           17980000
+207100                               TO  PV-DB2-OPER-ATTEMPTED          17990000
+207200         PERFORM 9900-SQL-ABEND                                   18000000
+207300     END-IF.                                                      18010000
+207400                                                                  18020000
+207500     ADD 1                     TO  PV-UPDATE-RSPBAR-COUNT.        18030000
+207600                                                                  18040000
+207700 EJECT                                                            18050000
+207800****************************************************************  18060000
+207900*                                                              *  18070000
+208000*    TO UPDATE THE START DATE, WE FIRST DELETED THE CURRENT    *  18080000
+208100*    ROW, NOW WE MUST INSERT IT.  THIS IS BECAUSE THE START    *  18090000
+208200*    DATE IS PART OF THE PRIMARY KEY.                          *  18100000
+208300*                                                              *  18110000
+208400****************************************************************  18120000
+208500                                                                  18130000
+208600 5230-INSERT-RSPBAR.                                              18140000
+208700                                                                  18150000
+208800     PERFORM                                                      18160000
+208900         WITH TEST AFTER                                          18170000
+209000         VARYING PV-SQL-SUB                                       18180000
+209100         FROM 1 BY 1                                              18190000
+209200         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       18200000
+209300                   OR SQLCODE = 0)                                18210000
+209400                                                                  18220000
+209500         EXEC SQL INSERT                                          18230000
+209600              INTO                                                18240000
+209700                  TRSPBAR                                         18250000
+209800                         (MDSEAR_DKEY                             18260000
+209900                      ,   WORKER_NBR                              18270000
+210000                      ,   WORKER_STRT_DTE                         18280000
+210100                      ,   WORKER_END_DTE                          18290000
+210200                      ,   RSPLVL_CDE                              18300000
+210300                      ,   WORKER_FIR_NAME                         18310000
+210400                      ,   WORKER_LAST_NAME                        18320000
+210500                      ,   OPERCO_NBR)                             18330000
+210600                 VALUES                                           18340000
+210700                        (:RSPBAR-MDSEAR-DKEY                      18350000
+210800                      ,  :RSPBAR-WORKER-NBR                       18360000
+210900                      ,  :PV-NEW-START-DATE                       18370000
+211000                      ,  :PV-NEW-END-DATE                         18380000
+211100                      ,  :RSPBAR-RSPLVL-CDE                       18390000
+211200                      ,  :RSPBAR-WORKER-FIR-NAME                  18400000
+211300                      ,  :RSPBAR-WORKER-LAST-NAME                 18410000
+211400                      ,  :RSPBAR-OPERCO-NBR)                      18420000
+211500         END-EXEC                                                 18430000
+211600                                                                  18440000
+211700         EVALUATE TRUE                                            18450000
+211800             WHEN SQLCODE = -904                                  18460000
+211900             WHEN SQLCODE = -911                                  18470000
+212000             WHEN SQLCODE = 0                                     18480000
+212100                 CONTINUE                                         18490000
+212200             WHEN SQLWARN NOT = SPACES                            18500000
+212300             WHEN SQLCODE NOT = ZERO                              18510000
+212400                 MOVE '5230-INSERT-RSPBAR'                        18520000
+212500                               TO  PV-PARAGRAPH-NAME              18530000
+212600                 MOVE 'INSERT RSPBAR-START/END DATES'             18540000
+212700                               TO  PV-DB2-OPER-ATTEMPTED          18550000
+212800                 PERFORM 9900-SQL-ABEND                           18560000
+212900         END-EVALUATE                                             18570000
+213000     END-PERFORM.                                                 18580000
+213100                                                                  18590000
+213200     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        18600000
+213300         MOVE '5230-INSERT-RSPBAR'                                18610000
+213400                               TO  PV-PARAGRAPH-NAME              18620000
+213500         MOVE 'RETRIES EXCEEDED FOR START/END DATE ISRT'          18630000
+213600                               TO  PV-DB2-OPER-ATTEMPTED          18640000
+213700         PERFORM 9900-SQL-ABEND                                   18650000
+213800     END-IF.                                                      18660000
+213900                                                                  18670000
+214000     ADD 1                     TO  PV-UPDATE-RSPBAR-COUNT.        18680000
+214100                                                                  18690000
+214200 EJECT                                                            18700000
+214300****************************************************************  18710000
+214400*                                                              *  18720000
+214500*    DELETE THE CURRENT ROW BECAUSE IT IS NOT YET IN EFFECT.   *  18730000
+214600*    THE START DATE IS GREATER THAN THE NEW EFFECTIVE DATE.    *  18740000
+214700*                                                              *  18750000
+214800****************************************************************  18760000
+214900                                                                  18770000
+215000 5235-DELETE-RSPBAR.                                              18780000
+215100                                                                  18790000
+215200     PERFORM                                                      18800000
+215300         WITH TEST AFTER                                          18810000
+215400         VARYING PV-SQL-SUB                                       18820000
+215500         FROM 1 BY 1                                              18830000
+215600         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       18840000
+215700                   OR SQLCODE = 0                                 18850000
+215800                   OR SQLCODE = +100)                             18860000
+215900                                                                  18870000
+216000         EXEC SQL                                                 18880000
+216100            DELETE                                                18890000
+216200              FROM                                                18900000
+216300                   TRSPBAR                                        18910000
+216400              WHERE                                               18920000
+216500                   CURRENT OF RSPBAR-LIST                         18930000
+216600         END-EXEC                                                 18940000
+216700                                                                  18950000
+216800         EVALUATE TRUE                                            18960000
+216900             WHEN SQLCODE = -904                                  18970000
+217000             WHEN SQLCODE = -911                                  18980000
+217100             WHEN SQLCODE = 0                                     18990000
+217200                 CONTINUE                                         19000000
+217300             WHEN SQLWARN NOT = SPACES                            19010000
+217400             WHEN SQLCODE NOT = ZERO                              19020000
+217500                 MOVE '5235-DELETE-RSPBAR'                        19030000
+217600                               TO  PV-PARAGRAPH-NAME              19040000
+217700                 MOVE 'DELETE CURRENT RSPBAR'                     19050000
+217800                               TO  PV-DB2-OPER-ATTEMPTED          19060000
+217900                 PERFORM 9900-SQL-ABEND                           19070000
+218000         END-EVALUATE                                             19080000
+218100     END-PERFORM.                                                 19090000
+218200                                                                  19100000
+218300     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        19110000
+218400         MOVE '5235-DELETE-RSPBAR'                                19120000
+218500                               TO  PV-PARAGRAPH-NAME              19130000
+218600         MOVE 'DELETE CURRENT RSPBAR RETRIES EXCEEDED'            19140000
+218700                               TO  PV-DB2-OPER-ATTEMPTED          19150000
+218800         PERFORM 9900-SQL-ABEND                                   19160000
+218900     END-IF.                                                      19170000
+219000                                                                  19180000
+219100 EJECT                                                            19190000
+219200****************************************************************  19200000
+219300*                                                              *  19210000
+219400*    CLOSE THE RSPBAR LIST CURSOR.                             *  19220000
+219500*                                                              *  19230000
+219600****************************************************************  19240000
+219700                                                                  19250000
+219800 5250-CLOSE-RSPBAR-CURSOR.                                        19260000
+219900                                                                  19270000
+220000     PERFORM                                                      19280000
+220100         WITH TEST AFTER                                          19290000
+220200         VARYING PV-SQL-SUB                                       19300000
+220300         FROM 1 BY 1                                              19310000
+220400         UNTIL (PV-SQL-SUB > PC-MAX-RETRIES                       19320000
+220500                   OR SQLCODE = 0                                 19330000
+220600                   OR SQLCODE = +100)                             19340000
+220700                                                                  19350000
+220800         EXEC SQL                                                 19360000
+220900            CLOSE RSPBAR-LIST                                     19370000
+221000         END-EXEC                                                 19380000
+221100                                                                  19390000
+221200         EVALUATE TRUE                                            19400000
+221300             WHEN SQLCODE = -904                                  19410000
+221400             WHEN SQLCODE = -911                                  19420000
+221500             WHEN SQLCODE = 0                                     19430000
+221600                 CONTINUE                                         19440000
+221700             WHEN SQLWARN NOT = SPACES                            19450000
+221800             WHEN SQLCODE NOT = ZERO                              19460000
+221900                 MOVE '5250-CLOSE-RSPBAR-CURSOR'                  19470000
+222000                               TO  PV-PARAGRAPH-NAME              19480000
+222100                 MOVE 'CLOSE RSPBAR CURSOR'                       19490000
+222200                               TO  PV-DB2-OPER-ATTEMPTED          19500000
+222300                 PERFORM 9900-SQL-ABEND                           19510000
+222400         END-EVALUATE                                             19520000
+222500     END-PERFORM.                                                 19530000
+222600                                                                  19540000
+222700     IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                        19550000
+222800         MOVE '5250-CLOSE-RSPBAR-CURSOR'                          19560000
+222900                               TO  PV-PARAGRAPH-NAME              19570000
+223000         MOVE 'CLOSE RSPBAR CURSOR RETRIES EXCEEDED'              19580000
+223100                               TO  PV-DB2-OPER-ATTEMPTED          19590000
+223200         PERFORM 9900-SQL-ABEND                                   19600000
+223300     END-IF.                                                      19610000
+223400                                                                  19620000
+226500****************************************************************  19630000
+226600*                                                              *  19640000
+226700*    DISPLAY THE NUMBER OF RECORDS READ/WRITTEN.               *  19650000
+226800*                                                              *  19660000
+226900****************************************************************  19670000
+227000*                                                                 19680000
+227100 9000-DISPLAY-TOTALS.                                             19690000
+227200*                                                                 19700000
+227300     DISPLAY '*'.                                                 19710000
+227400     DISPLAY '* * * * * * * * * * * * * * * * * * * * * * * * *'. 19720000
+227500     DISPLAY ' '.                                                 19730000
+227600     DISPLAY '* * * * * * * * * * * * * * *'.                     19740000
+227700     DISPLAY '*                           *'.                     19750000
+227800     DISPLAY '*   **HMKUP002 COUNTS**     *'.                     19760000
+227900     DISPLAY '* '                                                 19770000
+228000             PV-BATCH-CNTL-COUNT                                  19780000
+228100             ' RECORDS READ    *'.                                19790000
+228200     DISPLAY '* '                                                 19800000
+228300             PV-TOT-UPDATES                                       19810000
+228400             ' TMDSEAR UPDATED *'.                                19820000
+228500     DISPLAY '* '                                                 19830000
+228600             PV-TOT-DELETES                                       19840000
+228700             ' TMDSEAR DELETED *'.                                19850000
+228800     DISPLAY '*                           *'.                     19860000
+228900     DISPLAY '* '                                                 19870000
+229000             PV-TOT-APLAVLS-UPDATED                               19880000
+229100             ' TAPLAVL UPDATED *'.                                19890000
+229200     DISPLAY '* '                                                 19900000
+229300             PV-TOT-APLAVLS-DELETED                               19910000
+229400             ' TAPLAVL DELETED *'.                                19920000
+229500     DISPLAY '*                           *'.                     19930000
+229600     DISPLAY '* '                                                 19940000
+229700             PV-TOT-RSPBARS-UPDATED                               19950000
+229800             ' TRSPBAR UPDATED *'.                                19960000
+229900     DISPLAY '* '                                                 19970000
+230000             PV-TOT-RSPBARS-DELETED                               19980000
+230100             ' TRSPBAR DELETED *'.                                19990000
+230200     DISPLAY '*                           *'.                     20000000
+230300     DISPLAY '* * * * * * * * * * * * * * *'.                     20010000
+230400                                                                  20020000
+230500 EJECT                                                            20030000
+230600****************************************************************  20040000
+230700*                                                              *  20050000
+230800*    THIS ROUTINE FORCES AN ABEND DUE TO A DB2 PROBLEM.        *  20060000
+230900*                                                              *  20070000
+231000****************************************************************  20080000
+231100                                                                  20090000
+231200 9900-SQL-ABEND.                                                  20100000
+231300                                                                  20110000
+231400     SET HM002-BAD-CALL         TO TRUE.                          20120001
+231600     DISPLAY '**  PROGRAM   **  =  HMKUP002'.                     20130000
+231700     DISPLAY '**  PARAGRAPH **  = ' PV-PARAGRAPH-NAME.            20140000
+231800     DISPLAY '**  OPERATION **  = ' PV-DB2-OPER-ATTEMPTED.        20150000
+231900                                                                  20160000
+232000*    THE FOLLOWING COPYBOOK UTILIZES THE DB2 ABEND MODULE         20170000
+232100*    DSNTIAR TO CONVERT SQLCA INTO UNDERSTANDABLE VERBAGE.        20180000
+232200                                                                  20190000
+232300     COPY DPPD004.                                                20200000
+232400                                                                  20210000

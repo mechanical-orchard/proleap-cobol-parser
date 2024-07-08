@@ -1,0 +1,764 @@
+       IDENTIFICATION DIVISION.                                                 
+       PROGRAM-ID.    MLKUT360.                                                 
+       AUTHOR.        VL YANG.                                                  
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+       DATE-WRITTEN.  07/07/2007.                                               
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      * THIS PROGRAM WILL TAKE IN A FILE CONTAINING DEPT, DKEY, AND             
+      * AN AMOUNT.  THE DKEY OF ZERO WILL BE THE TOTAL OF THE AMOUNT            
+      * OF ALL THE DKEYS FOR THE DEPT.                                          
+      *                                                                         
+      * THE PROGRAM WILL ALSO TAKE IN AN OPTIONAL CONTROL FILE.                 
+      *                                                                         
+      * THE PROGRAM WILL CREATE AN OUTPUT FILE CONTAINING DEPT, LABEL           
+      * SEQUENCE, ENT-ID, DIST-PERCENT, DKEY, LAST-DKEY-IND.                    
+      * THE DIST-PERCENT IS THE AMOUNT DIVIDED BY THE DEPT TOTAL.               
+      * THE LAST-DKEY-IND WILL INDICATE WHETHER THE RECORD IS THE LAST          
+      * RECORD FOR THE DEPT OR NOT.                                             
+      *                                                                         
+      * THE OPTIONAL CONTROL CARD WILL ACT AS A FILTER THAT WILL                
+      * TRANSLATE THE DKEY OF THE INPUT FILE AND ONLY WRITE OUT THE             
+      * RECORD THAT CONTAINS ONLY THE FILTERED LABEL-SEQ AND ENT-ID.            
+      *                                                                         
+      ******************** HISTORY OF CHANGES **************************        
+      * CHG ID/                                                        *        
+      * WR/PROJ  DATE        DESCRIPTION OF CHANGES                    *        
+      * -------  ----------  ----------------------------------------  *        
+W34517* WR34517  2008-10-25  ADD TYPE/DESC, RENAME MARKER, PROVIDE     *        
+W34517*                      SUPPORT FOR MULTIPLE BRAND LICENSE FEES   *        
+W34517*                      ALSO ADD LOGIC TO MAKE SURE THAT DIST     *        
+W34517*                      PERCENT FOR A GROUP IS 100%.    -LEE      *        
+P11228*                                                                         
+P11228* PK11228  2012-06-13  SAVE CORRECT DIST TYPE FOR REMAINDER      *        
+P11228*                      PROCESSING.                               *        
+P11228*                      - JOHN SELWITSCHKA                        *        
+257901*                                                                         
+257901* 257901   2021-06-01  INCREASED THE LENGTH OF LABEL SEQ NUMBER  *        
+257901*                      FROM 4 TO 5 TO AVOID THE TRUNCATION OF    *        
+257901*                      LABEL SEQ NUMBER WHICH IS GREATER THAN 4  *        
+257901*                      4 DIGITS.                                 *        
+257901*                      - SRINIVASAN SIVARAJ                      *        
+257901*                        CHANGE NUMBER : CHG0257901              *        
+************************************************************************        
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+       CONFIGURATION SECTION.                                                   
+       SOURCE-COMPUTER.        IBM-3090.                                        
+       OBJECT-COMPUTER.        IBM-3090.                                        
+       INPUT-OUTPUT SECTION.                                                    
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT OPTIONAL EXECUTION-CONTROL-FILE                               
+               ASSIGN TO INP01.                                                 
+           SELECT DATA-UNLOAD-IN-FILE                                           
+               ASSIGN TO INP02.                                                 
+           SELECT DATA-UNLOAD-OUT-FILE                                          
+               ASSIGN TO OUT01.                                                 
+           SELECT PRORATE-CONTROL-FILE                                          
+               ASSIGN TO OUT02.                                                 
+                                                                                
+       DATA DIVISION.                                                           
+       FILE SECTION.                                                            
+                                                                                
+       FD  EXECUTION-CONTROL-FILE                                               
+           RECORDING  MODE IS F                                                 
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  EXECUTION-CONTROL-REC           PIC X(080).                          
+                                                                                
+       FD  DATA-UNLOAD-IN-FILE                                                  
+           RECORDING  MODE IS F                                                 
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  DATA-UNLOAD-IN-REC              PIC X(040).                          
+                                                                                
+       FD  DATA-UNLOAD-OUT-FILE                                                 
+           RECORDING  MODE IS F                                                 
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  DATA-UNLOAD-OUT-REC             PIC X(040).                          
+                                                                                
+       FD  PRORATE-CONTROL-FILE                                                 
+           RECORDING  MODE IS F                                                 
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  PRORATE-CONTROL-REC             PIC X(0100).                         
+                                                                                
+      /*****************************************************************        
+       WORKING-STORAGE SECTION.                                                 
+      ******************************************************************        
+                                                                                
+       01  ABEND-CODE                      PIC S9(4)       VALUE ZEROES         
+                               COMP SYNC.                                       
+           88  SQL-ABEND                                   VALUE +4001.         
+           88  NON-SQL-ABEND                               VALUE +4011.         
+                                                                                
+       01  PA-PROGRAM-ACCUMULATORS.                                             
+           05  PA-CONTROL-CNT              PIC S9(09)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PA-RECORD-IN-CNT            PIC S9(09)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PA-RECORD-IGNORED           PIC S9(09)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PA-RECORD-OUT-CNT           PIC S9(09)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PA-RECORD-RPT-CNT           PIC S9(09)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PA-DKEY-NOT-FOUND           PIC S9(09)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PA-BRND-NOT-FOUND           PIC S9(09)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PA-VNDR-NOT-FOUND           PIC S9(09)      VALUE ZEROES         
+                               COMP-3.                                          
+W34517     05  PA-RECORD-REMAINDER         PIC S9(09)      VALUE ZEROES         
+W34517                         COMP-3.                                          
+                                                                                
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05 PC-PROGRAM-NAME              PIC X(08)   VALUE 'MLKUT360'.        
+           05 PC-UNKNOWN                   PIC X(08)   VALUE '????????'.        
+           05 PC-3                         PIC S9(05)      VALUE +3             
+                               COMP-3.                                          
+                                                                                
+       01  PR-DETAIL-OUT-REC.                                                   
+           05  PR-DTL-DEPT-NBR             PIC S9(04)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  PR-DTL-LABEL-SEQ            PIC S9(04)      VALUE ZEROES         
+                               COMP.                                            
+           05  PR-DTL-ENT-ID               PIC S9(09)      VALUE ZEROES         
+                               COMP.                                            
+           05  PR-DTL-DIST-PCT             PIC S9(04)V99   VALUE ZEROES         
+                               COMP-3.                                          
+           05  PR-DTL-ML-LO-MDSE-LVL-ID    PIC S9(09)      VALUE ZEROES         
+                               COMP.                                            
+           05  PR-DTL-LAST-LO-MDSE-IND     PIC X(01)       VALUE SPACES.        
+               88  PR-DTL-LAST-LO-MDSE                     VALUE 'Y'.           
+               88  PR-DTL-NOT-LAST-LO-MDSE                 VALUE 'N'.           
+           05  PR-DTL-BRAND-NAME           PIC X(20)       VALUE SPACES.        
+           05  PR-DTL-VENDOR-NAME          PIC X(30)       VALUE SPACES.        
+W34517     05  PR-DTL-GROUP-ID             PIC X(04)       VALUE SPACES.        
+           05  PR-DTL-PROVIDED-AMT         PIC S9(11)V99   VALUE ZEROES         
+                               COMP-3.                                          
+W34517     05  PR-DTL-DIST-TYPE            PIC X(01)       VALUE SPACES.        
+W34517     05  PR-DTL-GROUP-TOTAL-AMT      PIC S9(11)V99   VALUE ZEROES         
+W34517                         COMP-3.                                          
+W34517     05  FILLER                      PIC X(13)       VALUE SPACES.        
+                                                                                
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-DATA-UNLOAD-IN-EOF-SW    PIC X(01)       VALUE 'N'.           
+               88  PS-DATA-UNLOAD-IN-NOT-EOF               VALUE 'N'.           
+               88  PS-DATA-UNLOAD-IN-EOF                   VALUE 'Y'.           
+           05  PS-EXEC-CONTROL-SW         PIC X(01)        VALUE 'N'.           
+               88  PS-EXEC-CONTROL-NOT-EOF                 VALUE 'N'.           
+               88  PS-EXEC-CONTROL-EOF                     VALUE 'Y'.           
+           05  PS-FILTER-FOUND-SW         PIC X(01)        VALUE 'N'.           
+               88  PS-FILTER-NOT-FOUND                     VALUE 'N'.           
+               88  PS-FILTER-FOUND                         VALUE 'Y'.           
+W34517     05  PS-FIRST-DETAIL-REC-SW     PIC X(01)        VALUE 'N'.           
+W34517         88  PS-NOT-FIRST-DETAIL-REC                 VALUE 'N'.           
+W34517         88  PS-FIRST-DETAIL-REC                     VALUE 'Y'.           
+W34517     05  PS-HAVE-RECORD-SAVED-SW    PIC X(01)        VALUE 'N'.           
+W34517         88  PS-NO-RECORD-SAVED                      VALUE 'N'.           
+W34517         88  PS-RECORD-SAVED                         VALUE 'Y'.           
+                                                                                
+       01  PV-PROGRAM-VARIABLES.                                                
+           05  PV-PARAGRAPH-NAME           PIC X(30)       VALUE SPACES.        
+           05  PV-DB2-OPER-ATTEMPTED       PIC X(30)       VALUE SPACES.        
+           05  PV-DEPT-PROVIDED-AMT        PIC S9(11)V99   VALUE ZEROES         
+                               COMP-3.                                          
+W34517     05  PV-DEPT-NBR-9               PIC 9(04)       VALUE ZEROES.        
+257901     05  PV-LBL-SEQ-NBR-9            PIC 9(05)       VALUE ZEROES.        
+           05  PV-ENT-ID-9                 PIC 9(09)       VALUE ZEROES.        
+           05  PV-ML-LWST-ID-9             PIC 9(09)       VALUE ZEROES.        
+W34517     05  PV-SAVE-LABEL-SEQ           PIC S9(04)      VALUE ZEROES         
+W34517                         COMP.                                            
+W34517     05  PV-SAVE-ENT-ID              PIC S9(09)      VALUE ZEROES         
+W34517                         COMP.                                            
+W34517     05  PV-SAVE-ML-LO-MDSE-LVL-ID   PIC S9(09)      VALUE ZEROES         
+W34517                         COMP.                                            
+W34517     05  PV-SAVE-LAST-LO-MDSE-IND    PIC X(01)       VALUE SPACES.        
+W34517     05  PV-SAVE-BRAND-NAME          PIC X(20)       VALUE SPACES.        
+W34517     05  PV-SAVE-VENDOR-NAME         PIC X(30)       VALUE SPACES.        
+W34517     05  PV-SAVE-PROVIDED-AMT        PIC S9(11)V99   VALUE ZEROES         
+W34517                         COMP-3.                                          
+W34517     05  PV-SAVE-DIST-TYPE           PIC X(01)       VALUE SPACES.        
+W34517     05  PV-DIST-PCT-TOTAL           PIC S9(04)V99   VALUE ZEROES         
+W34517                         COMP-3.                                          
+W34517     05  PV-TMP-PROVIDED-AMT         PIC S9(11)V99   VALUE ZEROES         
+W34517                         COMP-3.                                          
+                                                                                
+      ******************************************************************        
+      *  OPTIONAL CONTROL CARD                                                  
+      ******************************************************************        
+       01  PV-CC-OPTIONAL-CONTROL.                                              
+           05  FILLER                      PIC X(01)       VALUE SPACES.        
+               88  PV-CC-COMMENT                           VALUE '*'.           
+               88  PV-CC-NOT-COMMENT                       VALUE SPACES.        
+257901     05  PV-CC-LABEL-SEQ             PIC 9(05)       VALUE ZEROES.        
+           05  FILLER                      PIC X(01)       VALUE SPACES.        
+           05  PV-CC-ENT-ID                PIC 9(09)       VALUE ZEROES.        
+           05  FILLER                      PIC X(01)       VALUE SPACES.        
+W34517     05  PV-CC-GROUP-ID              PIC X(04)       VALUE ZEROES.        
+W34517     05  FILLER                      PIC X(01)       VALUE SPACES.        
+W34517     05  PV-CC-TYPE                  PIC X(01)       VALUE ZEROES.        
+W34517     05  FILLER                      PIC X(01)       VALUE SPACES.        
+W34517     05  PV-CC-DESCRIPTION           PIC X(30)       VALUE ZEROES.        
+W34517     05  FILLER                      PIC X(27)       VALUE SPACES.        
+                                                                                
+      ******************************************************************        
+      *  PROGRAM TABLE                                                          
+      ******************************************************************        
+       01  PT-PROGRAM-TABLE-AREA.                                               
+           05  PT-OPT-CNTL-AREA.                                                
+               10  PT-OPT-CNTL-MAX         PIC S9(05)      VALUE +9999          
+                               COMP-3.                                          
+               10  PT-OPT-CNTL-INDX        PIC S9(05)      VALUE ZEROES         
+                               COMP-3.                                          
+               10  PT-OPT-CNTL-COUNT       PIC S9(05)      VALUE ZEROES         
+                               COMP-3.                                          
+               10  PT-OPT-CNTL-DATA OCCURS 9999 TIMES.                          
+                   15  PT-OPT-CNTL-LBL-SEQ PIC S9(04)      VALUE ZEROES         
+                               COMP.                                            
+                       88  PT-OPT-CNTL-IGNORE-LBL-SEQ      VALUE ZEROES.        
+                   15  PT-OPT-CNTL-ENT-ID  PIC S9(09)      VALUE ZEROES         
+                               COMP.                                            
+                       88  PT-OPT-CNTL-IGNORE-ENT-ID       VALUE ZEROES.        
+W34517             15  PT-OPT-CNTL-GROUP-ID PIC X(04)      VALUE '#N/A'.        
+W34517             15  PT-OPT-CNTL-TYPE    PIC X(01)       VALUE '0'.           
+                                                                                
+      ******************************************************************        
+      *  DATA UNLOAD INPUT RECORD                                               
+      ******************************************************************        
+       01  UL001-DATA-UNLOAD-INPUT.                                             
+           05  UL001-DEPT-NBR              PIC S9(04)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  UL001-ML-LO-MDSE-LVL-ID     PIC S9(09)      VALUE ZEROES         
+                               COMP.                                            
+           05  UL001-PROVIDED-AMT          PIC S9(11)V99   VALUE ZEROES         
+                               COMP-3.                                          
+W34517     05  UL001-LABEL-SEQ             PIC S9(04)      VALUE ZEROES         
+W34517                         COMP.                                            
+W34517     05  UL001-ENT-ID                PIC S9(09)      VALUE ZEROES         
+W34517                         COMP.                                            
+W34517     05  UL001-GROUP-ID              PIC X(04)       VALUE SPACES.        
+W34517     05  UL001-RECORD-TYPE           PIC X(01)       VALUE SPACE.         
+W34517         88  UL001-GROUP-TOTAL-TYPE                  VALUE '0'.           
+W34517         88  UL001-DETAIL-TYPE                       VALUE '9'.           
+W34517     05  FILLER                      PIC X(15)       VALUE SPACES.        
+                                                                                
+      ******************************************************************        
+      *  DATA UNLOAD PREVIOUS RECORD                                            
+      ******************************************************************        
+       01  UL002-DATA-UNLOAD-INPUT.                                             
+           05  UL002-DEPT-NBR              PIC S9(04)      VALUE ZEROES         
+                               COMP-3.                                          
+           05  UL002-ML-LO-MDSE-LVL-ID     PIC S9(09)      VALUE ZEROES         
+                               COMP.                                            
+           05  UL002-PROVIDED-AMT          PIC S9(11)V99   VALUE ZEROES         
+                               COMP-3.                                          
+           05  UL002-LABEL-SEQ             PIC S9(04)      VALUE ZEROES         
+                               COMP.                                            
+           05  UL002-ENT-ID                PIC S9(09)      VALUE ZEROES         
+                               COMP.                                            
+W34517     05  UL002-GROUP-ID              PIC X(04)       VALUE SPACES.        
+W34517     05  UL002-RECORD-TYPE           PIC X(01)       VALUE SPACE.         
+W34517         88  UL002-GROUP-TOTAL-TYPE                  VALUE '0'.           
+W34517         88  UL002-DETAIL-TYPE                       VALUE '9'.           
+W34517     05  FILLER                      PIC X(15)       VALUE SPACES.        
+                                                                                
+      *****************************************************************         
+      * ERROR MESSAGE AREA FOR DB2                                              
+      *****************************************************************         
+           COPY DPWS004.                                                        
+                                                                                
+      *************************************************************             
+      *    DB2 TVSCHVL (GET BRAND NAME)                           *             
+      *************************************************************             
+           EXEC SQL                                                             
+               INCLUDE TVSCHVL                                                  
+           END-EXEC.                                                            
+                                                                                
+      *************************************************************             
+      *    DB2 XMT_VND (GET VENDOR NAME)                          *             
+      *************************************************************             
+           EXEC SQL                                                             
+               INCLUDE XMT00000                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      * DB2 - MLV_BRND_VND.                                                     
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE MLV00000                                                 
+           END-EXEC.                                                            
+                                                                                
+      *************************************************************             
+      *    DB2 COMMUNICATION AREA                                 *             
+      *************************************************************             
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+       PROCEDURE DIVISION.                                                      
+      ******************************************************************        
+                                                                                
+       0000-MAINLINE.                                                           
+                                                                                
+           PERFORM 1000-INITIALIZE.                                             
+                                                                                
+           PERFORM 8000-READ-INPUT.                                             
+                                                                                
+           PERFORM 1100-PROCESS-INPUT                                           
+               UNTIL PS-DATA-UNLOAD-IN-EOF.                                     
+                                                                                
+           PERFORM 9000-END-PROCESSING.                                         
+                                                                                
+           STOP RUN.                                                            
+                                                                                
+      ******************************************************************        
+      *  PERFORM THE NECESSARY INITIALIZATION STEPS                             
+      ******************************************************************        
+       1000-INITIALIZE.                                                         
+                                                                                
+           OPEN  INPUT EXECUTION-CONTROL-FILE                                   
+                       DATA-UNLOAD-IN-FILE                                      
+                OUTPUT DATA-UNLOAD-OUT-FILE                                     
+                       PRORATE-CONTROL-FILE.                                    
+                                                                                
+           MOVE ZEROES                TO UL002-DEPT-NBR.                        
+                                                                                
+      * GET THE FIRST VALID CONTROL CARD                                        
+           PERFORM 1050-PROCESS-CONTROL.                                        
+                                                                                
+      ******************************************************************        
+      *  CHECK/PROCESS CONTROL CARDS                                            
+      ******************************************************************        
+       1050-PROCESS-CONTROL.                                                    
+                                                                                
+           DISPLAY ' '.                                                         
+                                                                                
+           MOVE ZEROES                TO PT-OPT-CNTL-INDX.                      
+           PERFORM 8100-READ-CONTROL.                                           
+           PERFORM                                                              
+               UNTIL PS-EXEC-CONTROL-EOF                                        
+                   OR PT-OPT-CNTL-INDX > PT-OPT-CNTL-MAX                        
+               DISPLAY ' ' PV-CC-OPTIONAL-CONTROL                               
+               ADD +1 TO PA-CONTROL-CNT                                         
+                                                                                
+               IF PV-CC-NOT-COMMENT                                             
+                   IF PV-CC-LABEL-SEQ IS NUMERIC                                
+                       OR PV-CC-ENT-ID IS NUMERIC                               
+                       ADD +1             TO PT-OPT-CNTL-INDX                   
+                       IF PV-CC-LABEL-SEQ IS NUMERIC                            
+                           MOVE PV-CC-LABEL-SEQ                                 
+                               TO PT-OPT-CNTL-LBL-SEQ(PT-OPT-CNTL-INDX)         
+                       END-IF                                                   
+                       IF PV-CC-ENT-ID IS NUMERIC                               
+                           MOVE PV-CC-ENT-ID                                    
+                               TO PT-OPT-CNTL-ENT-ID(PT-OPT-CNTL-INDX)          
+                       END-IF                                                   
+W34517                 MOVE PV-CC-GROUP-ID                                      
+W34517                     TO PT-OPT-CNTL-GROUP-ID(PT-OPT-CNTL-INDX)            
+W34517                 MOVE PV-CC-TYPE                                          
+W34517                     TO PT-OPT-CNTL-TYPE (PT-OPT-CNTL-INDX)               
+                   END-IF                                                       
+               END-IF                                                           
+                                                                                
+               PERFORM 8100-READ-CONTROL                                        
+           END-PERFORM.                                                         
+           MOVE PT-OPT-CNTL-INDX      TO PT-OPT-CNTL-COUNT.                     
+           IF PT-OPT-CNTL-INDX > PT-OPT-CNTL-MAX                                
+               DISPLAY ' **** NUMBER OF FILTER CONTROL EXCEEDED'                
+               DISPLAY ' **** CHECK INTERNAL WORKING STORAGE TABLE'             
+               DISPLAY ' **** DEFINED SIZE: ' PT-OPT-CNTL-MAX                   
+               SET NON-SQL-ABEND      TO TRUE                                   
+               PERFORM 9999-OTHER-ABEND                                         
+           END-IF.                                                              
+                                                                                
+           DISPLAY ' '.                                                         
+                                                                                
+      ******************************************************************        
+      *  PROCESS THE INPUT FILES FOR TOTAL RECORD BREAK                         
+      ******************************************************************        
+       1100-PROCESS-INPUT.                                                      
+                                                                                
+           ADD +1 TO PA-RECORD-IN-CNT.                                          
+                                                                                
+      * IS THIS A TOTAL RECORD?                                                 
+W34517     IF UL001-GROUP-TOTAL-TYPE                                            
+W34517* ANY RECORD SAVED?                                                       
+W34517         IF PS-RECORD-SAVED                                               
+W34517             PERFORM 2000-PROCESS-DETAIL                                  
+W34517             SET PS-NO-RECORD-SAVED       TO TRUE                         
+W34517             INITIALIZE UL002-DATA-UNLOAD-INPUT                           
+W34517         END-IF                                                           
+               MOVE UL001-PROVIDED-AMT                                          
+                   TO PV-DEPT-PROVIDED-AMT                                      
+               ADD +1 TO PA-RECORD-IGNORED                                      
+           ELSE                                                                 
+W34517* ANY RECORD SAVED?                                                       
+W34517         IF PS-RECORD-SAVED                                               
+                   PERFORM 2000-PROCESS-DETAIL                                  
+W34517             SET PS-NOT-FIRST-DETAIL-REC  TO TRUE                         
+W34517         ELSE                                                             
+W34517             SET PS-RECORD-SAVED          TO TRUE                         
+W34517             SET PS-FIRST-DETAIL-REC      TO TRUE                         
+W34517         END-IF                                                           
+W34517         MOVE UL001-DATA-UNLOAD-INPUT TO UL002-DATA-UNLOAD-INPUT          
+           END-IF.                                                              
+                                                                                
+           PERFORM 8000-READ-INPUT.                                             
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  MAIN LOGIC TO PROCESS THE DETAIL                                       
+      ******************************************************************        
+       2000-PROCESS-DETAIL.                                                     
+                                                                                
+      * KEY BREAK?                                                              
+           IF UL001-DEPT-NBR = UL002-DEPT-NBR                                   
+W34517         AND UL001-GROUP-ID = UL002-GROUP-ID                              
+      * SET LAST DKEY INDICATOR TO FALSE                                        
+               SET PR-DTL-NOT-LAST-LO-MDSE  TO TRUE                             
+                                                                                
+      * BUILD AND WRITE PREVIOUS RECORD                                         
+               PERFORM 3000-LOAD-BUILD                                          
+           ELSE                                                                 
+W34517* ANY RECORD SAVED?                                                       
+W34517         IF PS-RECORD-SAVED                                               
+      * SET LAST DKEY INDICATOR TO TRUE                                         
+                   SET PR-DTL-LAST-LO-MDSE      TO TRUE                         
+                                                                                
+      * BUILD AND WRITE PREVIOUS RECORD                                         
+                   PERFORM 3000-LOAD-BUILD                                      
+W34517* BUILD AND WRITE REMAINDER RECORD                                        
+W34517             PERFORM 4000-LOAD-REMAINDER                                  
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  TRANSLATE THE DKEY TO BRAND AND VENDOR                                 
+      ******************************************************************        
+       2100-GET-BV-VIEW.                                                        
+                                                                                
+           EXEC SQL                                                             
+              SELECT                                                            
+                      LBL_SEQ_NBR                                               
+                     ,ENT_ID                                                    
+                INTO  :MLV00000-LBL-SEQ-NBR                                     
+                     ,:MLV00000-ENT-ID                                          
+                FROM  MLV_BRND_VND                                              
+               WHERE  ML_LO_MDSE_LVL_ID = :MLV00000-ML-LO-MDSE-LVL-ID           
+              WITH UR                                                           
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE SQLCODE                                                     
+               WHEN +0                                                          
+                   MOVE MLV00000-LBL-SEQ-NBR TO VSCHVL-CHARTC-SEQ-NBR           
+                   MOVE MLV00000-ENT-ID      TO XMT00000-ENT-ID                 
+               WHEN +100                                                        
+                   ADD +1                  TO PA-DKEY-NOT-FOUND                 
+                   MOVE MLV00000-ML-LO-MDSE-LVL-ID                              
+                       TO PV-ML-LWST-ID-9                                       
+                   DISPLAY 'UNKNOWN BV VIEW FOR ' PV-ML-LWST-ID-9               
+                   MOVE ZEROS              TO VSCHVL-CHARTC-SEQ-NBR             
+                   MOVE ZEROS              TO XMT00000-ENT-ID                   
+               WHEN OTHER                                                       
+                   DISPLAY ' DKEY: ' MLV00000-ML-LO-MDSE-LVL-ID                 
+                   MOVE 'SELECT MLV_BRND_VND ' TO PV-DB2-OPER-ATTEMPTED         
+                   MOVE '2100-GET-BV-VIEW   ' TO PV-PARAGRAPH-NAME              
+                   PERFORM 9950-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  GET THE BRAND NAME FROM TVSCHVL                                        
+      ******************************************************************        
+       2200-GET-BRAND-NAME.                                                     
+                                                                                
+           EXEC SQL                                                             
+              SELECT   CHARTC_VAL_DESC                                          
+                INTO  :VSCHVL-CHARTC-VAL-DESC                                   
+                FROM   TVSCHVL                                                  
+               WHERE   CHARTC_CDE = :PC-3                                       
+                 AND   CHARTC_SEQ_NBR = :VSCHVL-CHARTC-SEQ-NBR                  
+              WITH UR                                                           
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = +0                                                      
+               INSPECT VSCHVL-CHARTC-VAL-DESC                                   
+                                REPLACING ALL ',' BY ' '                        
+           ELSE                                                                 
+               IF SQLCODE = +100                                                
+                   ADD +1                  TO PA-BRND-NOT-FOUND                 
+                   MOVE PC-UNKNOWN         TO VSCHVL-CHARTC-VAL-DESC            
+                   MOVE VSCHVL-CHARTC-SEQ-NBR                                   
+                       TO PV-LBL-SEQ-NBR-9                                      
+                   DISPLAY 'UNKNOWN BRAND FOR ' PV-LBL-SEQ-NBR-9                
+           ELSE                                                                 
+               DISPLAY ' LABEL SEQ: ' VSCHVL-CHARTC-SEQ-NBR                     
+               MOVE 'SELECT TVSCHVL     ' TO PV-DB2-OPER-ATTEMPTED              
+               MOVE '2200-GET-BRAND-NAME' TO PV-PARAGRAPH-NAME                  
+               PERFORM 9950-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  GET THE VENDOR NAME FROM XMT_VND                                       
+      ******************************************************************        
+       2300-GET-VENDOR-NAME.                                                    
+                                                                                
+           EXEC SQL                                                             
+              SELECT   PRIM_VND_NM                                              
+                INTO  :XMT00000-PRIM-VND-NM                                     
+                FROM   XMT_VND                                                  
+               WHERE   ENT_ID = :XMT00000-ENT-ID                                
+              WITH UR                                                           
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = +0                                                      
+               INSPECT XMT00000-PRIM-VND-NM                                     
+                                      REPLACING ALL ',' BY ' '                  
+           ELSE                                                                 
+               IF SQLCODE = +100                                                
+                   ADD +1                  TO PA-VNDR-NOT-FOUND                 
+                   MOVE PC-UNKNOWN         TO XMT00000-PRIM-VND-NM              
+                   MOVE XMT00000-ENT-ID    TO PV-ENT-ID-9                       
+                   DISPLAY 'UNKNOWN VENDOR FOR ' PV-ENT-ID-9                    
+           ELSE                                                                 
+               DISPLAY ' ENT-ID: ' XMT00000-ENT-ID                              
+               MOVE 'SELECT XMT_VND     ' TO PV-DB2-OPER-ATTEMPTED              
+               MOVE '2300-GET-VENDOR-NAME ' TO PV-PARAGRAPH-NAME                
+               PERFORM 9950-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      * LOAD AND BUILD RECORD                                                   
+      ******************************************************************        
+       3000-LOAD-BUILD.                                                         
+                                                                                
+           MOVE UL002-DEPT-NBR          TO PR-DTL-DEPT-NBR.                     
+                                                                                
+      * TRANSLATE DKEY AND GET BRAND/VENDOR NAMES                               
+           MOVE UL002-ML-LO-MDSE-LVL-ID TO MLV00000-ML-LO-MDSE-LVL-ID           
+                                           PR-DTL-ML-LO-MDSE-LVL-ID.            
+           PERFORM 2100-GET-BV-VIEW.                                            
+           MOVE VSCHVL-CHARTC-SEQ-NBR   TO PR-DTL-LABEL-SEQ                     
+                                           UL002-LABEL-SEQ.                     
+           MOVE XMT00000-ENT-ID         TO PR-DTL-ENT-ID                        
+                                           UL002-ENT-ID.                        
+                                                                                
+      * CHECK AGAINST FILTER                                                    
+           PERFORM 3100-CHECK-FILTER.                                           
+                                                                                
+      * MET FILTER CRITERIA OR NO FILTER CRITERIA REQUESTED                     
+           IF PS-FILTER-FOUND                                                   
+               PERFORM 2200-GET-BRAND-NAME                                      
+               MOVE VSCHVL-CHARTC-VAL-DESC  TO PR-DTL-BRAND-NAME                
+                                                                                
+               PERFORM 2300-GET-VENDOR-NAME                                     
+               MOVE XMT00000-PRIM-VND-NM    TO PR-DTL-VENDOR-NAME               
+                                                                                
+               IF PV-DEPT-PROVIDED-AMT = ZEROES                                 
+                   MOVE ZEROES                  TO PR-DTL-DIST-PCT              
+               ELSE                                                             
+                   COMPUTE PR-DTL-DIST-PCT ROUNDED =                            
+                       UL002-PROVIDED-AMT / PV-DEPT-PROVIDED-AMT * 100          
+               END-IF                                                           
+                                                                                
+W34517* SAVE KEY INFORMATION FOR REMAINDER PROCESSING, IF THE DIST PCT          
+W34517* IS NOT ZERO OR IT IS THE FIRST DETAIL RECORD OF THE GROUP.              
+W34517         IF PR-DTL-DIST-PCT NOT = ZEROES                                  
+W34517             OR PS-FIRST-DETAIL-REC                                       
+W34517* CALCULATE ABSOLUTE VALUE                                                
+W34517             IF UL002-PROVIDED-AMT < ZEROES                               
+W34517                 COMPUTE PV-TMP-PROVIDED-AMT = -1                         
+W34517                         * UL002-PROVIDED-AMT                             
+W34517             ELSE                                                         
+W34517                 MOVE UL002-PROVIDED-AMT  TO PV-TMP-PROVIDED-AMT          
+W34517             END-IF                                                       
+W34517* SAVE ON FIRST GROUP RECORD OR LARGEST ABSOLUTE VALUE AMOUNT             
+W34517             IF PS-FIRST-DETAIL-REC                                       
+W34517                 OR PV-SAVE-PROVIDED-AMT < PV-TMP-PROVIDED-AMT            
+W34517                 MOVE PR-DTL-LABEL-SEQ    TO PV-SAVE-LABEL-SEQ            
+W34517                 MOVE PR-DTL-ENT-ID       TO PV-SAVE-ENT-ID               
+W34517                 MOVE PR-DTL-ML-LO-MDSE-LVL-ID                            
+W34517                     TO PV-SAVE-ML-LO-MDSE-LVL-ID                         
+W34517                 MOVE PR-DTL-LAST-LO-MDSE-IND                             
+W34517                     TO PV-SAVE-LAST-LO-MDSE-IND                          
+W34517                 MOVE PR-DTL-BRAND-NAME   TO PV-SAVE-BRAND-NAME           
+W34517                 MOVE PR-DTL-VENDOR-NAME  TO PV-SAVE-VENDOR-NAME          
+W34517                 MOVE PV-TMP-PROVIDED-AMT TO PV-SAVE-PROVIDED-AMT         
+P11228*                MOVE PR-DTL-DIST-TYPE    TO PV-SAVE-DIST-TYPE            
+P11228                 MOVE PT-OPT-CNTL-TYPE (PT-OPT-CNTL-INDX)                 
+P11228                                          TO PV-SAVE-DIST-TYPE            
+W34517             END-IF                                                       
+W34517             ADD PR-DTL-DIST-PCT      TO PV-DIST-PCT-TOTAL                
+W34517         END-IF                                                           
+                                                                                
+W34517         MOVE PT-OPT-CNTL-GROUP-ID(PT-OPT-CNTL-INDX)                      
+W34517             TO PR-DTL-GROUP-ID                                           
+W34517                UL002-GROUP-ID                                            
+W34517         MOVE PT-OPT-CNTL-TYPE (PT-OPT-CNTL-INDX)                         
+W34517             TO PR-DTL-DIST-TYPE                                          
+               MOVE UL002-PROVIDED-AMT      TO PR-DTL-PROVIDED-AMT              
+W34517         MOVE PV-DEPT-PROVIDED-AMT    TO PR-DTL-GROUP-TOTAL-AMT           
+                                                                                
+               PERFORM 8400-WRITE-DATA-UNLOAD-OUT                               
+                                                                                
+               PERFORM 8500-WRITE-PRORATE-CONTROL                               
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      * CHECK/SEARCH FILTER CONTROL TO SEE IF A CRITERIA MATCH                  
+      ******************************************************************        
+       3100-CHECK-FILTER.                                                       
+                                                                                
+           IF PT-OPT-CNTL-COUNT > ZEROES                                        
+               SET PS-FILTER-NOT-FOUND  TO TRUE                                 
+               MOVE ZEROES              TO PT-OPT-CNTL-INDX                     
+               PERFORM                                                          
+                       UNTIL PT-OPT-CNTL-INDX >= PT-OPT-CNTL-COUNT              
+                           OR PT-OPT-CNTL-INDX >= PT-OPT-CNTL-MAX               
+                           OR PS-FILTER-FOUND                                   
+                   ADD +1                   TO PT-OPT-CNTL-INDX                 
+                   IF (PT-OPT-CNTL-IGNORE-LBL-SEQ(PT-OPT-CNTL-INDX) OR          
+                          PT-OPT-CNTL-LBL-SEQ(PT-OPT-CNTL-INDX)                 
+                           = PR-DTL-LABEL-SEQ)                                  
+                       AND                                                      
+                       (PT-OPT-CNTL-IGNORE-ENT-ID(PT-OPT-CNTL-INDX) OR          
+                          PT-OPT-CNTL-ENT-ID(PT-OPT-CNTL-INDX)                  
+                           = PR-DTL-ENT-ID)                                     
+                       SET PS-FILTER-FOUND      TO TRUE                         
+                   END-IF                                                       
+               END-PERFORM                                                      
+           ELSE                                                                 
+               SET PS-FILTER-FOUND      TO TRUE                                 
+               MOVE +1                  TO PT-OPT-CNTL-INDX                     
+           END-IF.                                                              
+                                                                                
+                                                                                
+W34517******************************************************************        
+W34517* LOAD AND BUILD REMAINDER RECORD                                         
+W34517******************************************************************        
+W34517 4000-LOAD-REMAINDER.                                                     
+W34517                                                                          
+W34517     IF PV-DIST-PCT-TOTAL NOT = 100                                       
+W34517         ADD +1 TO PA-RECORD-REMAINDER                                    
+W34517                                                                          
+W34517         MOVE PV-SAVE-LABEL-SEQ       TO PR-DTL-LABEL-SEQ                 
+W34517         MOVE PV-SAVE-ENT-ID          TO PR-DTL-ENT-ID                    
+W34517         MOVE PV-SAVE-ML-LO-MDSE-LVL-ID                                   
+W34517             TO PR-DTL-ML-LO-MDSE-LVL-ID                                  
+W34517         MOVE PV-SAVE-LAST-LO-MDSE-IND                                    
+W34517             TO PR-DTL-LAST-LO-MDSE-IND                                   
+W34517         MOVE PV-SAVE-BRAND-NAME      TO PR-DTL-BRAND-NAME                
+W34517         MOVE PV-SAVE-VENDOR-NAME     TO PR-DTL-VENDOR-NAME               
+W34517         MOVE PV-SAVE-DIST-TYPE       TO PR-DTL-DIST-TYPE                 
+W34517* COMPUTE THE REMAINDER PERCENTAGE                                        
+W34517         COMPUTE PR-DTL-DIST-PCT ROUNDED =                                
+W34517             100 - PV-DIST-PCT-TOTAL                                      
+W34517         MOVE ZEROES                  TO PR-DTL-PROVIDED-AMT              
+W34517                                                                          
+W34517         PERFORM 8500-WRITE-PRORATE-CONTROL                               
+W34517     END-IF.                                                              
+W34517                                                                          
+W34517* RESET THE TOTAL/ACCUMULATIVE DISTRIBUTION PERCENTAGE                    
+W34517     MOVE ZEROES                  TO PV-DIST-PCT-TOTAL.                   
+                                                                                
+                                                                                
+      ******************************************************************        
+      * READ THE COMMON RECALC INPUT EXTRACT                                    
+      ******************************************************************        
+       8000-READ-INPUT.                                                         
+                                                                                
+           READ DATA-UNLOAD-IN-FILE INTO UL001-DATA-UNLOAD-INPUT                
+               AT END                                                           
+                   SET PS-DATA-UNLOAD-IN-EOF TO TRUE.                           
+                                                                                
+                                                                                
+      ******************************************************************        
+      * READ THE CONTROL CARD                                                   
+      ******************************************************************        
+       8100-READ-CONTROL.                                                       
+                                                                                
+           READ EXECUTION-CONTROL-FILE INTO PV-CC-OPTIONAL-CONTROL              
+               AT END                                                           
+                   SET PS-EXEC-CONTROL-EOF TO TRUE.                             
+                                                                                
+      ******************************************************************        
+      * WRITE/GENERATE THE CORRECT/CURRENT RECALC EXTRACT                       
+      ******************************************************************        
+       8400-WRITE-DATA-UNLOAD-OUT.                                              
+                                                                                
+           WRITE DATA-UNLOAD-OUT-REC FROM UL002-DATA-UNLOAD-INPUT.              
+                                                                                
+           ADD +1 TO PA-RECORD-OUT-CNT.                                         
+                                                                                
+      ******************************************************************        
+      * WRITE/GENERATE THE CSV REPORT OF THE ADJUSTMENTS                        
+      ******************************************************************        
+       8500-WRITE-PRORATE-CONTROL.                                              
+                                                                                
+           WRITE PRORATE-CONTROL-REC FROM PR-DETAIL-OUT-REC.                    
+                                                                                
+           ADD +1 TO PA-RECORD-RPT-CNT.                                         
+                                                                                
+      ******************************************************************        
+      *  PERFORM THE NECESSARY END PROCESSING STEPS                             
+      ******************************************************************        
+       9000-END-PROCESSING.                                                     
+                                                                                
+W34517* ANY RECORD SAVED?                                                       
+W34517     IF PS-RECORD-SAVED                                                   
+      * SET LAST DKEY INDICATOR TO TRUE                                         
+               SET PR-DTL-LAST-LO-MDSE      TO TRUE                             
+                                                                                
+      * BUILD AND WRITE PREVIOUS RECORD                                         
+               PERFORM 3000-LOAD-BUILD                                          
+W34517* BUILD AND WRITE REMAINDER RECORD                                        
+W34517         PERFORM 4000-LOAD-REMAINDER                                      
+           END-IF.                                                              
+                                                                                
+           CLOSE EXECUTION-CONTROL-FILE                                         
+                 DATA-UNLOAD-IN-FILE                                            
+                 DATA-UNLOAD-OUT-FILE                                           
+                 PRORATE-CONTROL-FILE.                                          
+                                                                                
+           DISPLAY '*************************************************'          
+           DISPLAY ' RECORD IN:      ' PA-RECORD-IN-CNT.                        
+           DISPLAY ' HEADER RECORDS: ' PA-RECORD-IGNORED.                       
+W34517     DISPLAY ' REMAINDER REC:  ' PA-RECORD-REMAINDER.                     
+           DISPLAY ' REPORT RECORD:  ' PA-RECORD-RPT-CNT.                       
+           DISPLAY ' ADJUST RECORD:  ' PA-RECORD-OUT-CNT.                       
+           DISPLAY ' '.                                                         
+           DISPLAY ' DKEY NOT FOUND:         ' PA-DKEY-NOT-FOUND.               
+           DISPLAY ' BRAND NAME NOT FOUND:   ' PA-BRND-NOT-FOUND.               
+           DISPLAY ' VENDOR NAME NOT FOUND:  ' PA-VNDR-NOT-FOUND.               
+           DISPLAY '*************************************************'.         
+                                                                                
+                                                                                
+      ***************************************************************           
+      *    SQL ABEND PROCESSING                                     *           
+      ***************************************************************           
+       9950-SQL-ABEND.                                                          
+                                                                                
+           DISPLAY '** OPERATION = ' PV-DB2-OPER-ATTEMPTED.                     
+                                                                                
+           COPY DPPD004.                                                        
+                                                                                
+           SET SQL-ABEND       TO TRUE.                                         
+           PERFORM 9999-OTHER-ABEND.                                            
+                                                                                
+                                                                                
+      ***************************************************************           
+      *    ISSUE THE ACTUAL ABEND CALL                              *           
+      ***************************************************************           
+       9999-OTHER-ABEND.                                                        
+                                                                                
+           DISPLAY '**  ABEND     **'.                                          
+           DISPLAY '**  PROGRAM   = ' PC-PROGRAM-NAME.                          
+           DISPLAY '**  PARAGRAPH  = ' PV-PARAGRAPH-NAME.                       
+           DISPLAY '************************************************'.          
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    

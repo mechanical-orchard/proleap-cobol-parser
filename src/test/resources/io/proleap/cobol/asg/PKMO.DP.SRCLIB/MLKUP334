@@ -1,0 +1,1249 @@
+       IDENTIFICATION DIVISION.                                         00010000
+                                                                        00020000
+       PROGRAM-ID.    MLKUP334                                          00030000
+       AUTHOR.        RONNA BUTZ                                        00040000
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                          00050000
+       DATE-WRITTEN.  8-27-99.                                          00060000
+       DATE-COMPILED.                                                   00070000
+                                                                        00080000
+      ******************************************************************00090000
+      *     MLKUP334 - WEEKLY SUBCLASS/STORE TABLE UPDATE PROGRAM      *00100000
+      ******************************************************************00110000
+      *     THIS PROGRAM WILL MAINTAIN THE WEEKLY SUBCLASS STORE DB2   *00120000
+      * TABLE WITH ONORDER RETAIL AND COST FIELDS.  THE TABLE IS READ  *00130000
+      * USING THE TABLE KEY FROM EACH SORT-SUMMED INPUT FILE           *00140000
+      * RECORD.  IF THE ROW IS FOUND, THE ROW IS UPDATED WITH DATA     *00150000
+      * FROM THE INPUT FILE RECORD.  IF THE ROW IS NOT FOUND, A NEW    *00160000
+      * ROW IS INSERTED ON THE DB2 TABLE (TWKSCLS).  COMMITS ARE TAKEN *00170000
+      * EVERY TEN SECONDS, AND CHECKPOINT RESTART LOGIC IS             *00180000
+      * INCORPORATED.                                                  *00190000
+      *                                                                *00200000
+      *    WR/PITS#     DATE        DESCRIPTION                        *00210000
+      *    --------   --------     ---------------------------------   *00220000
+      *    WR10422    09/26/99     INITIALIZE ONORDER AMOUNTS IN       *00230000
+      *                            TWKSCLS FOR THE FSCL MONTH TO ZERO  *00240000
+      *    WR10422    10/31/99     ADDED A CURSOR FOR INITIALIZING     *00250000
+      *                            TWKSCLS ONORDER DATA TO ZERO.  THE  *00260000
+      *                            INITIALZATION IS DONE AT A WEEKLY   *00270000
+      *                            LEVEL, NOT A MONTHLY LEVEL          *00280000
+      *    PM327166   11/05/99     MODIFIED INITIALIZATION OF ONORDER  *00290000
+      *                            VALUES TO ZERO SO THAT IT DOES THIS *00300000
+      *                            AT A DEPARTMENT WEEKLY LEVEL, NOT   *00310000
+      *                            A WEEKLY LEVEL.                     *00320000
+      *    WR26603    03/10/04     INCREASED LRECL OF INP01 - CONDENSED*00331004
+      *                            FILE FROM 32 TO 50 TO REFLECT       *00332004
+      *                            MLRD132 CHANGES.  INCREASED CKPT    *00333006
+      *                            STORE TO 9(5).  CHANGED SELECT TO   *00334006
+      *                            EXISTANCE CHECK.  CHANGED INSERT    *00335006
+      *                            FROM 0 TO 0. BECAUSE COLS ARE DEC.  *00336006
+      *                            MOVED MLRD132 VALUES TO HOST VARIABL*00337006
+      *                            ES BEFORE INSERT/UPDATES.           *00338006
+      *    WR21764    10/21/04     INCREASED LRECL OF INP01 - CONDENSED*00339013
+      *                            FILE FROM 50 TO 80 TO REFLECT       *00339113
+      *                            MLRD132 CHANGES.                    *00339213
+      ******************************************************************00340000
+                                                                        00350000
+                                                                        00360000
+       ENVIRONMENT DIVISION.                                            00370000
+                                                                        00380000
+       CONFIGURATION SECTION.                                           00390000
+       SOURCE-COMPUTER.        IBM-3090.                                00400000
+       OBJECT-COMPUTER.        IBM-3090.                                00410000
+       INPUT-OUTPUT SECTION.                                            00420000
+       FILE-CONTROL.                                                    00430000
+           SELECT CONDENSED-FILE                                        00440000
+               ASSIGN TO INP01.                                         00450000
+                                                                        00460000
+           SELECT LEDGER-EXTRACT-DATE-FILE                              00470000
+               ASSIGN TO INP02.                                         00480000
+                                                                        00490000
+       DATA DIVISION.                                                   00500000
+       FILE SECTION.                                                    00510000
+                                                                        00520000
+       FD  CONDENSED-FILE                                               00530000
+           LABEL RECORDS ARE STANDARD                                   00540000
+           RECORDING MODE IS F                                          00550000
+           BLOCK CONTAINS 0 RECORDS.                                    00560000
+W26603 01  CONDENSED-RECORD            PIC X(80).                       00570013
+      *                                                                 00580000
+       FD  LEDGER-EXTRACT-DATE-FILE                                     00590000
+           RECORDING MODE IS F                                          00600000
+           LABEL RECORDS ARE STANDARD                                   00610000
+           BLOCK CONTAINS 0 RECORDS.                                    00620000
+       01  LEDGER-EXTRACT-DATE-RECORD       PIC X(80).                  00630000
+                                                                        00640000
+      *                                                                 00650000
+       WORKING-STORAGE SECTION.                                         00660000
+                                                                        00670000
+       01  ABEND-CODE                  PIC S9(04)  VALUE ZERO COMP SYNC.00680000
+                                                                        00690000
+       01  PC-PROGRAM-CONSTANTS.                                        00700000
+           05  PC-JOB-NAME             PIC  X(06)    VALUE 'MLK110'.    00710000
+           05  PC-PROGRAM-NAME         PIC  X(08)    VALUE 'MLKUP334'.  00720000
+           05  PC-MAX-RETRIES          PIC S9(03) VALUE +3.             00730000
+           05  PC-MAX-DEADLOCKS        PIC S9(03) VALUE +3.             00740000
+                                                                        00750000
+       01  PC-PROGRAM-COUNTER.                                          00760000
+           05  PC-UPDATE-CNT           PIC  9(09).                      00770000
+           05  PC-DISPLAY-CNT          PIC  9(09).                      00780000
+                                                                        00790000
+       01  PE-PROGRAM-ERROR-MESSAGES.                                   00800000
+           05  PE-MSG-01                       PIC X(50) VALUE          00810000
+                'ATTEMPT TO SELECT ROW FOR UPDATE/INSERT FAILED   '.    00820000
+           05  PE-MSG-02                       PIC X(50) VALUE          00830000
+                'ATTEMPT TO UPDATE ROW ON TABLE TWKSCLS FAILED    '.    00840000
+           05  PE-MSG-03                       PIC X(50) VALUE          00850000
+                'ATTEMPT TO INSERT ROW ON TABLE TWKSCLS FAILED    '.    00860000
+           05  PE-MSG-04                       PIC X(50) VALUE          00870000
+                'ERROR IN SELECT ''STATUS CODE'' FROM TCKRSTCNTL  '.    00880000
+           05  PE-MSG-05                       PIC X(50) VALUE          00890000
+                'UPDATE TO ''WORK_STRG_DESC'' ON TCKRSTINF FAILED '.    00900000
+           05  PE-MSG-06                       PIC X(50) VALUE          00910000
+                'PROGRAM ABENDED WHILE TRYING TO PERFORM A COMMIT '.    00920000
+           05  PE-MSG-07                       PIC X(50) VALUE          00930000
+                'PROGRAM MAXIMUM DEADLOCK COUNT HAS BEEN EXCEEDED'.     00940000
+           05  PE-MSG-08                       PIC X(50) VALUE          00950000
+                'AFTER DEADLOCK ERROR, AN UPDATE OR INSERT FAILED'.     00960000
+           05  PE-MSG-09                       PIC X(50) VALUE          00970000
+                'CHECKPNT RESTART FAILED UPON FIRST INSERT/UPDATE'.     00980000
+           05  PE-MSG-10                       PIC X(50) VALUE          00990000
+                'UPDATE OF STATUS CODE ON TCKRSTCNTL UNSUCCESSFUL'.     01000000
+           05  PE-MSG-11                       PIC X(50) VALUE          01010000
+                'ATTEMPT TO SELECT TIMESTAMP + CKPT_FRQNCY_QTY   '.     01020000
+           05  PE-MSG-12                       PIC X(50) VALUE          01030000
+                'UPDATE TWKSCLS TO INIT ONORD AMOUNT FAILED       '.    01040000
+           05  PE-MSG-13                       PIC X(50) VALUE          01050000
+                'ATTEMPT TO SELECT ROW FROM TDTATTR FAILED       '.     01060000
+           05  PE-MSG-14                       PIC X(50) VALUE          01070000
+                'ATTEMEP TO OPEN FSCL-WK-END-CSR FAILED          '.     01080000
+           05  PE-MSG-15                       PIC X(50) VALUE          01090000
+                'ATTEMPT TO FETCH FSCL-WK-END-CSR FAILED         '.     01100000
+           05  PE-MSG-16                       PIC X(50) VALUE          01110000
+                'ATTEMPT TO CLOSE FSCL-WK-END-CSR FAILED         '.     01120000
+           05  PE-MSG-17                       PIC X(50) VALUE          01130000
+                'ATTEMEP TO OPEN DEPT-CSR FAILED                 '.     01140000
+           05  PE-MSG-18                       PIC X(50) VALUE          01150000
+                'ATTEMPT TO FETCH DEPT-CSR FAILED                '.     01160000
+           05  PE-MSG-19                       PIC X(50) VALUE          01170000
+                'ATTEMPT TO CLOSE DEPT-CSR FAILED                '.     01180000
+      *                                                                 01190000
+       01  PS-PROGRAM-SWITCHES.                                         01200000
+           05  PS-INPUT-FILE-EOF-SW         PIC  X        VALUE 'N'.    01210000
+               88  PS-MORE-INPUT-RECORDS                  VALUE 'N'.    01220000
+               88  PS-NO-MORE-INPUT-RECORDS               VALUE 'Y'.    01230000
+           05  PS-EMPTY-FILE-SW             PIC  X        VALUE 'N'.    01240000
+               88  PS-EMPTY-INPUT-FILE                    VALUE 'Y'.    01250000
+           05  PS-FIRST-COMMIT-SW           PIC X         VALUE 'N'.    01260000
+               88  PS-FIRST-COMMIT                        VALUE 'Y'.    01270000
+           05  PS-DEADLOCK-RESTART-SW       PIC X         VALUE 'N'.    01280000
+               88  PS-PROGRAM-DEADLOCKED                  VALUE 'Y'.    01290000
+           05  PS-PROCESSING-OPTIONS        PIC X         VALUE 'P'.    01300000
+               88  PS-UPDATE-WKSCLS-ROW                   VALUE 'U'.    01310000
+               88  PS-UPDATE-WKSHNK-ROW                   VALUE 'U'.    01320000
+               88  PS-INSERT-WKSCLS-ROW                   VALUE 'I'.    01330000
+               88  PS-INSERT-WKSHNK-ROW                   VALUE 'I'.    01340000
+           05  PS-END-OF-LEDGER-DATE-FILE-SW   PIC X      VALUE 'N'.    01350000
+               88 PS-END-OF-LEDGER-DATE-FILE              VALUE 'Y'.    01360000
+           05  PS-END-OF-FSCL-WK-END-CSR-SW    PIC X      VALUE 'N'.    01370000
+               88 PS-END-OF-FSCL-WK-END-CSR               VALUE 'Y'.    01380000
+           05  PS-END-OF-DEPT-CSR-SW           PIC X      VALUE 'N'.    01390000
+               88 PS-END-OF-DEPT-CSR                      VALUE 'Y'.    01400000
+      *                                                                 01410000
+      *                                                                 01420000
+       01  PROGRAM-VARIABLES.                                           01430000
+           05  PV-DEADLOCK-COUNT               PIC S9(04) VALUE +0.     01440000
+           05  PV-PARAGRAPH-NAME               PIC  X(30) VALUE SPACES. 01450000
+           05  PV-ABEND-MESSAGE                PIC  X(75) VALUE SPACES. 01460000
+           05  PV-OPERATION-ATTEMPTED          PIC  X(50) VALUE SPACES. 01470000
+           05  PV-CURRENT-TIMESTAMP            PIC  X(26) VALUE SPACES. 01480000
+           05  PV-COMMIT-TIMESTAMP             PIC  X(26) VALUE SPACES. 01490000
+           05  PV-SQLCODE-DISPLAY              PIC  ++++9 VALUE ZERO.   01500000
+           05  PV-MN-END-FSCL-WK-NBR           PIC  X(10) VALUE SPACES. 01510000
+           05  PV-MN-BEG-FSCL-WK-NBR           PIC  X(10) VALUE SPACES. 01520000
+           05  PV-FSCL-MN-BEG-DTE              PIC  X(10) VALUE SPACES. 01530000
+           05  PV-DEPT-CNT                     PIC S9(04) VALUE +0.     01540000
+           05  PV-WK-CNT                       PIC S9(04) VALUE +0.     01550000
+           05  PV-DEPT-MAX                     PIC S9(04) VALUE +0.     01560000
+W26603     05  PV-DB2-TEST                     PIC S9(04)  VALUE ZEROES 01561006
+W26603                                                COMP.             01562006
+      *                                                                 01570000
+      *                                                                 01580000
+       01  DEPT-TBL.                                                    01590000
+           05  TBL-DEPT-NBRS   OCCURS  1000.                            01600000
+               10  TBL-DEPT                    PIC  X(03) VALUE SPACES. 01610000
+      *                                                                 01620000
+      *                                                                 01630000
+       01  FSCL-WK-TBL.                                                 01640000
+           05  TBL-FSCL-WK     OCCURS  6.                               01650000
+               10  TBL-FSCL-WK-END-DTE         PIC  X(10) VALUE SPACES. 01660000
+               10  TBL-FSCL-WK-NBR             PIC  X(02) VALUE SPACES. 01670000
+      *                                                                 01680000
+      *                                                                 01690000
+       01  PA-PROGRAM-ACCUMULATORS.                                     01700000
+           05  PA-RECORD-COUNTS.                                        01710000
+               10  PA-INPUT-COUNT              PIC  9(9)  VALUE ZEROES. 01720000
+               10  PA-UPD-TWKSCLS-COUNT        PIC  9(9)  VALUE ZEROES. 01730000
+               10  PA-INS-TWKSCLS-COUNT        PIC  9(9)  VALUE ZEROES. 01740000
+               10  PA-SEL-TWKSCLS-COUNT        PIC  9(9)  VALUE ZEROES. 01750000
+               10  PA-SEL-TDTATTR-COUNT        PIC  9(9)  VALUE ZEROES. 01760000
+               10  PA-COMMIT-COUNT             PIC  9(9)  VALUE ZEROES. 01770000
+      *                                                                 01780000
+       01  PD-PROGRAM-DISPLAYS.                                         01790000
+           05  PD-DEADLOCK-COUNT         PIC  9(04) VALUE 0.            01800000
+      *                                                                 01810000
+      ******************************************************************01820000
+      * MLRD103 - M/L WEEKLY SUBCLASS STORE DATABASE UPDATE TXN         01830000
+      ******************************************************************01840000
+           COPY MLRD132.                                                01850000
+      *                                                                 01860000
+      ******************************************************************01870000
+      * MLRD135 - FISCAL MONTH END DATE                                 01880000
+      ******************************************************************01890000
+           COPY MLRD135.                                                01900000
+      *                                                                 01910000
+      ******************************************************************01920000
+      *  DB2 ERROR MESSAGES FORMAT AREA.                                01930000
+      ******************************************************************01940000
+           COPY DPWS004.                                                01950000
+      *                                                                 01960000
+      ******************************************************************01970000
+      *  USED FOR DB2 ERRORS                                            01980000
+      ******************************************************************01990000
+           EXEC SQL                                                     02000000
+               INCLUDE SQLCA                                            02010000
+           END-EXEC.                                                    02020000
+      *                                                                 02030000
+      ******************************************************************02040000
+      *  M/L WEEKLY SUBCLASS STORE TABLE                                02050000
+      ******************************************************************02060000
+           EXEC SQL                                                     02070000
+               INCLUDE TWKSCLS                                          02080000
+           END-EXEC.                                                    02090000
+      *                                                                 02100000
+      ******************************************************************02110000
+      *  M/L DATE ATTRIBUTES TABLE                                      02120000
+      ******************************************************************02130000
+           EXEC SQL                                                     02140000
+               INCLUDE TDTATTR                                          02150000
+           END-EXEC.                                                    02160000
+      *                                                                 02170000
+      ***************************************************************** 02180000
+      * DB2 CHECKPOINT RESTART CONTROL TABLE AND RESTART INFO TABLE     02190000
+      ***************************************************************** 02200000
+           EXEC SQL                                                     02210000
+               INCLUDE TCKRSTCN                                         02220000
+           END-EXEC.                                                    02230000
+      *                                                                 02240000
+           EXEC SQL                                                     02250000
+               INCLUDE TCKRSTIN                                         02260000
+           END-EXEC.                                                    02270000
+      *                                                                 02280000
+      ******************************************************************02290000
+      * CHECKPOINT RESTART VARIABLES AND PREV COMMIT VARIABLES.        *02300000
+      ******************************************************************02310000
+       01  CR-CHECKPOINT-RESTART-AREA.                                  02320000
+           05  CR-AREA-LEN                  PIC S9(04) VALUE +104 COMP. 02330000
+           05  CR-CHECKPOINT-RESTART-VAR.                               02340000
+W26603         10  CR-PREV-DTL-KEY          PIC  X(22) VALUE SPACES.    02350004
+               10  FILLER REDEFINES CR-PREV-DTL-KEY.                    02360000
+                   15  CR-FISCAL-NBR        PIC  X(02).                 02370000
+                   15  CR-FISCAL-WK-END-DTE PIC  X(10).                 02380000
+                   15  CR-DEPT-NBR          PIC  X(03).                 02390000
+                   15  CR-SUB-CL-NBR        PIC  X(02).                 02400000
+W26603             15  CR-STR-NBR           PIC  9(05).                 02410004
+               10  CR-INPUT-READ-COUNT      PIC  9(09) VALUE ZEROES.    02420000
+               10  CR-TWKSCLS-COMMIT-COUNT  PIC  9(09) VALUE ZEROES.    02430000
+               10  CR-UPD-TWKSCLS-COUNT     PIC  9(09) VALUE ZEROES.    02440000
+               10  CR-INS-TWKSCLS-COUNT     PIC  9(09) VALUE ZEROES.    02450000
+               10  CR-SEL-TWKSCLS-COUNT     PIC  9(09) VALUE ZEROES.    02460000
+               10  CR-SEL-TDTATTR-COUNT     PIC  9(09) VALUE ZEROES.    02470000
+      *                                                                 02480000
+       01  CK-CHECKPOINT-SAVE-AREA.                                     02490000
+W26603     05  CK-SAVE-PREV-KEY         PIC  X(22) VALUE SPACES.        02500004
+           05  FILLER REDEFINES CK-SAVE-PREV-KEY.                       02510000
+               10  CK-FISCAL-NBR        PIC  X(02).                     02520000
+               10  CK-FISCAL-WK-END-DTE PIC  X(10).                     02530000
+               10  CK-DEPT-NBR          PIC  X(03).                     02540000
+               10  CK-SUB-CL-NBR        PIC  X(02).                     02550000
+W26603         10  CK-STR-NBR           PIC  9(05).                     02560004
+      *                                                                 02570000
+      ****************************************************************  02580000
+      *  DEPARTMENT CURSOR FOR TWKSCLS TABLE                            02590000
+      ****************************************************************  02600000
+                                                                        02610000
+           EXEC SQL                                                     02620000
+               DECLARE DEPT-CSR CURSOR FOR                              02630000
+                   SELECT DISTINCT DEPT_NBR                             02640000
+                   FROM TWKSCLS                                         02650000
+                   WHERE FSCL_WK_END_DTE BETWEEN :PV-FSCL-MN-BEG-DTE    02660000
+                                             AND :ML135-EXTRACT-DTE     02670000
+                     AND FSCL_WK_NBR     BETWEEN :PV-MN-BEG-FSCL-WK-NBR 02680000
+                                             AND :PV-MN-END-FSCL-WK-NBR 02690000
+                   ORDER BY DEPT_NBR                                    02700000
+W26603             WITH UR                                              02701012
+           END-EXEC.                                                    02710000
+                                                                        02720000
+                                                                        02730000
+      *                                                                 02740000
+      ****************************************************************  02750000
+      *  FORECAST MONTHS OF SUPPLY CURSOR                               02760000
+      ****************************************************************  02770000
+                                                                        02780000
+           EXEC SQL                                                     02790000
+               DECLARE FSCL-WK-END-CSR CURSOR FOR                       02800000
+                   SELECT DISTINCT FSCL_WK_END_DTE                      02810000
+                                  ,FSCL_WK_NBR                          02820000
+                   FROM TDTATTR                                         02830000
+                   WHERE KY_DTE BETWEEN :PV-FSCL-MN-BEG-DTE             02840000
+                                    AND :ML135-EXTRACT-DTE              02850000
+W26603             WITH UR                                              02851007
+           END-EXEC.                                                    02860000
+                                                                        02870000
+                                                                        02880000
+      *                                                                 02890000
+      *                                                                 02900000
+       LINKAGE SECTION.                                                 02910000
+      *                                                                 02920000
+      *                                                                 02930000
+      *-------------------*                                             02940000
+       PROCEDURE DIVISION.                                              02950000
+      *-------------------*                                             02960000
+                                                                        02970000
+       0000-MAIN-MODULE.                                                02980000
+                                                                        02990000
+           PERFORM 1000-INITIALIZATION.                                 03000000
+      *                                                                 03010000
+           PERFORM 2000-PROCESS-INPUT                                   03020000
+                UNTIL PS-NO-MORE-INPUT-RECORDS.                         03030000
+      *                                                                 03040000
+           PERFORM 8000-EOJ-ROUTINE.                                    03050000
+                                                                        03060000
+           STOP RUN.                                                    03070000
+      *                                                                 03080000
+      *                                                                 03090000
+      *                                                                 03100000
+      ******************************************************************03110000
+      * OPEN INPUT FILE , INITIALIZE COUNTERS AND THE ONORD VALUES IN   03120000
+      * THE TWKSCLS TABLE, READ FIRST INPUT RECORD PREPARE CHECKPOINT   03130000
+      * RESTART TABLES FOR PROCESSING / RESTART                         03140000
+      ******************************************************************03150000
+      *                                                                 03160000
+       1000-INITIALIZATION.                                             03170000
+      *                                                                 03180000
+           OPEN INPUT CONDENSED-FILE                                    03190000
+                      LEDGER-EXTRACT-DATE-FILE.                         03200000
+      *                                                                 03210000
+           PERFORM 7100-INIT-CHECKPOINT-SELECT.                         03220000
+      *                                                                 03230000
+      * CKPT-STAT-CODE = '9' INDICATES A RESTART CONDITION              03240000
+           IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                           03250000
+               PERFORM 7200-SELECT-RESTART-INFO                         03260000
+               MOVE TCKRSTINF-WORK-STRG-DESC-TEXT TO                    03270000
+                                             CR-CHECKPOINT-RESTART-VAR  03280000
+               MOVE CR-PREV-DTL-KEY         TO CK-SAVE-PREV-KEY         03290000
+      * MOVE RESTART COUNTS TO PA-FIELDS FOR ACCURATE DISPLAY AT EOJ    03300000
+               MOVE CR-UPD-TWKSCLS-COUNT    TO PA-UPD-TWKSCLS-COUNT     03310000
+               MOVE CR-INS-TWKSCLS-COUNT    TO PA-INS-TWKSCLS-COUNT     03320000
+               MOVE CR-SEL-TWKSCLS-COUNT    TO PA-SEL-TWKSCLS-COUNT     03330000
+               MOVE CR-SEL-TDTATTR-COUNT    TO PA-SEL-TDTATTR-COUNT     03340000
+               MOVE CR-TWKSCLS-COMMIT-COUNT TO PA-COMMIT-COUNT          03350000
+           ELSE                                                         03360000
+               PERFORM 4000-READ-LEDGER-EXTRACT-DATE                    03370000
+      *                                                                 03380000
+               IF PS-END-OF-LEDGER-DATE-FILE                            03390000
+                   DISPLAY '** ABEND **'                                03400000
+                   DISPLAY '** PROGRAM MLKRP215 **'                     03410000
+                   DISPLAY '** PARAGRAPH 1000-INITIALIZATION'           03420000
+                   DISPLAY '** LEDGER EXTRACT DATE FILE IS EMPTY.'      03430000
+                   MOVE +4003 TO ABEND-CODE                             03440000
+                   PERFORM 9999-ABEND                                   03450000
+               END-IF                                                   03460000
+      *                                                                 03470000
+               MOVE ML135-EXTRACT-DTE          TO DTATTR-KY-DTE         03480000
+      *                                                                 03490000
+               PERFORM 6000-GET-DATE-ATTRIBUTES                         03500000
+      *                                                                 03510000
+               INITIALIZE DEPT-TBL                                      03520000
+               PERFORM 1100-BUILD-DEPT-TABLE                            03530000
+               INITIALIZE FSCL-WK-TBL                                   03540000
+               PERFORM 1400-BUILD-FSCL-WK-TABLE                         03550000
+      *                                                                 03560000
+      *        THIS IS THE OUTER PROCESSING LOOP THAT PROCESSES         03570000
+      *        BY WEEK.  WITHIN 1300-INIT-BY-WEEK, THERE IS A LOWER     03580000
+      *        LEVEL OF DEPARTMENT THAT IS PROCESSED.                   03590000
+               MOVE +1             TO PV-WK-CNT                         03600000
+               PERFORM 1300-INIT-BY-WEEK                                03610000
+                   UNTIL PV-WK-CNT > 5                                  03620000
+                      OR TBL-FSCL-WK-NBR(PV-WK-CNT) = SPACES            03630000
+      *                                                                 03640000
+               SET PS-FIRST-COMMIT TO TRUE                              03650000
+           END-IF.                                                      03660000
+      *                                                                 03670000
+           DISPLAY 'COMMITS WILL BE TAKEN EVERY ',                      03680000
+                   TCKRSTCNTL-CKPT-FRQNCY-QTY, ' SECONDS.'.             03690000
+      *                                                                 03700000
+           PERFORM 4100-READ-CONDENSED-FILE UNTIL                       03710000
+               PA-INPUT-COUNT > CR-INPUT-READ-COUNT                     03720000
+            OR PS-NO-MORE-INPUT-RECORDS.                                03730000
+      *                                                                 03740000
+           IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                           03750000
+               DISPLAY 'FISCAL WEEK NBR      ' ML132-ONORD-FSCL-WK-NBR  03760000
+               DISPLAY 'FISCAL WEEK END DATE '                          03770000
+                                            ML132-ONORD-FSCL-WK-END-DTE 03780000
+               DISPLAY 'DEPARTMENT NBR       ' ML132-ONORD-DEPT-NBR     03790000
+               DISPLAY 'SUB CLASS NBR        ' ML132-ONORD-SUB-CL-NBR   03800000
+               DISPLAY 'STORE NBR            ' ML132-ONORD-STR-NBR      03810000
+               DISPLAY 'INPUT RECORD RESTARTED ON RECORD '              03820000
+                        PA-INPUT-COUNT                                  03830000
+           END-IF.                                                      03840000
+                                                                        03850000
+           IF PS-NO-MORE-INPUT-RECORDS                                  03860000
+               IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                       03870000
+                   CONTINUE                                             03880000
+               ELSE                                                     03890000
+                   DISPLAY '** NO RECORDS ON INPUT FILE **'             03900000
+           ELSE                                                         03910000
+               PERFORM 7000-GET-COMMIT-TIMESTAMP                        03920000
+           END-IF.                                                      03930000
+      *                                                                 03940000
+      *                                                                 03950000
+      ******************************************************************03960000
+      * LOOP THROUGH THE DEPARTMENT CURSOR AND POPULATE DEPT TABLE      03970000
+      ******************************************************************03980000
+       1100-BUILD-DEPT-TABLE.                                           03990000
+      *                                                                 04000000
+           PERFORM 6100-OPEN-DEPT-CSR.                                  04010000
+      *                                                                 04020000
+           PERFORM 6110-FETCH-DEPT-CSR.                                 04030000
+      *                                                                 04040000
+           PERFORM 1200-INSERT-DEPT-TABLE                               04050000
+             UNTIL PS-END-OF-DEPT-CSR.                                  04060000
+      *                                                                 04070000
+           MOVE PV-DEPT-CNT               TO PV-DEPT-MAX.               04080000
+      *                                                                 04090000
+           PERFORM 6120-CLOSE-DEPT-CSR.                                 04100000
+      *                                                                 04110000
+      *                                                                 04120000
+      ******************************************************************04130000
+      * ADD A DEPARTMENT TO THE TABLE                                   04140000
+      ******************************************************************04150000
+       1200-INSERT-DEPT-TABLE.                                          04160000
+      *                                                                 04170000
+           ADD +1                         TO PV-DEPT-CNT.               04180000
+           MOVE WKSCLS-DEPT-NBR           TO TBL-DEPT(PV-DEPT-CNT).     04190000
+      *                                                                 04200000
+           PERFORM 6110-FETCH-DEPT-CSR.                                 04210000
+      *                                                                 04220000
+      *                                                                 04230000
+      ******************************************************************04240000
+      * THE PROCEDURE PROCESSES BY WEEK, 1310-ZERO-OUT-ONORD-AMTS       04250000
+      * PROCESSES BY DEPARTEMNT.  THE COMMIT IS DONE BY WEEK.           04260000
+      ******************************************************************04270000
+       1300-INIT-BY-WEEK.                                               04280000
+      *                                                                 04290000
+           MOVE TBL-FSCL-WK-NBR(PV-WK-CNT) TO WKSCLS-FSCL-WK-NBR.       04300000
+           MOVE TBL-FSCL-WK-END-DTE(PV-WK-CNT)                          04310000
+                                           TO WKSCLS-FSCL-WK-END-DTE.   04320000
+                                                                        04330000
+           MOVE +1 TO PV-DEPT-CNT.                                      04340000
+           PERFORM 1310-ZERO-OUT-ONORD-AMTS                             04350000
+               UNTIL PV-DEPT-CNT > PV-DEPT-MAX.                         04360000
+                                                                        04370000
+           ADD +1  TO PV-WK-CNT.                                        04380000
+           PERFORM 7510-COMMIT.                                         04390012
+      *                                                                 04400000
+      *                                                                 04410000
+      *                                                                 04420000
+      ******************************************************************04430000
+      * ZERO OUT THE TWKSCLS FOR ONE DEPARTMENT FOR THE FISCAL WEEK     04440000
+      ******************************************************************04450000
+       1310-ZERO-OUT-ONORD-AMTS.                                        04460000
+                                                                        04470000
+           MOVE TBL-DEPT(PV-DEPT-CNT)       TO WKSCLS-DEPT-NBR.         04480000
+           PERFORM 6300-INITIALIZE-ONORD.                               04490000
+W26603     PERFORM 7510-COMMIT.                                         04491012
+           ADD +1 TO PV-DEPT-CNT.                                       04500000
+      *                                                                 04510000
+      *                                                                 04520000
+      ******************************************************************04530000
+      * LOOP THROUGH THE OPEN FISCAL WEEK END CURSORT AND POPULATE      04540000
+      * THE FSCL WEEK TABLE                                             04550000
+      ******************************************************************04560000
+       1400-BUILD-FSCL-WK-TABLE.                                        04570000
+      *                                                                 04580000
+           PERFORM 6200-OPEN-FSCL-WK-END-CSR.                           04590000
+      *                                                                 04600000
+           PERFORM 6210-FETCH-FSCL-WK-END-CSR.                          04610000
+      *                                                                 04620000
+           PERFORM 1500-INSERT-FSCL-WK-TABLE                            04630000
+             UNTIL PS-END-OF-FSCL-WK-END-CSR                            04640000
+      *                                                                 04650000
+           PERFORM 6220-CLOSE-FSCL-WK-END-CSR.                          04660000
+      *                                                                 04670000
+      *                                                                 04680000
+      ******************************************************************04690000
+      * ADD A DEPARTMENT TO THE TABLE                                   04700000
+      ******************************************************************04710000
+       1500-INSERT-FSCL-WK-TABLE.                                       04720000
+      *                                                                 04730000
+           ADD +1                      TO PV-WK-CNT.                    04740000
+           MOVE DTATTR-FSCL-WK-END-DTE TO                               04750000
+                                         TBL-FSCL-WK-END-DTE(PV-WK-CNT).04760000
+           MOVE DTATTR-FSCL-WK-NBR     TO TBL-FSCL-WK-NBR(PV-WK-CNT).   04770000
+                                                                        04780000
+      *                                                                 04790000
+           PERFORM 6210-FETCH-FSCL-WK-END-CSR.                          04800000
+      *                                                                 04810000
+      *                                                                 04820000
+      ******************************************************************04830000
+      * PROCESS THE SORTED/CONDENSED FILE - UPDATE OR INSERT AS NEEDED  04840000
+      ******************************************************************04850000
+       2000-PROCESS-INPUT.                                              04860000
+      *                                                                 04870000
+           MOVE 'N' TO PS-DEADLOCK-RESTART-SW.                          04880000
+      *                                                                 04890000
+           MOVE ML132-ONORD-FSCL-WK-NBR     TO WKSCLS-FSCL-WK-NBR.      04900000
+           MOVE ML132-ONORD-FSCL-WK-END-DTE TO WKSCLS-FSCL-WK-END-DTE.  04910000
+           MOVE ML132-ONORD-DEPT-NBR        TO WKSCLS-DEPT-NBR.         04920000
+           MOVE ML132-ONORD-SUB-CL-NBR      TO WKSCLS-SUB-CL-NBR.       04930000
+           MOVE ML132-ONORD-STR-NBR         TO WKSCLS-STR-NBR.          04940000
+                                                                        04950000
+           PERFORM 6500-SELECT-WKSCLS-ROW.                              04960000
+      *                                                                 04970000
+           IF PS-PROGRAM-DEADLOCKED                                     04980000
+               CONTINUE                                                 04990000
+           ELSE                                                         05000000
+               EVALUATE TRUE                                            05010000
+                   WHEN PS-UPDATE-WKSCLS-ROW                            05020000
+                       PERFORM 6600-UPDATE-WKSCLS-ROW                   05030000
+                   WHEN PS-INSERT-WKSCLS-ROW                            05040000
+                       PERFORM 6700-INSERT-WKSCLS-ROW                   05050000
+               END-EVALUATE                                             05060000
+           END-IF.                                                      05070000
+      *                                                                 05080000
+           IF PS-PROGRAM-DEADLOCKED                                     05090000
+               CONTINUE                                                 05100000
+           ELSE                                                         05110000
+               PERFORM 7400-COMMIT-PROCESSING                           05120000
+               PERFORM 4100-READ-CONDENSED-FILE                         05130000
+           END-IF.                                                      05140000
+      *                                                                 05150000
+      ******************************************************************05160000
+      * READ THE DATE FILE                                              05170000
+      ******************************************************************05180000
+       4000-READ-LEDGER-EXTRACT-DATE.                                   05190000
+           READ LEDGER-EXTRACT-DATE-FILE                                05200000
+              INTO ML135-LEDGER-EXTRACT-DATE-REC                        05210000
+               AT END SET PS-END-OF-LEDGER-DATE-FILE TO TRUE.           05220000
+      *                                                                 05230000
+      ******************************************************************05240000
+      * READS THE CONDENSED FILE INTO THE TWKSCLS LAYOUT                05250000
+      ******************************************************************05260000
+       4100-READ-CONDENSED-FILE.                                        05270000
+           READ CONDENSED-FILE INTO ML132-ONORD-EXTRACT-WK-REC          05280000
+               AT END MOVE 'Y' TO PS-INPUT-FILE-EOF-SW.                 05290000
+      *                                                                 05300000
+           IF PS-NO-MORE-INPUT-RECORDS                                  05310000
+               MOVE ML132-ONORD-FSCL-WK-NBR     TO CR-FISCAL-NBR        05320000
+               MOVE ML132-ONORD-FSCL-WK-END-DTE TO CR-FISCAL-WK-END-DTE 05330000
+               MOVE ML132-ONORD-DEPT-NBR        TO CR-DEPT-NBR          05340000
+               MOVE ML132-ONORD-SUB-CL-NBR      TO CR-SUB-CL-NBR        05350000
+               MOVE ML132-ONORD-STR-NBR         TO CR-STR-NBR           05360000
+               MOVE PA-INPUT-COUNT              TO CR-INPUT-READ-COUNT  05370000
+      *        MOVE COMMIT INFO TO WORKING STORAGE ROW                  05380000
+               MOVE CR-CHECKPOINT-RESTART-AREA  TO                      05390000
+                                             TCKRSTINF-WORK-STRG-DESC   05400000
+               EXEC SQL                                                 05410000
+                 UPDATE TCKRSTINF                                       05420000
+                    SET WORK_STRG_DESC = :TCKRSTINF-WORK-STRG-DESC      05430000
+                  WHERE JOB_NAME   = :PC-JOB-NAME                       05440000
+                    AND PLAN_NAME  = :PC-PROGRAM-NAME                   05450000
+               END-EXEC                                                 05460000
+               IF SQLCODE = 0                                           05470000
+                   CONTINUE                                             05480000
+               ELSE                                                     05490000
+                   MOVE PE-MSG-05            TO PV-OPERATION-ATTEMPTED  05500000
+                   MOVE '* 4100-READ-CONDENSED-FILE *' TO               05510000
+                        PV-PARAGRAPH-NAME                               05520000
+                   PERFORM 9998-SQL-ABEND                               05530000
+               END-IF                                                   05540000
+           ELSE                                                         05550000
+               ADD 1                         TO PA-INPUT-COUNT          05560000
+                                                PC-UPDATE-CNT           05570000
+               IF PC-UPDATE-CNT > 100000                                05580000
+                    ADD 1                    TO PC-DISPLAY-CNT          05590000
+                    DISPLAY 'UPDATE COUNT: ' PC-DISPLAY-CNT             05600000
+                    MOVE +0                  TO PC-UPDATE-CNT           05610000
+               END-IF                                                   05620000
+           END-IF.                                                      05630000
+      *                                                                 05640000
+      ******************************************************************05650000
+      * GET DATE ATTRIBUTES                                             05660000
+      ******************************************************************05670000
+       6000-GET-DATE-ATTRIBUTES.                                        05680000
+      *                                                                 05690000
+           EXEC SQL                                                     05700000
+               SELECT                                                   05710000
+                     A.FSCL_MN_BEG_DTE                                  05720000
+                    ,A.FSCL_WK_NBR                                      05730000
+                    ,B.FSCL_WK_NBR                                      05740000
+               INTO :PV-FSCL-MN-BEG-DTE                                 05750000
+                   ,:PV-MN-END-FSCL-WK-NBR                              05760000
+                   ,:PV-MN-BEG-FSCL-WK-NBR                              05770000
+               FROM TDTATTR A                                           05780000
+                   ,TDTATTR B                                           05790000
+               WHERE A.KY_DTE          =:ML135-EXTRACT-DTE              05800000
+                 AND A.FSCL_MN_BEG_DTE = B.KY_DTE                       05810000
+W26603         WITH UR                                                  05811007
+           END-EXEC.                                                    05820000
+      *                                                                 05830000
+           EVALUATE SQLCODE                                             05840000
+               WHEN 0                                                   05850000
+                   CONTINUE                                             05860000
+               WHEN OTHER                                               05870000
+                   DISPLAY 'DTATTR-KY-DTE: ' DTATTR-KY-DTE              05880000
+                   MOVE    '6000-GET-DATE-ATTRIBUTES'                   05890000
+                                              TO PV-PARAGRAPH-NAME      05900000
+                   MOVE PE-MSG-13             TO PV-OPERATION-ATTEMPTED 05910000
+                   PERFORM 9998-SQL-ABEND                               05920000
+           END-EVALUATE.                                                05930000
+      *                                                                 05940000
+      *                                                                 05950000
+      ******************************************************************05960000
+       6100-OPEN-DEPT-CSR.                                              05970000
+      *                                                                 05980000
+           EXEC SQL                                                     05990000
+                OPEN DEPT-CSR                                           06000000
+           END-EXEC.                                                    06010000
+      *                                                                 06020000
+           EVALUATE SQLCODE                                             06030000
+               WHEN 0                                                   06040000
+                   CONTINUE                                             06050000
+               WHEN OTHER                                               06060000
+                   MOVE '6100-OPEN-DEPT-CSR'                            06070000
+                                            TO PV-PARAGRAPH-NAME        06080000
+                   MOVE PE-MSG-14           TO PV-OPERATION-ATTEMPTED   06090000
+                   PERFORM 9998-SQL-ABEND                               06100000
+           END-EVALUATE.                                                06110000
+      *                                                                 06120000
+      *                                                                 06130000
+       6110-FETCH-DEPT-CSR.                                             06140000
+      *                                                                 06150000
+            EXEC SQL                                                    06160000
+                FETCH                                                   06170000
+                    DEPT-CSR                                            06180000
+                INTO                                                    06190000
+                   :WKSCLS-DEPT-NBR                                     06200000
+            END-EXEC.                                                   06210000
+      *                                                                 06220000
+      *                                                                 06230000
+            EVALUATE SQLCODE                                            06240000
+               WHEN 0                                                   06250000
+                   CONTINUE                                             06260000
+               WHEN +100                                                06270000
+                   SET PS-END-OF-DEPT-CSR TO TRUE                       06280000
+               WHEN OTHER                                               06290000
+                   MOVE '6110-FETCH-DEPT-CSR'                           06300000
+                                               TO PV-PARAGRAPH-NAME     06310000
+                   MOVE PE-MSG-15              TO PV-OPERATION-ATTEMPTED06320000
+                   PERFORM 9998-SQL-ABEND                               06330000
+            END-EVALUATE.                                               06340000
+      *                                                                 06350000
+      *                                                                 06360000
+       6120-CLOSE-DEPT-CSR.                                             06370000
+      *                                                                 06380000
+           EXEC SQL                                                     06390000
+               CLOSE DEPT-CSR                                           06400000
+           END-EXEC.                                                    06410000
+      *                                                                 06420000
+           EVALUATE SQLCODE                                             06430000
+               WHEN 0                                                   06440000
+                   CONTINUE                                             06450000
+               WHEN OTHER                                               06460000
+                   MOVE '6120-CLOSE-DEPT-CSR'                           06470000
+                                              TO PV-PARAGRAPH-NAME      06480000
+                   MOVE PE-MSG-16             TO PV-OPERATION-ATTEMPTED 06490000
+                   PERFORM 9998-SQL-ABEND                               06500000
+           END-EVALUATE.                                                06510000
+      *                                                                 06520000
+      *                                                                 06530000
+      ******************************************************************06540000
+       6200-OPEN-FSCL-WK-END-CSR.                                       06550000
+      *                                                                 06560000
+           EXEC SQL                                                     06570000
+                OPEN FSCL-WK-END-CSR                                    06580000
+           END-EXEC.                                                    06590000
+      *                                                                 06600000
+           EVALUATE SQLCODE                                             06610000
+               WHEN 0                                                   06620000
+                   CONTINUE                                             06630000
+               WHEN OTHER                                               06640000
+                   MOVE '6200-OPEN-FSCL-WK-END-CSR'                     06650000
+                                            TO PV-PARAGRAPH-NAME        06660000
+                   MOVE PE-MSG-14           TO PV-OPERATION-ATTEMPTED   06670000
+                   PERFORM 9998-SQL-ABEND                               06680000
+           END-EVALUATE.                                                06690000
+      *                                                                 06700000
+      *                                                                 06710000
+       6210-FETCH-FSCL-WK-END-CSR.                                      06720000
+      *                                                                 06730000
+            EXEC SQL                                                    06740000
+                FETCH                                                   06750000
+                    FSCL-WK-END-CSR                                     06760000
+                INTO                                                    06770000
+                   :DTATTR-FSCL-WK-END-DTE                              06780000
+                  ,:DTATTR-FSCL-WK-NBR                                  06790000
+            END-EXEC.                                                   06800000
+      *                                                                 06810000
+      *                                                                 06820000
+            EVALUATE SQLCODE                                            06830000
+               WHEN 0                                                   06840000
+                   CONTINUE                                             06850000
+               WHEN +100                                                06860000
+                   SET PS-END-OF-FSCL-WK-END-CSR TO TRUE                06870000
+               WHEN OTHER                                               06880000
+                   MOVE '6200-OPEN-FSCL-WK-END-CSR'                     06890000
+                                               TO PV-PARAGRAPH-NAME     06900000
+                   MOVE PE-MSG-15              TO PV-OPERATION-ATTEMPTED06910000
+                   PERFORM 9998-SQL-ABEND                               06920000
+            END-EVALUATE.                                               06930000
+      *                                                                 06940000
+      *                                                                 06950000
+       6220-CLOSE-FSCL-WK-END-CSR.                                      06960000
+      *                                                                 06970000
+           EXEC SQL                                                     06980000
+               CLOSE FSCL-WK-END-CSR                                    06990000
+           END-EXEC.                                                    07000000
+      *                                                                 07010000
+           EVALUATE SQLCODE                                             07020000
+               WHEN 0                                                   07030000
+                   CONTINUE                                             07040000
+               WHEN OTHER                                               07050000
+                   MOVE '6220-CLOSE-FSCL-WK-END-CSR'                    07060000
+                                              TO PV-PARAGRAPH-NAME      07070000
+                   MOVE PE-MSG-16             TO PV-OPERATION-ATTEMPTED 07080000
+                   PERFORM 9998-SQL-ABEND                               07090000
+           END-EVALUATE.                                                07100000
+      *                                                                 07110000
+      *                                                                 07120000
+      ******************************************************************07130000
+      * SET ALL ONORDER AMOUNTS TO ZERO FOR ALL WEEKS IN THE FISCAL     07140000
+      * MONTH                                                           07150000
+      ******************************************************************07160000
+       6300-INITIALIZE-ONORD.                                           07170000
+      *                                                                 07180000
+      *                                                                 07190000
+           EXEC SQL                                                     07200000
+               UPDATE TWKSCLS                                           07210000
+W26603           SET ONORD_RTL_AMT       = 0                            07220009
+W26603              ,ONORD_COST_AMT      = 0                            07230009
+               WHERE FSCL_WK_NBR         = :WKSCLS-FSCL-WK-NBR          07240000
+                AND  FSCL_WK_END_DTE     = :WKSCLS-FSCL-WK-END-DTE      07250000
+                AND  DEPT_NBR            = :WKSCLS-DEPT-NBR             07260000
+           END-EXEC.                                                    07270000
+      *                                                                 07280000
+           EVALUATE SQLCODE                                             07290000
+               WHEN 0                                                   07300000
+                   CONTINUE                                             07310000
+               WHEN +100                                                07320000
+                   CONTINUE                                             07330000
+               WHEN OTHER                                               07340000
+                   MOVE PE-MSG-12           TO PV-OPERATION-ATTEMPTED   07350000
+                   MOVE  '6300-INITIALIZE-ONORD'                        07360000
+                                            TO PV-PARAGRAPH-NAME        07370000
+                   PERFORM 9998-SQL-ABEND                               07380000
+           END-EVALUATE.                                                07390000
+      *                                                                 07400000
+      *                                                                 07410000
+      ******************************************************************07420000
+      * EXISTANCE CK FROM THE WEEKLY SCL/STORE TABLE THAT MATCHES INPUT 07430006
+      *   KEY SQLCODE FROM 'SELECT' IS EVALUATED IN 2000-PROCESS-INPUT  07440000
+      ******************************************************************07450000
+       6500-SELECT-WKSCLS-ROW.                                          07460000
+      *                                                                 07470000
+           EXEC SQL                                                     07480000
+W26603         SELECT 1                                                 07490006
+W26603           INTO :PV-DB2-TEST                                      07510006
+               FROM TWKSCLS                                             07530000
+              WHERE   FSCL_WK_NBR      = :WKSCLS-FSCL-WK-NBR            07540000
+                AND   FSCL_WK_END_DTE  = :WKSCLS-FSCL-WK-END-DTE        07550000
+                AND   DEPT_NBR         = :WKSCLS-DEPT-NBR               07560000
+                AND   SUB_CL_NBR       = :WKSCLS-SUB-CL-NBR             07570000
+                AND   STR_NBR          = :WKSCLS-STR-NBR                07580000
+               FETCH FIRST ROW ONLY                                     07581006
+           END-EXEC.                                                    07590000
+      *                                                                 07600000
+           EVALUATE SQLCODE                                             07610000
+               WHEN 0                                                   07620000
+                   MOVE ZERO                   TO PV-DEADLOCK-COUNT     07630000
+                   SET PS-UPDATE-WKSCLS-ROW    TO TRUE                  07640000
+                   ADD +1                      TO PA-SEL-TWKSCLS-COUNT  07650000
+               WHEN +100                                                07660000
+                   MOVE ZERO                   TO PV-DEADLOCK-COUNT     07670000
+                   SET PS-INSERT-WKSCLS-ROW    TO TRUE                  07680000
+               WHEN -911                                                07690000
+                   ADD +1             TO PV-DEADLOCK-COUNT              07700000
+                   DISPLAY 'DEADLOCK -911 IN 6500-SELECT-WKSCLS-ROW'    07710000
+                   IF PV-DEADLOCK-COUNT > PC-MAX-DEADLOCKS              07720000
+                       MOVE '6500-SELECT-WKSCLS-ROW'                    07730000
+                                                 TO PV-PARAGRAPH-NAME   07740000
+                       PERFORM 9000-DEADLOCK-ERROR                      07750000
+                   ELSE                                                 07760000
+                       PERFORM 7999-RESTART-PROCESS                     07770000
+                   END-IF                                               07780000
+               WHEN OTHER                                               07790000
+                   MOVE '6500-SELECT-WKSCLS-ROW' TO PV-PARAGRAPH-NAME   07800000
+                   MOVE PE-MSG-01 TO PV-OPERATION-ATTEMPTED             07810000
+                   PERFORM 9998-SQL-ABEND                               07820000
+           END-EVALUATE.                                                07830000
+      *                                                                 07840000
+      *                                                                 07850000
+      ***************************************************************** 07860000
+      * THE INPUT RECORD FOUND A MATCHING ROW BASED ON FSCL INFO, DEPT, 07870000
+      * SUB CLASS, AND STORE NUMBER.  CURRENT TABLE VALUES ARE UPDATED  07880000
+      * TO INCLUDE VALUES FROM THE INPUT RECORD.                        07890000
+      ***************************************************************** 07900000
+       6600-UPDATE-WKSCLS-ROW.                                          07910000
+      *                                                                 07920000
+W26603     MOVE ML132-EXT-RTL-AMT        TO WKSCLS-ONORD-RTL-AMT.       07921006
+W26603     MOVE ML132-EXT-CST-AMT        TO WKSCLS-ONORD-COST-AMT.      07922006
+      *                                                                 07923006
+           EXEC SQL                                                     07930000
+              UPDATE TWKSCLS                                            07940000
+W26603             SET ONORD_RTL_AMT     = :WKSCLS-ONORD-RTL-AMT        07950006
+W26603               , ONORD_COST_AMT    = :WKSCLS-ONORD-COST-AMT       07960008
+              WHERE   FSCL_WK_NBR        = :WKSCLS-FSCL-WK-NBR          07970000
+                AND   FSCL_WK_END_DTE    = :WKSCLS-FSCL-WK-END-DTE      07980000
+                AND   DEPT_NBR           = :WKSCLS-DEPT-NBR             07990000
+                AND   SUB_CL_NBR         = :WKSCLS-SUB-CL-NBR           08000000
+                AND   STR_NBR            = :WKSCLS-STR-NBR              08010000
+           END-EXEC.                                                    08020000
+      *                                                                 08030000
+           EVALUATE SQLCODE                                             08040000
+               WHEN 0                                                   08050000
+                   MOVE ZERO          TO PV-DEADLOCK-COUNT              08060000
+                   ADD 1              TO PA-UPD-TWKSCLS-COUNT           08070000
+               WHEN -911                                                08080000
+                   ADD +1             TO PV-DEADLOCK-COUNT              08090000
+                   DISPLAY 'DEADLOCK -911 IN 6600-UPDATE-WKSCLS-ROW'    08100000
+                   IF PV-DEADLOCK-COUNT > PC-MAX-DEADLOCKS              08110000
+                       MOVE '6600-UPDATE-WKSCLS-ROW'                    08120000
+                                      TO PV-PARAGRAPH-NAME              08130000
+                       PERFORM 9000-DEADLOCK-ERROR                      08140000
+                   ELSE                                                 08150000
+                       PERFORM 7999-RESTART-PROCESS                     08160000
+                   END-IF                                               08170000
+               WHEN OTHER                                               08180000
+                   MOVE '6600-UPDATE-WKSCLS-ROW'                        08190000
+                                      TO PV-PARAGRAPH-NAME              08200000
+                   MOVE PE-MSG-02     TO PV-OPERATION-ATTEMPTED         08210000
+                   PERFORM 9998-SQL-ABEND                               08220000
+           END-EVALUATE.                                                08230000
+      *                                                                 08240000
+      *                                                                 08250000
+      ***************************************************************** 08260000
+      * THERE WAS NO MATCHING ROW ON THE WEEKLY SCL/STORE TABLE.      * 08270000
+      * - ENTRY FOR THIS ENTITY IS INSERTED AS A 'NEW' ROW            * 08280000
+      ***************************************************************** 08290000
+       6700-INSERT-WKSCLS-ROW.                                          08300000
+      *                                                                 08310000
+W26603     MOVE ML132-EXT-RTL-AMT        TO WKSCLS-ONORD-RTL-AMT.       08311006
+W26603     MOVE ML132-EXT-CST-AMT        TO WKSCLS-ONORD-COST-AMT.      08312006
+      *                                                                 08320000
+           EXEC SQL                                                     08330000
+               INSERT INTO TWKSCLS                                      08340000
+                   (   FSCL_WK_NBR                                      08350000
+                     , FSCL_WK_END_DTE                                  08360000
+                     , DEPT_NBR                                         08370000
+                     , SUB_CL_NBR                                       08380000
+                     , STR_NBR                                          08390000
+                     , SLS_RTL_AMT                                      08400000
+                     , MKDN_RTL_AMT                                     08410000
+                     , MKUP_RTL_AMT                                     08420000
+                     , XFER_IN_RTL_AMT                                  08430000
+                     , XFER_OUT_RTL_AMT                                 08440000
+                     , RCPT_RTL_AMT                                     08450000
+                     , RCPT_NET_COST_AMT                                08460000
+                     , PADJ_RTL_AMT                                     08470000
+                     , PADJ_NET_COST_AMT                                08480000
+                     , INV_ADJ_RTL_AMT                                  08490000
+                     , ONORD_RTL_AMT                                    08500000
+                     , ONORD_COST_AMT )                                 08510000
+               VALUES                                                   08520000
+                   (   :WKSCLS-FSCL-WK-NBR                              08530000
+                     , :WKSCLS-FSCL-WK-END-DTE                          08540000
+                     , :WKSCLS-DEPT-NBR                                 08550000
+                     , :WKSCLS-SUB-CL-NBR                               08560000
+                     , :WKSCLS-STR-NBR                                  08570000
+W26603               , 0                                                08580009
+W26603               , 0                                                08590009
+W26603               , 0                                                08600009
+W26603               , 0                                                08610009
+W26603               , 0                                                08620009
+W26603               , 0                                                08630009
+W26603               , 0                                                08640009
+W26603               , 0                                                08650009
+W26603               , 0                                                08660009
+W26603               , 0                                                08670009
+W26603               , :WKSCLS-ONORD-RTL-AMT                            08680006
+W26603               , :WKSCLS-ONORD-COST-AMT )                         08681006
+           END-EXEC.                                                    08700000
+      *                                                                 08710000
+           EVALUATE SQLCODE                                             08720000
+               WHEN 0                                                   08730000
+                   MOVE ZERO          TO PV-DEADLOCK-COUNT              08740000
+                   ADD 1              TO PA-INS-TWKSCLS-COUNT           08750000
+               WHEN -911                                                08760000
+                   ADD +1             TO PV-DEADLOCK-COUNT              08770000
+                   DISPLAY 'DEADLOCK -911 IN 6700-INSERT-WKSCLS-ROW'    08780000
+                   IF PV-DEADLOCK-COUNT > PC-MAX-DEADLOCKS              08790000
+                       MOVE '6700-INSERT-WKSCLS-ROW' TO                 08800000
+                                                    PV-PARAGRAPH-NAME   08810000
+                       PERFORM 9000-DEADLOCK-ERROR                      08820000
+                   ELSE                                                 08830000
+                       PERFORM 7999-RESTART-PROCESS                     08840000
+                   END-IF                                               08850000
+               WHEN OTHER                                               08860000
+                   MOVE '6700-INSERT-WKSCLS-ROW' TO PV-PARAGRAPH-NAME   08870000
+                   MOVE PE-MSG-03              TO PV-OPERATION-ATTEMPTED08880000
+                   PERFORM 9998-SQL-ABEND                               08890000
+           END-EVALUATE.                                                08900000
+      *                                                                 08910000
+      *                                                                 08920000
+      ******************************************************************08930000
+      * 7000-GET-COMMIT-TIMESTAMP.                                     *08940000
+      * PROCESSES: GET THE COMMIT TIMESTAMP FROM THE CHECKPOINT        *08950000
+      *            CONTROL TABLE                                       *08960000
+      ******************************************************************08970000
+       7000-GET-COMMIT-TIMESTAMP.                                       08980000
+                                                                        08990000
+           EXEC SQL                                                     09000000
+      * CHECKPOINT TAKEN BASED ON CHEKPOINT RESTART CICSP1 PANEL        09010000
+             SELECT (CURRENT TIMESTAMP + CKPT_FRQNCY_QTY SECONDS)       09020000
+               INTO :PV-COMMIT-TIMESTAMP                                09030000
+               FROM TCKRSTCNTL                                          09040000
+              WHERE JOB_NAME  = :PC-JOB-NAME                            09050000
+                AND PLAN_NAME = :PC-PROGRAM-NAME                        09060000
+           END-EXEC.                                                    09070000
+                                                                        09080000
+           IF SQLCODE = 0                                               09090000
+               CONTINUE                                                 09100000
+           ELSE                                                         09110000
+               MOVE '7000-GET-COMMIT-TIMESTAMP' TO PV-PARAGRAPH-NAME    09120000
+               MOVE PE-MSG-11             TO PV-OPERATION-ATTEMPTED     09130000
+               PERFORM 9998-SQL-ABEND                                   09140000
+           END-IF.                                                      09150000
+      *                                                                 09160000
+      *                                                                 09170000
+      ******************************************************************09180000
+      * 7100-INIT-CHECKPOINT-SELECT                                    *09190000
+      * PROCESSES: SELECTS FROM THE CHECKPOINT RESTART CONTROL TABLE   *09200000
+      *            IF WE ARE IN A RESTART CONDITION.                   *09210000
+      ******************************************************************09220000
+       7100-INIT-CHECKPOINT-SELECT.                                     09230000
+                                                                        09240000
+           EXEC SQL                                                     09250000
+             SELECT  CKPT_STAT_CODE                                     09260000
+                    ,CKPT_FRQNCY_QTY                                    09270000
+               INTO  :TCKRSTCNTL-CKPT-STAT-CODE                         09280000
+                    ,:TCKRSTCNTL-CKPT-FRQNCY-QTY                        09290000
+               FROM  TCKRSTCNTL                                         09300000
+              WHERE  JOB_NAME  = :PC-JOB-NAME                           09310000
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                       09320000
+           END-EXEC.                                                    09330000
+                                                                        09340000
+           IF SQLCODE = 0                                               09350000
+               CONTINUE                                                 09360000
+           ELSE                                                         09370000
+               MOVE '7100-INIT-CHECKPOINT-SELECT' TO PV-PARAGRAPH-NAME  09380000
+               MOVE PE-MSG-04             TO PV-OPERATION-ATTEMPTED     09390000
+               PERFORM 9998-SQL-ABEND                                   09400000
+           END-IF.                                                      09410000
+      *                                                                 09420000
+      *                                                                 09430000
+      ******************************************************************09440000
+      * 7200-SELECT-RESTART-INFO                                       *09450000
+      * PROCESSES: SELECTS FROM THE CHECKPOINT RESTART INFORMATION     *09460000
+      *            TABLE TO OBTAIN THE PROGRAMS SAVED VARIABLES.       *09470000
+      ******************************************************************09480000
+       7200-SELECT-RESTART-INFO.                                        09490000
+                                                                        09500000
+           EXEC SQL                                                     09510000
+             SELECT  WORK_STRG_DESC                                     09520000
+               INTO  :TCKRSTINF-WORK-STRG-DESC                          09530000
+               FROM  TCKRSTINF                                          09540000
+              WHERE  JOB_NAME  = :PC-JOB-NAME                           09550000
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                       09560000
+           END-EXEC.                                                    09570000
+                                                                        09580000
+           IF SQLCODE = 0                                               09590000
+               CONTINUE                                                 09600000
+           ELSE                                                         09610000
+               MOVE '*7200-SELECT-RESTART-INFO*' TO PV-PARAGRAPH-NAME   09620000
+               PERFORM 9998-SQL-ABEND                                   09630000
+           END-IF.                                                      09640000
+      *                                                                 09650000
+      *                                                                 09660000
+      ******************************************************************09670000
+      * 7300-SET-CURRENT-TIMESTAMP.                                    *09680000
+      * PROCESSES: GET THE CURRENT TIMESTAMP FROM DB2.                 *09690000
+      ******************************************************************09700000
+       7300-SET-CURRENT-TIMESTAMP.                                      09710000
+                                                                        09720000
+           EXEC SQL                                                     09730000
+                SET :PV-CURRENT-TIMESTAMP = CURRENT TIMESTAMP           09740000
+           END-EXEC.                                                    09750000
+      *                                                                 09760000
+           IF SQLCODE = 0                                               09770000
+               CONTINUE                                                 09780000
+           ELSE                                                         09790000
+               MOVE '*7300-SET-CURRENT-TIMESTAMP*' TO PV-PARAGRAPH-NAME 09800000
+               PERFORM 9998-SQL-ABEND                                   09810000
+           END-IF.                                                      09820000
+      *                                                                 09830000
+      *                                                                 09840000
+      ******************************************************************09850000
+      * 7400-COMMIT-PROCESSING.                                        *09860000
+      * PROCESSES: CHECK IF WE NEED TO TAKE A COMMIT.                  *09870000
+      *          PREPARE CHECKPOINT RECORD FOR UPDATE OF WORK_STRG_DESC*09880000
+      ******************************************************************09890000
+       7400-COMMIT-PROCESSING.                                          09900000
+           MOVE '*7400-COMMIT-PROCESSING*'    TO PV-PARAGRAPH-NAME.     09910000
+                                                                        09920000
+           PERFORM 7300-SET-CURRENT-TIMESTAMP.                          09930000
+      *                                                                 09940000
+           IF PV-CURRENT-TIMESTAMP > PV-COMMIT-TIMESTAMP                09950000
+      *        PREPARE COMMIT RECORD FOR UPDATE                         09960000
+               ADD 1                          TO PA-COMMIT-COUNT        09970000
+               MOVE ML132-ONORD-FSCL-WK-NBR   TO CR-FISCAL-NBR          09980000
+               MOVE ML132-ONORD-FSCL-WK-END-DTE TO CR-FISCAL-WK-END-DTE 09990000
+               MOVE ML132-ONORD-DEPT-NBR      TO CR-DEPT-NBR            10000000
+               MOVE ML132-ONORD-SUB-CL-NBR    TO CR-SUB-CL-NBR          10010000
+               MOVE ML132-ONORD-STR-NBR       TO CR-STR-NBR             10020000
+               MOVE PA-COMMIT-COUNT           TO CR-TWKSCLS-COMMIT-COUNT10030000
+               MOVE PA-INPUT-COUNT            TO CR-INPUT-READ-COUNT    10040000
+               MOVE PA-UPD-TWKSCLS-COUNT      TO CR-UPD-TWKSCLS-COUNT   10050000
+               MOVE PA-INS-TWKSCLS-COUNT      TO CR-INS-TWKSCLS-COUNT   10060000
+               MOVE PA-SEL-TWKSCLS-COUNT      TO CR-SEL-TWKSCLS-COUNT   10070000
+               MOVE PA-SEL-TDTATTR-COUNT      TO CR-SEL-TDTATTR-COUNT   10080000
+      *        MOVE COMMIT INFO TO WORKING STORAGE ROW                  10090000
+               MOVE CR-CHECKPOINT-RESTART-AREA TO                       10100000
+                                             TCKRSTINF-WORK-STRG-DESC   10110000
+               IF PS-FIRST-COMMIT                                       10120000
+                   MOVE '9' TO TCKRSTCNTL-CKPT-STAT-CODE                10130000
+                   PERFORM 7600-UPDATE-CHECKPOINT-STATUS                10140000
+                   MOVE 'N' TO PS-FIRST-COMMIT-SW                       10150000
+               END-IF                                                   10160000
+               PERFORM 7500-COMMIT-CHANGES                              10170000
+               PERFORM 7000-GET-COMMIT-TIMESTAMP                        10180000
+           END-IF.                                                      10190000
+      *                                                                 10200000
+      *                                                                 10210000
+      ******************************************************************10220000
+      * 7500-COMMIT-CHANGES.                                            10230000
+      * PROCESSES: PERFORM UPDATE OF CHECKPOINT INFORMATION TABLE.      10240000
+      *            TAKE A COMMIT.                                       10250000
+      *  ==> PERFORMED FROM: 7400-COMMIT-PROCESSING.                    10260000
+      ******************************************************************10270000
+       7500-COMMIT-CHANGES.                                             10280000
+                                                                        10290000
+           EXEC SQL                                                     10300000
+             UPDATE TCKRSTINF                                           10310000
+                SET WORK_STRG_DESC = :TCKRSTINF-WORK-STRG-DESC          10320000
+              WHERE JOB_NAME       = :PC-JOB-NAME                       10330000
+                AND PLAN_NAME      = :PC-PROGRAM-NAME                   10340000
+           END-EXEC.                                                    10350000
+                                                                        10360000
+           IF SQLCODE = 0                                               10370000
+               CONTINUE                                                 10380000
+           ELSE                                                         10390000
+               MOVE PE-MSG-05                  TO PV-OPERATION-ATTEMPTED10400000
+               MOVE  '* 7500-COMMIT-CHANGES *' TO PV-PARAGRAPH-NAME     10410000
+               PERFORM 9998-SQL-ABEND                                   10420000
+           END-IF.                                                      10430000
+                                                                        10440000
+           EXEC SQL                                                     10450000
+               COMMIT                                                   10460000
+           END-EXEC.                                                    10470000
+                                                                        10480000
+           IF SQLCODE = 0                                               10490000
+               CONTINUE                                                 10500000
+           ELSE                                                         10510000
+               MOVE PE-MSG-06                  TO PV-OPERATION-ATTEMPTED10520000
+               MOVE  '* 7500-COMMIT-CHANGES *' TO PV-PARAGRAPH-NAME     10530000
+               PERFORM 9998-SQL-ABEND                                   10540000
+           END-IF.                                                      10550000
+      *                                                                 10560000
+      *                                                                 10570000
+      ******************************************************************10580000
+      * 7510-COMMIT.                                                    10590000
+      * THERE IS NO CHECKPOINT DONE WITH THIS COMMIT.  THIS COMMIT IS   10600000
+      * EXECUTED WHEN INITIALIZING THE ONORDER AMOUNT AND COST TO ZERO. 10610000
+      *  ==> PERFORMED FROM: 1300-INIT-BY-WEEK.                         10620000
+      ******************************************************************10630000
+       7510-COMMIT.                                                     10640000
+                                                                        10650000
+                                                                        10660000
+           EXEC SQL                                                     10670000
+               COMMIT                                                   10680000
+           END-EXEC.                                                    10690000
+                                                                        10700000
+           IF SQLCODE = 0                                               10710000
+               CONTINUE                                                 10720012
+           ELSE                                                         10730000
+               MOVE PE-MSG-06                  TO PV-OPERATION-ATTEMPTED10740000
+               MOVE  '* 7510-COMMIT         *' TO PV-PARAGRAPH-NAME     10750000
+               PERFORM 9998-SQL-ABEND                                   10760000
+           END-IF.                                                      10770000
+      *                                                                 10780000
+      *                                                                 10790000
+      ******************************************************************10800000
+      * 7600-UPDATE-CHECKPOINT-STATUS                                   10810000
+      * PROCESSES: UPDATES THE STATUS ON THE CHECKPOINT CONTROL TABLE   10820000
+      *                                                                 10830000
+      ******************************************************************10840000
+       7600-UPDATE-CHECKPOINT-STATUS.                                   10850000
+                                                                        10860000
+           EXEC SQL                                                     10870000
+             UPDATE  TCKRSTCNTL                                         10880000
+                SET  CKPT_STAT_CODE = :TCKRSTCNTL-CKPT-STAT-CODE        10890000
+              WHERE  JOB_NAME  = :PC-JOB-NAME                           10900000
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                       10910000
+           END-EXEC.                                                    10920000
+                                                                        10930000
+           IF SQLCODE = 0                                               10940000
+               CONTINUE                                                 10950000
+           ELSE                                                         10960000
+               MOVE '7600-UPDATE-CHECKPOINT-STATUS' TO PV-PARAGRAPH-NAME10970000
+               MOVE PE-MSG-10                  TO PV-OPERATION-ATTEMPTED10980000
+               PERFORM 9998-SQL-ABEND                                   10990000
+           END-IF.                                                      11000000
+                                                                        11010000
+           EJECT                                                        11020000
+      *                                                                 11030000
+      *                                                                 11040000
+      ******************************************************************11050000
+      * PROGRAM RESTART DUE TO A DEADLOCK AGAINST TWKSCLS ROW FOR UPDATE11060000
+      *  FIND RESTART RECORD AND CKPT RESTART AT POINT OF LAST COMMIT.  11070000
+      ******************************************************************11080000
+       7999-RESTART-PROCESS.                                            11090000
+      *                                                                 11100000
+           SET PS-PROGRAM-DEADLOCKED TO TRUE.                           11110000
+      *                                                                 11120000
+           CLOSE CONDENSED-FILE                                         11130000
+                 LEDGER-EXTRACT-DATE-FILE.                              11140000
+      *                                                                 11150000
+           PERFORM 7200-SELECT-RESTART-INFO.                            11160000
+      *                                                                 11170000
+           DISPLAY '**** RESTART **** '.                                11180000
+           MOVE PV-DEADLOCK-COUNT TO PD-DEADLOCK-COUNT.                 11190000
+           DISPLAY '** SQLCODE -911 **  ' PD-DEADLOCK-COUNT ' TIMES'.   11200000
+      *                                                                 11210000
+      *-- THIS CHECK WILL PREVENT THE FILE FROM BEING RESTARTED IN      11220000
+      *-- THE WRONG POSITION IF NO COMMITS HAVE OCCURRED AND THE        11230000
+      *-- RESTART INFORMATION IS NOT CLEARED OUT.                       11240000
+           IF PS-FIRST-COMMIT                                           11250000
+               INITIALIZE TCKRSTINF-WORK-STRG-DESC                      11260000
+               DISPLAY 'NO COMMITS HAVE OCCURRED YET; RESTART FROM'     11270000
+                      ' BEGINNING'                                      11280000
+           ELSE                                                         11290000
+               DISPLAY 'TCKRSTINF-LAST CKPT '                           11300000
+                        TCKRSTINF-WORK-STRG-DESC (1:104)                11310000
+      ***    INFO ON LAST CHECKPOINT TAKEN IS IN                        11320000
+      ***    CR-CHECKPOINT-RESTART-AREA.                                11330000
+               MOVE TCKRSTINF-WORK-STRG-DESC TO                         11340000
+                     CR-CHECKPOINT-RESTART-AREA                         11350000
+               DISPLAY 'CHECKPOINT RESTART INFORMATION:'                11360000
+               DISPLAY 'MONTH NBR       ' CR-FISCAL-NBR                 11370000
+               DISPLAY 'MONTH END DATE  ' CR-FISCAL-WK-END-DTE          11380000
+               DISPLAY 'DEPARTMENT NBR  ' CR-DEPT-NBR                   11390000
+               DISPLAY 'SUB CLASS NBR   ' CR-SUB-CL-NBR                 11400000
+               DISPLAY 'STORE NBR       ' CR-STR-NBR                    11410000
+               DISPLAY 'INPUT RECS READ ' CR-INPUT-READ-COUNT           11420000
+           END-IF.                                                      11430000
+      *                                                                 11440000
+           OPEN INPUT CONDENSED-FILE.                                   11450000
+           MOVE ZEROES                          TO PA-INPUT-COUNT.      11460000
+      *                                                                 11470000
+      *POSITION INPUT FILE TO 1ST RECORD AFTER LAST CHECKPOINT          11480000
+           PERFORM 4100-READ-CONDENSED-FILE                             11490000
+               UNTIL PA-INPUT-COUNT > CR-INPUT-READ-COUNT               11500000
+                 OR PS-NO-MORE-INPUT-RECORDS.                           11510000
+           IF PS-NO-MORE-INPUT-RECORDS                                  11520000
+               DISPLAY 'END OF INPUT FILE ON RESTART'                   11530000
+           ELSE                                                         11540000
+               DISPLAY 'INPUT RECORD RESTARTED ON RECORD '              11550000
+                        PA-INPUT-COUNT                                  11560000
+               DISPLAY 'FISCAL WEEK NBR       ' ML132-ONORD-FSCL-WK-NBR 11570000
+               DISPLAY 'FISCAL WEEK END DATE  '                         11580000
+                                            ML132-ONORD-FSCL-WK-END-DTE 11590000
+               DISPLAY 'DEPARTMENT NBR        ' ML132-ONORD-DEPT-NBR    11600000
+               DISPLAY 'SUB CLASS NBR         ' ML132-ONORD-SUB-CL-NBR  11610000
+               DISPLAY 'STORE NBR             ' ML132-ONORD-STR-NBR     11620000
+           END-IF.                                                      11630000
+      *                                                                 11640000
+      *RE-ESTABLISH COUNTS FOR PROCESSED INPUT (FROM CHECKPOINT RECORD) 11650000
+           MOVE CR-UPD-TWKSCLS-COUNT    TO PA-UPD-TWKSCLS-COUNT.        11660000
+           MOVE CR-INS-TWKSCLS-COUNT    TO PA-INS-TWKSCLS-COUNT.        11670000
+           MOVE CR-SEL-TWKSCLS-COUNT    TO PA-SEL-TWKSCLS-COUNT.        11680000
+           MOVE CR-SEL-TDTATTR-COUNT    TO PA-SEL-TDTATTR-COUNT.        11690000
+           MOVE CR-TWKSCLS-COMMIT-COUNT TO PA-COMMIT-COUNT.             11700000
+      *                                                                 11710000
+      *                                                                 11720000
+      ******************************************************************11730000
+      *  RESET STATUS CODE, DISPLAY FINAL COUNTS , CLOSE INPUT FILE    *11740000
+      ******************************************************************11750000
+       8000-EOJ-ROUTINE.                                                11760000
+      *                                                                 11770000
+           MOVE '0' TO TCKRSTCNTL-CKPT-STAT-CODE.                       11780000
+           PERFORM 7600-UPDATE-CHECKPOINT-STATUS.                       11790000
+      *                                                                 11800000
+           DISPLAY '                                             '.     11810000
+           DISPLAY 'INPUT RECORDS   ', PA-INPUT-COUNT.                  11820000
+           DISPLAY 'SELECT TWKSCLS  ', PA-SEL-TWKSCLS-COUNT.            11830000
+           DISPLAY 'UPDATE TWKSCLS  ', PA-UPD-TWKSCLS-COUNT.            11840000
+           DISPLAY 'INSERT TWKSCLS  ', PA-INS-TWKSCLS-COUNT.            11850000
+           DISPLAY 'SELECT TDTATTR  ', PA-SEL-TDTATTR-COUNT.            11860000
+           DISPLAY '                                             '.     11870000
+           DISPLAY 'COMMITS TAKEN   ', PA-COMMIT-COUNT.                 11880000
+      *                                                                 11890000
+           CLOSE CONDENSED-FILE                                         11900000
+                 LEDGER-EXTRACT-DATE-FILE.                              11910000
+      *                                                                 11920000
+      *                                                                 11930000
+      ******************************************************************11940000
+      *  PERFORMED BY 6500-SELECT AND 6600-UPDATE AND 6700-INSERT       11950000
+      *  THIS ROUTINE FORCES AN ABEND DUE TO A SQLCODE -911 (3 TIMES)   11960000
+      ******************************************************************11970000
+       9000-DEADLOCK-ERROR.                                             11980000
+      *                                                                 11990000
+               MOVE PE-MSG-07             TO PV-OPERATION-ATTEMPTED     12000000
+               PERFORM 9998-SQL-ABEND.                                  12010000
+      *                                                                 12020000
+      ******************************************************************12030000
+      *  STANDARD DB2 ERROR ABEND ROUTINE                               12040000
+      *  THIS ROUTINE FORCES AN ABEND DUE TO A DB2 PROBLEM.             12050000
+      ******************************************************************12060000
+       9998-SQL-ABEND.                                                  12070000
+      *                                                                 12080000
+           MOVE +4013                 TO ABEND-CODE.                    12090000
+           MOVE SQLCODE               TO PV-SQLCODE-DISPLAY.            12100000
+           DISPLAY '**  ABEND     **'.                                  12110000
+           DISPLAY '**  PROGRAM   ** => ' PC-PROGRAM-NAME.              12120000
+           DISPLAY '**  PARAGRAPH **  = ' PV-PARAGRAPH-NAME.            12130000
+           DISPLAY '**  OPERATION **  = ' PV-OPERATION-ATTEMPTED.       12140000
+           DISPLAY '**  SQLCODE   **  = ' PV-SQLCODE-DISPLAY.           12150000
+      *                                                                 12160000
+           EXEC SQL                                                     12170000
+                ROLLBACK                                                12180000
+           END-EXEC.                                                    12190000
+      *                                                                 12200000
+      *    THE FOLLOWING COPYBOOK UTILIZES THE DB2 ABEND MODULE         12210000
+      *    DSNTIAR TO CONVERT SQLCA INTO UNDERSTANDABLE VERBAGE.        12220000
+           COPY DPPD004.                                                12230000
+           PERFORM 9999-ABEND.                                          12240000
+      *                                                                 12250000
+      *                                                                 12260000
+       9999-ABEND.                                                      12270000
+      *                                                                 12280000
+           CALL 'ILBOABN0'  USING ABEND-CODE.                           12290000

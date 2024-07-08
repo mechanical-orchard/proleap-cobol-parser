@@ -1,0 +1,1546 @@
+       IDENTIFICATION DIVISION.                                         00010099
+                                                                        00020099
+       PROGRAM-ID.    MLKUP312                                          00030099
+       AUTHOR.        SCOTT JACKSON                                     00040099
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                          00050099
+       DATE-WRITTEN.  5-26-98.                                          00060099
+       DATE-COMPILED.                                                   00070099
+                                                                        00080099
+      ******************************************************************00090099
+      * MLKUP312 - M/L RECALC MONTH-TO-DATE MAJOR CLASS TABLE (TMNMCL) *00100099
+      ******************************************************************00110099
+      *  THIS PROGRAM WILL RECALCULATE THE FOLLOWING FIELDS ON TMNMCL  *00120099
+      *    SHNK_RTL_AMT     - RETAIL SHRINK                            *00130099
+      *    END_INV_RTL_AMT  - RETAIL ENDING INVENTORY                  *00140099
+      *    CUM_MKUP_PCT     - CUM-TO-DATE MARKUP PERCENT               *00150099
+      *    END_INV_COST_AMT - COST ENDING INVENTORY                    *00160099
+      *    SLS_COST_AMT     - COST AS A BASIS OF SALES                 *00170099
+      *    GRO_MRGN_AMT     - GROSS MARGIN DOLLAR AMOUNT               *00180099
+      ******************************************************************00190099
+      *   THIS PROGRAM WILL FIRST SELECT FROM TMLCNTL THE DATE RANGE   *00200099
+      * TO RECALC(BETWEEN THE OPEN FISCAL MONTH END DATE AND MAX DATE).*00210099
+      * THESE DATES ARE USED TO CALL THE DATE RTN (TDATTR) AND RETRIEVE*00220099
+      * FISCAL/CALENDAR INFO. DATE INFO STORED ON TABLE(PV-SUB1) IN WS.*00230099
+      *   THE PRIMARY DRIVING CURSOR WILL FETCH ALL ROWS WITH ACTIVITY.*00240099
+      * IF THIS DEPT/MCL COMBINATION HAS BEEN FETCHED, THEN ACTIVITY   *00250099
+      * HAS BEEN DETECTED FOR SOME PERIOD WITHIN THE DATE RANGE. LOGIC *00260099
+      * IS USED TO DETERMINE IF THIS ROW SHOULD BE RECALCED OR NOT.    *00270099
+      *                                                                *00280099
+      *     IF THERE IS ACTIVITY FOR THE CURRENT OPEN MONTH, THEN THE  *00290099
+      * ROW IS ALWAYS TO BE RECALCED. IF THERE IS NO CURRENT ACTIVITY, *00300099
+      * (IE. ALL DOLLAR VALUES FOR OPEN-FSCL-MN-DTE = 0), BUT THERE IS *00310099
+      * ENDING-INVENTORY DOLLARS PRESENT FROM THE PREVIOUS MONTH-END - *00320099
+      * THEN A NEW ROW IS INSERTED THAT CARRIES FORWARD ONLY INVENTORY *00330099
+      * BALANCES FROM THE PRIOR MONTH. IF THERE IS NO CURRENT DOLLARS  *00340099
+      * FOR THE CURRENT OPEN MONTH, AS WELL AS, NO PREVIOUS END-INV    *00350099
+      * DOLLARS FROM THE PRIOR MONTH, A NEW ROW WILL NOT BE INSERTED.  *00360099
+      *                                                                 00370099
+      * THIS PGM WILL USE CHECKPOINT RESTART LOGIC TO DETERMINE IF AND *00380099
+      * WHEN A CHECKPOINT IS TO BE TAKEN. A MINIMUM OF 10 SECONDS WILL *00390099
+      * EXPIRE BEFORE A CHECKPOINT / COMMIT WILL BE PERFORMED.         *00400099
+      * CONDITIONS ....                                                *00410099
+      * NORMAL START - INITAL CURSOR WILL SELECT ALL DEPT/MCL ROWS WITH*00420099
+      *   ACTIVITY - CHECK IF TIME FOR A COMMIT ONLY AFTER AN ENTIRE   *00430099
+      *   DEPT/MCL COMBINATION HAS BEEN RECALCED FOR ENTIRE DATE RANGE.*00440099
+      * RESTART - SELECT CHECKPOINT RESTART KEY FROM TCKRSTINF, USE    *00450099
+      *   DEPT/MCL KEY TO DETERMINE WHICH ROWS TO SELECT FOR RECALC -  *00460099
+      *   WHICH IS ALL ROWS >= TO LAST COMMITED DEPT/MCL.              *00470099
+      ******************************************************************00480099
+      *                        CHANGE LOG                              *00490099
+      *  CHANGE ID    CHANGE DATE            REASON FOR CHANGE         *00500099
+      *   **NET         12/17/98      NET EFFECT OF TRANSFER PROCESSING*00510099
+      *   *AML          12/18/98      SHRINK PERCENTAGE LOGIC WAS      *00520099
+      *                               REPLACED WITH GETTING THE SHRINK *00530099
+      *                               DOLLARS FROM THE MONTHLY SUBCLASS*00540099
+      *                               STORES TABLE.                    *00550099
+      *   *PJK          04/08/99      GET SHRINK DOLLARS FROM THE      *00560099
+      *                               WEEKLY SHRINKAGE TABLE INSTEAD   *00570099
+      *                               OF FROM THE MONTHLY SUBCLASS     *00580099
+      *                               STORES TABLE.                    *00590099
+      *    4095       08/13/1999   SCOTT JACKSON                       *00600099
+      *                            ML- CUM MARK-UP PCT MAX = S9(4)V9(7)*00610099
+      *                            BP- CALCS CUM MARKUP PCT >S9(4)V9(7)*00620099
+      *                            IF ML CUM MARK-UP PCT IS EXCEEDED,  *00630099
+      *                            A RETURN CODE OF '4095' IS CREATED  *00640099
+      *                            WHICH WILL FORCE A MESSAGE TO BP APPL00650099
+      *                            ADDED OUT01 TO CAPTURE THESE ROWS   *00660099
+      *                                                                *00670099
+      ******************************************************************00680099
+                                                                        00690099
+       ENVIRONMENT DIVISION.                                            00700099
+                                                                        00710099
+       CONFIGURATION SECTION.                                           00720099
+       SOURCE-COMPUTER.        IBM-3090.                                00730099
+       OBJECT-COMPUTER.        IBM-3090.                                00740099
+       INPUT-OUTPUT SECTION.                                            00750099
+       FILE-CONTROL.                                                    00760099
+      **                                                                00770099
+4095                                                                    00780099
+4095       SELECT OUTPUT-FILE                                           00790099
+4095           ASSIGN TO OUT01.                                         00800099
+4095                                                                    00810099
+      *                                                                 00820099
+       DATA DIVISION.                                                   00830099
+       FILE SECTION.                                                    00840099
+      **                                                                00850099
+4095                                                                    00860099
+4095   FD  OUTPUT-FILE                                                  00870099
+4095       LABEL RECORDS ARE STANDARD                                   00880099
+4095       RECORDING MODE IS F                                          00890099
+4095       BLOCK CONTAINS 0 RECORDS.                                    00900099
+4095   01  OUTPUT-RECORD               PIC X(80).                       00910099
+4095                                                                    00920099
+      *                                                                 00930099
+       WORKING-STORAGE SECTION.                                         00940099
+                                                                        00950099
+       01  ABEND-CODE                  PIC S9(04)  VALUE ZERO COMP SYNC.00960099
+                                                                        00970099
+       01  PA-PROGRAM-ACCUMULATORS.                                     00980099
+           05  PA-COMMIT-COUNT                 PIC  9(09) VALUE ZEROES. 00990099
+           05  PA-DEPT-MCL-COUNT               PIC  9(09) VALUE ZEROES. 01000099
+           05  PA-INSERT-COUNT                 PIC  9(09) VALUE ZEROES. 01010099
+           05  PA-UPDATE-COUNT                 PIC  9(09) VALUE ZEROES. 01020099
+4095       05  PA-CUM-MKUP-MAX-LIMIT           PIC  9(05) VALUE ZEROES. 01030099
+                                                                        01040099
+       01  PS-PROGRAM-SWITCHES.                                         01050099
+           05  PS-CONTROL-TABLE-EMPTY-SW       PIC X     VALUE 'N'.     01060099
+               88  PS-EMPTY-CONTROL-TABLE                VALUE 'Y'.     01070099
+           05  PS-FIRST-TIME-SW                PIC X     VALUE 'N'.     01080099
+               88  PS-FIRST-TIME-THRU                    VALUE 'Y'.     01090099
+           05  PS-FIRST-COMMIT-SW              PIC X     VALUE 'N'.     01100099
+               88  PS-FIRST-COMMIT                       VALUE 'Y'.     01110099
+           05  PS-LOAD-DATE-TABLE-SW           PIC X     VALUE 'N'.     01120099
+               88  PS-DATE-TABLE-LOADED                  VALUE 'Y'.     01130099
+           05  PS-MCL-PROCESSING-SW            PIC X     VALUE 'N'.     01140099
+               88  PS-MCL-PROCESSED                      VALUE 'Y'.     01150099
+           05  PS-MAJ-CL-CURSOR-SW             PIC X     VALUE 'N'.     01160099
+               88  PS-END-OF-MAJ-CL-CURSOR               VALUE 'Y'.     01170099
+           05  PS-TABLE-PROCESSING-SW          PIC X     VALUE 'N'.     01180099
+               88  PS-TABLE-PROCESSED                    VALUE 'Y'.     01190099
+           05  PS-CURR-MONTH-SW                PIC X     VALUE 'N'.     01200099
+               88  PS-CURR-MONTH-ROW-NOT-FOUND           VALUE 'Y'.     01210099
+           05  PS-PREV-MONTH-ROW-SW            PIC X     VALUE 'N'.     01220099
+               88  PS-PREV-MONTH-ROW-NOT-FOUND           VALUE 'Y'.     01230099
+           05  PS-CARRY-FORWARD-SW             PIC X     VALUE 'N'.     01240099
+               88  PS-PFM-INV-DOLLARS-FOUND              VALUE 'Y'.     01250099
+           05  PS-PREV-SEASON-INV-SW           PIC X     VALUE 'N'.     01260099
+               88  PS-NO-PREV-SEASONAL-INV               VALUE 'Y'.     01270099
+           05  PS-CURR-SEASON-CURSOR-SW        PIC X     VALUE 'N'.     01280099
+               88  PS-END-OF-CURR-SEASON-CSR             VALUE 'Y'.     01290099
+           05  PS-CURRENT-PURCH-COST-SW        PIC X     VALUE 'N'.     01300099
+               88  PS-NO-CURRENT-PURCH-COSTS             VALUE 'Y'.     01310099
+           05  PS-RESULTANT-TABLE-SW           PIC X     VALUE 'N'.     01320099
+               88  PS-EMPTY-RESULT-TABLE                 VALUE 'Y'.     01330099
+           05  PS-RESTART-ROW-SW               PIC X     VALUE 'N'.     01340099
+               88  PS-RESTART-KEY-ESTABLISHED            VALUE 'Y'.     01350099
+                                                                        01360099
+       01  PC-PROGRAM-CONSTANTS.                                        01370099
+           05  PC-JOB-NAME             PIC  X(06)    VALUE 'MLK230'.    01380099
+           05  PC-PROGRAM-NAME         PIC  X(08)    VALUE 'MLKUP312'.  01390099
+                                                                        01400099
+       01  PE-PROGRAM-ERROR-MESSAGES.                                   01410099
+           05  PE-MSG-01                       PIC X(30) VALUE          01420099
+                'INSPECT WHERE CLAUSE VARIABLE'.                        01430099
+           05  PE-MSG-02                       PIC X(30) VALUE          01440099
+                'DB2 SELECT ATTEMPTED         '.                        01450099
+           05  PE-MSG-03                       PIC X(30) VALUE          01460099
+                'ATTEMPTING TO OPEN DB2 CURSOR'.                        01470099
+           05  PE-MSG-04                       PIC X(30) VALUE          01480099
+                'ATTEMPT TO FETCH CURSOR ROW  '.                        01490099
+           05  PE-MSG-05                       PIC X(30) VALUE          01500099
+                'ATTEMPT TO CLOSE DB2 CURSOR  '.                        01510099
+           05  PE-MSG-06                       PIC X(30) VALUE          01520099
+                'ERROR ON UPDATE OF TMNMCL    '.                        01530099
+           05  PE-MSG-07                       PIC X(30) VALUE          01540099
+                'ERROR IN SELECT - TCKRSTCNTL '.                        01550099
+           05  PE-MSG-08                       PIC X(30) VALUE          01560099
+                'UPDATE WORK_STRG - TCKRSTINF '.                        01570099
+           05  PE-MSG-09                       PIC X(30) VALUE          01580099
+                'PGM ABEND DURING A COMMIT    '.                        01590099
+           05  PE-MSG-10                       PIC X(30) VALUE          01600099
+                'UPDATE OF TCKRSTCNTL FAILED  '.                        01610099
+           05  PE-MSG-11                       PIC X(30) VALUE          01620099
+                'ERROR IN SELECT - TCKRSTINF  '.                        01630099
+           05  PE-MSG-12                       PIC X(30) VALUE          01640099
+                'UNABLE TO OBTAIN TIMESTAMP   '.                        01650099
+           05  PE-MSG-13                       PIC X(30) VALUE          01660099
+                'SHRINK NOT FND FOR DEPT/DATE '.                        01670099
+           05  PE-MSG-14                       PIC X(30) VALUE          01680099
+                'ERROR ON ''INSERT'' TO TMNMCL'.                        01690099
+           05  PE-MSG-15                       PIC X(30) VALUE          01700099
+                'CURRENT DATE LIMIT IS 24 MOS.'.                        01710099
+      *                                                                 01720099
+4095   01  OUTPUT-DETAIL-LINE.                                          01730099
+4095       05  FILLER                   PIC  X(12) VALUE ' DEPT NBR : '.01740099
+4095       05  DL-DEPT-NBR              PIC  X(03) VALUE SPACES.        01750099
+4095       05  FILLER                   PIC  X(01) VALUE '-'.           01760099
+4095       05  DL-MCL-NBR               PIC  X(02) VALUE SPACES.        01770099
+4095       05  DL-CUM-MKUP-PCT          PIC  ZZZ,ZZ9,999.9999999-.      01780099
+4095       05  FILLER                   PIC  X(09) VALUE SPACES.        01790099
+4095       05  FILLER                   PIC  X(14) VALUE                01800099
+4095                                               'ML MKUP USED: '.    01810099
+4095       05  DL-CUM-MKUP-USED         PIC  9,999.9999999-.            01820099
+4095       05  FILLER                   PIC  X(05) VALUE SPACES.        01830099
+      *                                                                 01840099
+       01  PROGRAM-VARIABLES.                                           01850099
+           05  PV-TMNMCL-UPDATE-VARIABLES.                              01860099
+     ** THESE VARIABLES WILL UPDATE CURRENT TMNMCL ROW *****************01870099
+     *         10  PV-SHNK-RTL-AMT             PIC  S9(11)V9(2) COMP-3. 01880099
+     *         10  PV-END-INV-RTL-AMT          PIC  S9(11)V9(2) COMP-3. 01890099
+     *         10  PV-CUM-MKUP-PCT             PIC  S9(4)V9(7)  COMP-3. 01900099
+4095           10  PV-CUM-MKUP-PCT-MAX         PIC  S9(9)V9(7) COMP-3.  01910099
+     *         10  PV-END-INV-COST-AMT         PIC  S9(11)V9(2) COMP-3. 01920099
+     *         10  PV-SLS-COST-AMT             PIC  S9(11)V9(2) COMP-3. 01930099
+     *         10  PV-GRO-MRGN-AMT             PIC  S9(11)V9(2) COMP-3. 01940099
+     *******************************************************************01950099
+           05  PV-SEASON-TO-DATE-CSR-VAR.                               01960099
+               10  PV-MNMCL-RCPT-RTL-AMT       PIC  S9(11)V9(2) COMP-3. 01970099
+               10  PV-MNMCL-RCPT-NET-COST-AMT  PIC  S9(11)V9(2) COMP-3. 01980099
+               10  PV-MNMCL-PADJ-RTL-AMT       PIC  S9(11)V9(2) COMP-3. 01990099
+               10  PV-MNMCL-PADJ-NET-COST-AMT  PIC  S9(11)V9(2) COMP-3. 02000099
+               10  PV-MNMCL-MKUP-RTL-AMT       PIC  S9(11)V9(2) COMP-3. 02010099
+**NET          10  PV-MNMCL-XFER-NET-AMT       PIC  S9(11)V9(2) COMP-3. 02020099
+           05  PV-CURR-MONTH-COST-VAR.                                  02030099
+               10  PV-CURR-MONTH-RCPT-NET-COST PIC  S9(11)V9(2) COMP-3. 02040099
+               10  PV-CURR-MONTH-PADJ-NET-COST PIC  S9(11)V9(2) COMP-3. 02050099
+           05  PV-PREV-MONTH-VAR.                                       02060099
+               10  PV-PREV-MONTH-END-INV-RTL   PIC  S9(11)V9(2) COMP-3. 02070099
+               10  PV-PREV-MONTH-END-INV-COST  PIC  S9(11)V9(2) COMP-3. 02080099
+           05  PV-PREV-SEASON-VAR.                                      02090099
+               10  PV-PREV-SEASON-PURCH-RETAIL PIC  S9(11)V9(2) COMP-3. 02100099
+               10  PV-PREV-SEASON-PURCH-COST   PIC  S9(11)V9(2) COMP-3. 02110099
+           05  PV-CUM-TO-DATE-VARIABLES.                                02120099
+               10  PV-CUM-TO-DATE-PURCH-RETAIL PIC  S9(11)V9(2) COMP-3. 02130099
+               10  PV-CUM-TO-DATE-PURCH-COST   PIC  S9(11)V9(2) COMP-3. 02140099
+               10  PV-CUM-SEASON-MKUP          PIC  S9(11)V9(2) COMP-3. 02150099
+      *                                                                 02160099
+      *                                                                 02170099
+       01  PV-VARIABLE-FIELDS.                                          02180099
+           05  PV-SUB1                         PIC  9(02) VALUE ZEROES. 02190099
+           05  PV-MAX-DATE-SUB                 PIC  9(02) VALUE ZEROES. 02200099
+           05  PV-HOLD-ROW.                                             02210099
+               10  PV-HOLD-DEPT-NBR            PIC  X(03) VALUE SPACES. 02220099
+               10  PV-HOLD-MAJ-CL-NBR          PIC  X(02) VALUE SPACES. 02230099
+           05  PV-HOLD-DATE                    PIC  X(10) VALUE SPACES. 02240099
+           05  PV-HOLD-PFM-END-DTE             PIC  X(10) VALUE SPACES. 02250099
+           05  PV-HOLD-SEA-BEG-DTE             PIC  X(10) VALUE SPACES. 02260099
+           05  PV-HOLD-OPN-MN-END-DTE          PIC  X(10) VALUE SPACES. 02270099
+           05  PV-HOLD-CAL-MN-NBR              PIC  9(02) VALUE ZEROES. 02280099
+           05  PV-HOLD-PREV-SEA-END-DTE        PIC  X(10) VALUE SPACES. 02290099
+           05  PV-HOLD-FSCL-MN-NBR             PIC  X(02) VALUE SPACES. 02300099
+           05  PV-HOLD-FSCL-YR-NBR             PIC  X(04) VALUE SPACES. 02310099
+           05  PV-CURRENT-TIMESTAMP            PIC  X(26) VALUE SPACES. 02320099
+           05  PV-COMMIT-TIMESTAMP             PIC  X(26) VALUE SPACES. 02330099
+           05  PV-PARAGRAPH-NAME               PIC  X(30) VALUE SPACES. 02340099
+           05  PV-ABEND-MESSAGE                PIC  X(75) VALUE SPACES. 02350099
+           05  PV-OPERATION-ATTEMPTED          PIC  X(30) VALUE SPACES. 02360099
+**NET      05  PV-XFER-NET                     PIC  S9(11)V99   COMP-3. 02370099
+           05  PV-MAJ-CL-NBR                   PIC   9(02) VALUE ZEROS. 02380099
+           05  PV-HOLD-MAX-MAJ-CL-NBR          PIC   X(02) VALUE SPACES.02390099
+      *                                                                 02400099
+      * REFORMAT CALENDAR NUMBER TO PIC 9 FIELD FOR USE AS A SUBSCRIPT  02410099
+       01  REFORMAT-ALPHA-CALENDAR.                                     02420099
+           05  FMT-CALENDAR-MO-NUMERIC          PIC 9(2)  VALUE ZEROES. 02430099
+      *                                                                 02440099
+      *                                                                 02450099
+      * TABLE TO CONTAIN DATE INFORMATION FOR ALL MONTHS RE-CALCULATED  02460099
+       01  DATE-TABLE.                                                  02470099
+           05  CONTROL-DATES OCCURS 24 TIMES.                           02480099
+               10  DT-OPN-MN-END-DTE            PIC X(10) VALUE SPACES. 02490099
+               10  DT-CAL-MN-NBR                PIC X(02) VALUE SPACES. 02500099
+               10  DT-PFM-END-DTE               PIC X(10) VALUE SPACES. 02510099
+               10  DT-SEA-BEG-DTE               PIC X(10) VALUE SPACES. 02520099
+               10  DT-PREV-SEA-END-DTE          PIC X(10) VALUE SPACES. 02530099
+               10  DT-FSCL-MN-NBR               PIC X(02) VALUE SPACES. 02540099
+               10  DT-FSCL-YR-NBR               PIC X(04) VALUE SPACES. 02550099
+      ****************************************************              02560099
+      *  WEEKLY SHRINKAGE TABLE                          *              02570099
+      ****************************************************              02580099
+           EXEC SQL                                                     02590099
+               INCLUDE TWKSHNK                                          02600099
+           END-EXEC.                                                    02610099
+      ****************************************************              02620099
+      *  COMMUNICATION AREAS FOR DB2                     *              02630099
+      ****************************************************              02640099
+           EXEC SQL                                                     02650099
+               INCLUDE SQLCA                                            02660099
+           END-EXEC.                                                    02670099
+      ****************************************************              02680099
+      *  M/L MONTH-TO-DATE DEPARTMENT TABLE              *              02690099
+      ****************************************************              02700099
+           EXEC SQL                                                     02710099
+               INCLUDE TMNMCL                                           02720099
+           END-EXEC.                                                    02730099
+      ****************************************************              02740099
+      * M/L DATE TABLE AND CURRENT OPEN FISCAL DATE INFO *              02750099
+      ****************************************************              02760099
+           EXEC SQL                                                     02770099
+               INCLUDE TDTATTR                                          02780099
+           END-EXEC.                                                    02790099
+                                                                        02800099
+           EXEC SQL                                                     02810099
+               INCLUDE TMLCNTL                                          02820099
+           END-EXEC.                                                    02830099
+      ****************************************************              02840099
+      *CHECKPOINT RESTART CONTROL AND INFORMATION TABLES *              02850099
+      ****************************************************              02860099
+           EXEC SQL                                                     02870099
+               INCLUDE TCKRSTCN                                         02880099
+           END-EXEC.                                                    02890099
+      *                                                                 02900099
+           EXEC SQL                                                     02910099
+               INCLUDE TCKRSTIN                                         02920099
+           END-EXEC.                                                    02930099
+      *                                                                 02940099
+      *                                                                 02950099
+      *********** THIS CURSOR WILL DRIVE PROGRAM PROCESSING ************02960099
+           EXEC SQL                                                     02970099
+               DECLARE MAJ_CL_CSR CURSOR FOR                            02980099
+                SELECT  DISTINCT DEPT_NBR, MAJ_CL_NBR                   02990099
+                 FROM TMNMCL                                            03000099
+                 WHERE DEPT_NBR        >= :PV-HOLD-DEPT-NBR             03010099
+                   AND FSCL_MN_END_DTE BETWEEN                          03020099
+                                         :PV-HOLD-PFM-END-DTE           03030099
+                                     AND :MLCNTL-MXPSTG-FSCL-MN-DTE     03040099
+                 ORDER BY DEPT_NBR, MAJ_CL_NBR                          03050099
+                 FOR FETCH ONLY                                         03060099
+           END-EXEC.                                                    03070099
+      *                                                                 03080099
+      * MAX (6) ROWS FOR EACH DEPT (MONTHS PER SEASON) - CUM SEASON $   03090099
+           EXEC SQL                                                     03100099
+               DECLARE SEASON_TO_DATE_CSR CURSOR FOR                    03110099
+**NET           SELECT  XFER_IN_RTL_AMT                                 03120099
+**NET                  ,XFER_OUT_RTL_AMT                                03130099
+                       ,RCPT_RTL_AMT                                    03140099
+                       ,RCPT_NET_COST_AMT                               03150099
+                       ,PADJ_RTL_AMT                                    03160099
+                       ,PADJ_NET_COST_AMT                               03170099
+                       ,MKUP_RTL_AMT                                    03180099
+                  FROM  TMNMCL                                          03190099
+                 WHERE (DEPT_NBR   = :MNMCL-DEPT-NBR)                   03200099
+                   AND (MAJ_CL_NBR = :MNMCL-MAJ-CL-NBR)                 03210099
+                   AND (FSCL_MN_END_DTE >= :PV-HOLD-SEA-BEG-DTE         03220099
+                   AND  FSCL_MN_END_DTE <= :PV-HOLD-OPN-MN-END-DTE)     03230099
+                 FOR FETCH ONLY                                         03240099
+           END-EXEC.                                                    03250099
+      *                                                                 03260099
+      * MONTHS TO BE PROCESSED - ALL DATES BETWEEN OPEN AND MAX DATES   03270099
+           EXEC SQL                                                     03280099
+               DECLARE FISCAL_DATE_CSR CURSOR FOR                       03290099
+                SELECT  DISTINCT FSCL_MN_END_DTE                        03300099
+                  FROM  TDTATTR                                         03310099
+                 WHERE FSCL_MN_END_DTE BETWEEN                          03320099
+                                            :MLCNTL-OPN-FSCL-MN-DTE     03330099
+                                        AND :MLCNTL-MXPSTG-FSCL-MN-DTE  03340099
+                 ORDER BY FSCL_MN_END_DTE                               03350099
+                 FOR FETCH ONLY                                         03360099
+           END-EXEC.                                                    03370099
+      *                                                                 03380099
+      ******************************************************************03390099
+      * CHECKPOINT RESTART VARIABLES                                   *03400099
+      ******************************************************************03410099
+       01  CR-CHECKPOINT-RESTART-AREA.                                  03420099
+           05  CR-AREA-LEN                  PIC S9(04) VALUE +59  COMP. 03430099
+           05  CR-CHECKPOINT-RESTART-VAR.                               03440099
+               10  CR-PREV-DTL-KEY          PIC  X(19)  VALUE SPACES.   03450099
+               10  FILLER REDEFINES CR-PREV-DTL-KEY.                    03460099
+                   15  CR-FISCAL-MN-END-DTE PIC  X(10).                 03470099
+                   15  FILLER               PIC  X(01).                 03480099
+                   15  CR-FISCAL-MN-NBR     PIC  X(02).                 03490099
+                   15  FILLER               PIC  X(01).                 03500099
+                   15  CR-DEPT-MCL-KEY.                                 03510099
+                       20  CR-DEPT-NBR      PIC  X(03).                 03520099
+                       20  CR-MAJ-CL-NBR    PIC  X(02).                 03530099
+               10  FILLER                   PIC  X(01) VALUE SPACES.    03540099
+               10  CR-TMNMCL-FETCH-COUNT    PIC  9(09) VALUE ZEROES.    03550099
+               10  FILLER                   PIC  X(01) VALUE SPACES.    03560099
+               10  CR-TMNMCL-UPDATE-COUNT   PIC  9(09) VALUE ZEROES.    03570099
+               10  FILLER                   PIC  X(01) VALUE SPACES.    03580099
+               10  CR-TMNMCL-INSERT-COUNT   PIC  9(09) VALUE ZEROES.    03590099
+               10  FILLER                   PIC  X(01) VALUE SPACES.    03600099
+               10  CR-TMNMCL-COMMIT-COUNT   PIC  9(09) VALUE ZEROES.    03610099
+           EJECT                                                        03620099
+      *                                                                 03630099
+      ****************************************************              03640099
+      *  ERROR MESSAGE AREA FOR DB2                      *              03650099
+      ****************************************************              03660099
+           COPY DPWS004.                                                03670099
+      *                                                                 03680099
+      *                                                                 03690099
+      *-------------------*                                             03700099
+       PROCEDURE DIVISION.                                              03710099
+      *-------------------*                                             03720099
+                                                                        03730099
+       0000-MAIN-MODULE.                                                03740099
+                                                                        03750099
+           PERFORM 1000-INITIALIZATION.                                 03760099
+                                                                        03770099
+           PERFORM 2000-PROCESS-INPUT                                   03780099
+                UNTIL PS-END-OF-MAJ-CL-CURSOR.                          03790099
+                                                                        03800099
+           PERFORM 8000-EOJ-ROUTINE.                                    03810099
+                                                                        03820099
+4095       CLOSE OUTPUT-FILE.                                           03830099
+                                                                        03840099
+4095       IF PA-CUM-MKUP-MAX-LIMIT > 0                                 03850099
+4095          MOVE 4095 TO RETURN-CODE                                  03860099
+4095       ELSE                                                         03870099
+4095          MOVE 0    TO RETURN-CODE                                  03880099
+4095       END-IF.                                                      03890099
+                                                                        03900099
+           STOP RUN.                                                    03910099
+      *                                                                 03920099
+      *                                                                 03930099
+      ******************************************************************03940099
+      * 1000-INITIALIZATION.                                            03950099
+      * LOAD TABLE WITH MONTHS TO BE RECALCULATED - OPN_MN THRU MXPSTG  03960099
+      * DETERMINE IF THIS IS A 'RESTART' (TCKRSTINF-CKPT-STAT-CODE = 9) 03970099
+      ******************************************************************03980099
+      *                                                                 03990099
+       1000-INITIALIZATION.                                             04000099
+      *                                                                 04010099
+4095       OPEN OUTPUT OUTPUT-FILE.                                     04020099
+      *                                                                 04030099
+           PERFORM 7000-READ-CONTROL-TABLE.                             04040099
+           PERFORM 7025-PROCESS-CNTL-TBL.                               04050099
+      *                                                                 04060099
+           ADD 1 TO PV-SUB1.                                            04070099
+           PERFORM 2800-FORMAT-DATES                                    04080099
+                                                                        04090099
+           PERFORM 7650-INIT-CHECKPOINT-SELECT.                         04100099
+      *                                                                 04110099
+           IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                           04120099
+                PERFORM 7700-SELECT-RESTART-INFO                        04130099
+                MOVE TCKRSTINF-WORK-STRG-DESC-TEXT TO                   04140099
+                                              CR-CHECKPOINT-RESTART-VAR 04150099
+                DISPLAY 'RESTART-LAST DEPT/MCL COMMIT:', CR-DEPT-MCL-KEY04160099
+                MOVE CR-DEPT-MCL-KEY               TO PV-HOLD-ROW       04170099
+                PERFORM 7149-OPEN-MAJ-CL-CURSOR                         04180099
+                PERFORM 7999-REPOSITION-CURSOR                          04190099
+                    UNTIL PS-RESTART-KEY-ESTABLISHED                    04200099
+                      OR  PS-END-OF-MAJ-CL-CURSOR                       04210099
+           ELSE                                                         04220099
+               SET PS-FIRST-COMMIT TO TRUE                              04230099
+               INITIALIZE CR-CHECKPOINT-RESTART-VAR                     04240099
+      *                                                                 04250099
+               DISPLAY 'COMMITS WILL BE TAKEN EVERY ',                  04260099
+                                 TCKRSTCNTL-CKPT-FRQNCY-QTY, ' SECONDS.'04270099
+               PERFORM 7600-GET-COMMIT-TIMESTAMP                        04280099
+               PERFORM 7149-OPEN-MAJ-CL-CURSOR                          04290099
+               PERFORM 7150-PROCESS-MAJ-CL-CURSOR                       04300099
+                   MOVE MNMCL-DEPT-NBR    TO PV-HOLD-DEPT-NBR           04310099
+                   MOVE MNMCL-MAJ-CL-NBR  TO PV-HOLD-MAJ-CL-NBR         04320099
+           END-IF.                                                      04330099
+      *                                                                 04340099
+           SET PS-FIRST-TIME-THRU TO TRUE.                              04350099
+           INITIALIZE PA-PROGRAM-ACCUMULATORS.                          04360099
+      *                                                                 04370099
+           IF  PS-END-OF-MAJ-CL-CURSOR                                  04380099
+               IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                       04390099
+                   DISPLAY 'NO RECORDS TO PROCESSED AFTER RESTART'      04400099
+                   SET PS-EMPTY-RESULT-TABLE TO TRUE                    04410099
+               ELSE                                                     04420099
+                   IF TCKRSTCNTL-CKPT-STAT-CODE = '0'                   04430099
+                       DISPLAY 'NO ROWS SELECTED FOR RECALCULATION'     04440099
+                       SET PS-EMPTY-RESULT-TABLE TO TRUE                04450099
+                   END-IF                                               04460099
+               END-IF                                                   04470099
+           ELSE                                                         04480099
+               PERFORM 7425-OPEN-SEASON-CURSOR                          04490099
+           END-IF.                                                      04500099
+                                                                        04510099
+4095       MOVE ZERO TO PA-CUM-MKUP-MAX-LIMIT.                          04520099
+      *                                                                 04530099
+      *                                                                 04540099
+      ******************************************************************04550099
+      * MAIN PROCESSING PARAGRAPH-PERFORMED UNTIL END OF CSR PROCESSING 04560099
+      * WHEN PV-SUB1 > PV-MAX-SUB - THEN ALL DATES FOR THIS DEPT/MCL    04570099
+      *                 HAVE BEEN PROCESSED, CHECK IF COMMIT REQUIRED.  04580099
+      ******************************************************************04590099
+       2000-PROCESS-INPUT.                                              04600099
+                                                                        04610099
+           ADD 1      TO PA-DEPT-MCL-COUNT.                             04620099
+      *                                                                 04630099
+           PERFORM 2025-PROCESS-MCL                                     04640099
+               UNTIL PV-SUB1 > PV-MAX-DATE-SUB.                         04650099
+                                                                        04660099
+           PERFORM 7800-COMMIT-PROCESSING.                              04670099
+      * CURSOR WILL CLOSE FOLLOWING A 'COMMIT' & MUST BE RE-OPENED      04680099
+      * FETCH ANOTHER ROW IF NOT DONE SO DURING COMMIT PROCESSING       04690099
+           IF NOT PS-RESTART-KEY-ESTABLISHED                            04700099
+               MOVE 1    TO PV-SUB1                                     04710099
+               PERFORM 2800-FORMAT-DATES                                04720099
+               PERFORM 7150-PROCESS-MAJ-CL-CURSOR                       04730099
+               MOVE MNMCL-DEPT-NBR   TO PV-HOLD-DEPT-NBR                04740099
+               MOVE MNMCL-MAJ-CL-NBR TO PV-HOLD-MAJ-CL-NBR              04750099
+           END-IF.                                                      04760099
+      *                                                                 04770099
+      *                                                                 04780099
+      ******************************************************************04790099
+      * DEPT LEVEL PROCESSING PARAGRAPH                                 04800099
+      * PROCESS ALL DATES FOR THIS DEPARTMENT                           04810099
+      ******************************************************************04820099
+       2025-PROCESS-MCL.                                                04830099
+           INITIALIZE  PROGRAM-VARIABLES.                               04840099
+           MOVE 'N' TO PS-CURR-MONTH-SW                                 04850099
+                       PS-PREV-MONTH-ROW-SW                             04860099
+                       PS-RESTART-ROW-SW                                04870099
+                       PS-CARRY-FORWARD-SW.                             04880099
+                                                                        04890099
+           IF PS-FIRST-TIME-THRU                                        04900099
+               MOVE 'N' TO PS-FIRST-TIME-SW                             04910099
+           ELSE                                                         04920099
+               PERFORM 2800-FORMAT-DATES                                04930099
+               PERFORM 7425-OPEN-SEASON-CURSOR                          04940099
+           END-IF.                                                      04950099
+      *                                                                 04960099
+      *DETERMINE IF CURRENT DOLLARS AND/OR PRIOR INVENTORY DOLLARS      04970099
+           PERFORM 7350-SELECT-PREV-MONTH-END-INV.                      04980099
+           PERFORM 7300-SELECT-CURRENT-DOLLARS.                         04990099
+      *                                                                 05000099
+      ******************************************************************05010099
+      *****                CARRY FORWARD LOGIC                     *****05020099
+      ******************************************************************05030099
+      *    CURRENT $ FOUND FOR THIS MONTH  - RECALC ROW                *05040099
+      * NO CURRENT $ FOUND/NO PREV $ FOUND - BYPASS RECALC THIS MONTH  *05050099
+      * NO CURRENT $ FOUND/   PREV $ FOUND - CARRY FORWARD INVENTORY $ *05060099
+      ******************************************************************05070099
+           IF PS-CURR-MONTH-ROW-NOT-FOUND                               05080099
+               IF PS-PREV-MONTH-ROW-NOT-FOUND                           05090099
+                   CONTINUE                                             05100099
+               ELSE                                                     05110099
+                   IF PS-PFM-INV-DOLLARS-FOUND                          05120099
+                       PERFORM 7950-INSERT-CARRY-FWD-ROW                05130099
+                       PERFORM 7300-SELECT-CURRENT-DOLLARS              05140099
+                       PERFORM 2035-RECALC-PROCESSING                   05150099
+                   END-IF                                               05160099
+               END-IF                                                   05170099
+           ELSE                                                         05180099
+               PERFORM 2035-RECALC-PROCESSING                           05190099
+           END-IF.                                                      05200099
+      *                                                                 05210099
+           PERFORM 7575-CLOSE-SEASON-CURSOR.                            05220099
+      *                                                                 05230099
+           ADD  1 TO PV-SUB1.                                           05240099
+      *                                                                 05250099
+      *                                                                 05260099
+      ******************************************************************05270099
+      *                                                                *05280099
+      *            ********* RECALC PROCESSING **********              *05290099
+      *                                                                *05300099
+      ******************************************************************05310099
+       2035-RECALC-PROCESSING.                                          05320099
+      *                                                                 05330099
+           MOVE MNMCL-DEPT-NBR    TO PV-HOLD-DEPT-NBR                   05340099
+           MOVE MNMCL-MAJ-CL-NBR  TO PV-HOLD-MAJ-CL-NBR                 05350099
+                                     PV-MAJ-CL-NBR.                     05360099
+           ADD +9                 TO PV-MAJ-CL-NBR.                     05370099
+           MOVE PV-MAJ-CL-NBR     TO PV-HOLD-MAX-MAJ-CL-NBR.            05380099
+      *                                                                 05390099
+           PERFORM 7200-OBTAIN-SHRINK-DLRS                              05400099
+ --->      PERFORM 2150-CALC-ENDINV-RETAIL.                             05410099
+                                                                        05420099
+           PERFORM 7400-PREV-SEASON-END-INV.                            05430099
+      *                                                                 05440099
+           PERFORM 2200-CALC-PREV-SEASN-END-PURCH.                      05450099
+           PERFORM 7450-PROCESS-SEASONAL-CURSOR.                        05460099
+           IF PS-END-OF-CURR-SEASON-CSR                                 05470099
+               CONTINUE                                                 05480099
+           ELSE                                                         05490099
+               PERFORM 2250-CALC-SEASON-TO-DATE-PURCH                   05500099
+                   UNTIL PS-END-OF-CURR-SEASON-CSR.                     05510099
+      *                                                                 05520099
+           PERFORM 2300-CALC-CUMM-TO-DATE-PURCH.                        05530099
+ --->      PERFORM 2400-CALC-CUMM-MARKUP-PCT.                           05540099
+      * CURRENT MONTH CUMM                                              05550099
+ --->      PERFORM 2500-CALC-END-INV-COST.                              05560099
+      * SALES COST AMOUNT                                               05570099
+           PERFORM 7475-CURR-SEASON-COST.                               05580099
+ --->      PERFORM 2600-CALC-SALES-COST-AMT.                            05590099
+      * GROSS MARGIN AMOUNT                                             05600099
+ --->      PERFORM 2700-CALC-GROSS-MARGIN-AMT.                          05610099
+           PERFORM 7500-UPDATE-PROCESSING.                              05620099
+      *                                                                 05630099
+      *2035-RECALC-PROCESSING-END                                       05640099
+      *                                                                 05650099
+      *                                                                 05660099
+      **************************************************                05670099
+      *                                                *                05680099
+      * FOLLOWING PARAGRAPHS PERFORM ALL CALCULATIONS  *                05690099
+      *                                                *                05700099
+      ******************************************************************05710099
+      * CALCULATE THE ENDING INVENTORY OF CURRENT MONTH BASED ON THE    05720099
+      *       ENDING INVENTORY FROM THE PRIOR MONTH                     05730099
+      ******************************************************************05740099
+       2150-CALC-ENDINV-RETAIL.                                         05750099
+      *                                                                 05760099
+           COMPUTE PV-END-INV-RTL-AMT = (  PV-PREV-MONTH-END-INV-RTL    05770099
+                                         + MNMCL-RCPT-RTL-AMT           05780099
+                                         + MNMCL-PADJ-RTL-AMT           05790099
+                                         + MNMCL-MKUP-RTL-AMT           05800099
+                                         - MNMCL-SLS-RTL-AMT            05810099
+                                         + MNMCL-XFER-IN-RTL-AMT        05820099
+                                         - MNMCL-XFER-OUT-RTL-AMT       05830099
+                                         - MNMCL-MKDN-RTL-AMT           05840099
+                                         - MNMCL-INV-ADJ-RTL-AMT        05850099
+                                         - PV-SHNK-RTL-AMT    ).        05860099
+      *                                                                 05870099
+      *                                                                 05880099
+      ******************************************************************05890099
+      * CALCULATE CUMULATIVE MARKUP PERCENTAGE FOR UPDATE               05900099
+      ******************************************************************05910099
+       2200-CALC-PREV-SEASN-END-PURCH.                                  05920099
+      *                                                                 05930099
+           IF PS-NO-PREV-SEASONAL-INV                                   05940099
+                MOVE 0 TO PV-PREV-SEASON-PURCH-RETAIL                   05950099
+                MOVE 0 TO PV-PREV-SEASON-PURCH-COST                     05960099
+           ELSE                                                         05970099
+                MOVE MNMCL-END-INV-RTL-AMT TO                           05980099
+                                         PV-PREV-SEASON-PURCH-RETAIL    05990099
+                MOVE MNMCL-END-INV-COST-AMT TO                          06000099
+                                         PV-PREV-SEASON-PURCH-COST      06010099
+           END-IF.                                                      06020099
+      *                                                                 06030099
+      *                                                                 06040099
+      ******************************************************************06050099
+      * ACCUMULATE CURRENT SEASON RETAIL/COST AMTS FROM SEASON BEGINNING06060099
+      ******************************************************************06070099
+       2250-CALC-SEASON-TO-DATE-PURCH.                                  06080099
+      *                                                                 06090099
+**NET      COMPUTE PV-XFER-NET =                                        06100099
+**NET         (MNMCL-XFER-IN-RTL-AMT -                                  06110099
+**NET          MNMCL-XFER-OUT-RTL-AMT).                                 06120099
+**NET                                                                   06130099
+**NET      ADD PV-XFER-NET             TO  PV-MNMCL-XFER-NET-AMT.       06140099
+           ADD MNMCL-RCPT-RTL-AMT      TO  PV-MNMCL-RCPT-RTL-AMT.       06150099
+           ADD MNMCL-RCPT-NET-COST-AMT TO  PV-MNMCL-RCPT-NET-COST-AMT.  06160099
+           ADD MNMCL-PADJ-RTL-AMT      TO  PV-MNMCL-PADJ-RTL-AMT.       06170099
+           ADD MNMCL-PADJ-NET-COST-AMT TO  PV-MNMCL-PADJ-NET-COST-AMT.  06180099
+           ADD MNMCL-MKUP-RTL-AMT      TO  PV-MNMCL-MKUP-RTL-AMT.       06190099
+      *                                                                 06200099
+           PERFORM 7450-PROCESS-SEASONAL-CURSOR.                        06210099
+      *                                                                 06220099
+      *                                                                 06230099
+      ******************************************************************06240099
+      * DETERMINE CUMULATIVE RETAIL AND COST                            06250099
+      * ADD PRIOR SEASON END INV AMTS TO CURRENT SEASON-TO-DATE AMTS    06260099
+      ******************************************************************06270099
+       2300-CALC-CUMM-TO-DATE-PURCH.                                    06280099
+      *                                                                 06290099
+           COMPUTE PV-CUM-TO-DATE-PURCH-COST   =                        06300099
+                                         (  PV-PREV-SEASON-PURCH-COST   06310099
+                                          + PV-MNMCL-RCPT-NET-COST-AMT  06320099
+                                          + PV-MNMCL-PADJ-NET-COST-AMT).06330099
+                                                                        06340099
+           COMPUTE PV-CUM-TO-DATE-PURCH-RETAIL =                        06350099
+                                          (  PV-PREV-SEASON-PURCH-RETAIL06360099
+**NET                                      + PV-MNMCL-XFER-NET-AMT      06370099
+                                           + PV-MNMCL-RCPT-RTL-AMT      06380099
+                                           + PV-MNMCL-PADJ-RTL-AMT      06390099
+                                           + PV-MNMCL-MKUP-RTL-AMT).    06400099
+      *                                                                 06410099
+      *                                                                 06420099
+      ******************************************************************06430099
+      * FINAL CALCULATIONS OF VALUES TO UPDATE TMNMCL - CUM_MKUP_PCT    06440099
+      ******************************************************************06450099
+       2400-CALC-CUMM-MARKUP-PCT.                                       06460099
+      *                                                                 06470099
+           COMPUTE PV-CUM-SEASON-MKUP = (  PV-CUM-TO-DATE-PURCH-RETAIL  06480099
+                                         - PV-CUM-TO-DATE-PURCH-COST  ).06490099
+      * CUM SEASON RETAIL CANNOT EQUAL ZERO IN DIVISOR ('ON SIZE ERROR')06500099
+           IF PV-CUM-TO-DATE-PURCH-RETAIL = 0                           06510099
+                MOVE 100 TO PV-CUM-MKUP-PCT                             06520099
+           ELSE                                                         06530099
+4095            COMPUTE PV-CUM-MKUP-PCT-MAX ROUNDED =                   06540099
+----->*         COMPUTE PV-CUM-MKUP-PCT ROUNDED =                       06550099
+               (PV-CUM-SEASON-MKUP * 100) / PV-CUM-TO-DATE-PURCH-RETAIL 06560099
+4095            IF ( PV-CUM-MKUP-PCT-MAX > 9999.9999999 OR              06570099
+4095                 PV-CUM-MKUP-PCT-MAX < -9999.9999999  )             06580099
+4095                MOVE PV-HOLD-DEPT-NBR     TO DL-DEPT-NBR            06590099
+4095                MOVE PV-HOLD-MAJ-CL-NBR   TO DL-MCL-NBR             06600099
+4095                MOVE PV-CUM-MKUP-PCT-MAX  TO DL-CUM-MKUP-PCT        06610099
+4095                                             DL-CUM-MKUP-USED       06620099
+4095                PERFORM 5000-WRITE-OUTPUT-RECORD                    06630099
+4095                ADD +1 TO PA-CUM-MKUP-MAX-LIMIT                     06640099
+4095            END-IF                                                  06650099
+4095            MOVE PV-CUM-MKUP-PCT-MAX TO PV-CUM-MKUP-PCT             06660099
+           END-IF.                                                      06670099
+      *                                                                 06680099
+      *                                                                 06690099
+      ******************************************************************06700099
+      * FINAL CALCULATIONS OF VALUES TO UPDATE TMNMCL - END_INV_COST_AMT06710099
+      ******************************************************************06720099
+       2500-CALC-END-INV-COST.                                          06730099
+      *                                                                 06740099
+           COMPUTE PV-END-INV-COST-AMT ROUNDED =                        06750099
+                        ( (100 - PV-CUM-MKUP-PCT)  *                    06760099
+                               ( PV-END-INV-RTL-AMT) ) / 100.           06770099
+      *                                                                 06780099
+      *                                                                 06790099
+      ******************************************************************06800099
+      * FINAL CALCULATIONS OF VALUES TO UPDATE TMNMCL - SALES_COST_AMT *06810099
+      ******************************************************************06820099
+       2600-CALC-SALES-COST-AMT.                                        06830099
+      *                                                                 06840099
+           IF PS-NO-CURRENT-PURCH-COSTS                                 06850099
+               MOVE ZEROES            TO PV-CURR-MONTH-RCPT-NET-COST    06860099
+                                         PV-CURR-MONTH-PADJ-NET-COST    06870099
+           END-IF.                                                      06880099
+      *                                                                 06890099
+           COMPUTE PV-SLS-COST-AMT =                                    06900099
+                 (  PV-PREV-MONTH-END-INV-COST                          06910099
+                  + PV-CURR-MONTH-RCPT-NET-COST                         06920099
+                  + PV-CURR-MONTH-PADJ-NET-COST                         06930099
+                  - PV-END-INV-COST-AMT         ).                      06940099
+      *                                                                 06950099
+      ******************************************************************06960099
+      * FINAL CALCULATIONS OF VALUES TO UPDATE TMNMCL - GRO_MRGN_AMT   *06970099
+      ******************************************************************06980099
+       2700-CALC-GROSS-MARGIN-AMT.                                      06990099
+      *                                                                 07000099
+           IF MNMCL-SLS-RTL-AMT = 0                                     07010099
+               MOVE 0 TO PV-GRO-MRGN-AMT                                07020099
+           ELSE                                                         07030099
+               COMPUTE PV-GRO-MRGN-AMT =                                07040099
+               ( ( MNMCL-SLS-RTL-AMT ) - ( PV-SLS-COST-AMT ) )          07050099
+           END-IF.                                                      07060099
+      *                                                                 07070099
+      *                                                                 07080099
+      ******************************************************************07090099
+      * MOVE SUBSCRIPTED VARIABLE TO FORMAT USABLE BY DB2               07100099
+      ******************************************************************07110099
+       2800-FORMAT-DATES.                                               07120099
+           MOVE DT-SEA-BEG-DTE(PV-SUB1)    TO PV-HOLD-SEA-BEG-DTE.      07130099
+           MOVE DT-OPN-MN-END-DTE(PV-SUB1) TO PV-HOLD-OPN-MN-END-DTE.   07140099
+           MOVE DT-PFM-END-DTE(PV-SUB1)    TO PV-HOLD-PFM-END-DTE.      07150099
+           MOVE DT-CAL-MN-NBR(PV-SUB1)     TO PV-HOLD-CAL-MN-NBR.       07160099
+           MOVE DT-FSCL-MN-NBR(PV-SUB1)    TO PV-HOLD-FSCL-MN-NBR.      07170099
+           MOVE DT-FSCL-YR-NBR(PV-SUB1)    TO PV-HOLD-FSCL-YR-NBR.      07180099
+           MOVE DT-PREV-SEA-END-DTE(PV-SUB1)                            07190099
+                                           TO PV-HOLD-PREV-SEA-END-DTE. 07200099
+      *                                                                 07210099
+      *                                                                 07220099
+4095  ******************************************************************07230099
+4095  * WRITE CONTROL CARD FOR OUTPUT MESSAGE TO BP (CUM MKUP PCT VAR)  07240099
+4095  ******************************************************************07250099
+4095   5000-WRITE-OUTPUT-RECORD.                                        07260099
+4095  *                                                                 07270099
+4095       WRITE OUTPUT-RECORD FROM OUTPUT-DETAIL-LINE.                 07280099
+4095  *                                                                 07290099
+      ******************************************************************07300099
+      * READ THE DB2 CONTROL TABLE CONTAINING OPEN FISCAL DATE INFO     07310099
+      ******************************************************************07320099
+       7000-READ-CONTROL-TABLE.                                         07330099
+      *                                                                 07340099
+            EXEC SQL                                                    07350099
+                SELECT OPN_FSCL_MN_DTE                                  07360099
+                      ,OPN_FSCL_MN_NBR                                  07370099
+                      ,MXPSTG_FSCL_MN_DTE                               07380099
+                      ,MXPSTG_FSCL_MN_NBR                               07390099
+                 INTO  :MLCNTL-OPN-FSCL-MN-DTE                          07400099
+                      ,:MLCNTL-OPN-FSCL-MN-NBR                          07410099
+                      ,:MLCNTL-MXPSTG-FSCL-MN-DTE                       07420099
+                      ,:MLCNTL-MXPSTG-FSCL-MN-NBR                       07430099
+                 FROM  TMLCNTL                                          07440099
+            END-EXEC.                                                   07450099
+      *                                                                 07460099
+           EVALUATE SQLCODE                                             07470099
+               WHEN 0                                                   07480099
+                   MOVE MLCNTL-OPN-FSCL-MN-DTE TO CR-FISCAL-MN-END-DTE  07490099
+                   MOVE MLCNTL-OPN-FSCL-MN-NBR TO CR-FISCAL-MN-NBR      07500099
+                   DISPLAY 'CONTROL DATES (TMLCNTL)'                    07510099
+                   DISPLAY 'FISCAL OPEN END DATE  : ',                  07520099
+                                                 MLCNTL-OPN-FSCL-MN-DTE 07530099
+                   DISPLAY '       OPEN MONTH NBR : ',                  07540099
+                                                 MLCNTL-OPN-FSCL-MN-NBR 07550099
+                   DISPLAY 'MAXPSTG  MONTH END DTE: ',                  07560099
+                                              MLCNTL-MXPSTG-FSCL-MN-DTE 07570099
+                   DISPLAY '     MAX MONTH NUMBER : ',                  07580099
+                                              MLCNTL-MXPSTG-FSCL-MN-NBR 07590099
+               WHEN OTHER                                               07600099
+                  MOVE '7000-READ-CONTROL-TABLE' TO PV-PARAGRAPH-NAME   07610099
+                  MOVE PE-MSG-01 TO PV-OPERATION-ATTEMPTED              07620099
+                  PERFORM 9999-SQL-ABEND                                07630099
+           END-EVALUATE.                                                07640099
+      *                                                                 07650099
+      *                                                                 07660099
+      ******************************************************************07670099
+      * LOAD ALL DATES TO BE PROCESSED TO INTERNAL TABLE                07680099
+      ******************************************************************07690099
+       7025-PROCESS-CNTL-TBL.                                           07700099
+      *                                                                 07710099
+            PERFORM 7050-OPEN-DATE-CURSOR.                              07720099
+            PERFORM 7075-PROCESS-DATE-CURSOR                            07730099
+                UNTIL PS-DATE-TABLE-LOADED.                             07740099
+      *                                                                 07750099
+      *                                                                 07760099
+      ***************************************************************** 07770099
+      * OPEN CURSOR FOR UPDATE AT INITIALIZATION & AFTER EACH COMMIT    07780099
+      ***************************************************************** 07790099
+       7050-OPEN-DATE-CURSOR.                                           07800099
+      *                                                                 07810099
+           EXEC SQL                                                     07820099
+               OPEN FISCAL_DATE_CSR                                     07830099
+           END-EXEC                                                     07840099
+                                                                        07850099
+           EVALUATE SQLCODE                                             07860099
+               WHEN 0                                                   07870099
+                    CONTINUE                                            07880099
+               WHEN OTHER                                               07890099
+                  MOVE '7050-OPEN-DATE-CSR' TO PV-PARAGRAPH-NAME        07900099
+                  MOVE PE-MSG-03 TO PV-OPERATION-ATTEMPTED              07910099
+                  PERFORM 9999-SQL-ABEND                                07920099
+           END-EVALUATE.                                                07930099
+      *                                                                 07940099
+      *                                                                 07950099
+      ***************************************************************** 07960099
+      * INCREMENT SUBSCRIPT AND CONTINUE LOADING INTERNAL TABLE         07970099
+      ***************************************************************** 07980099
+       7075-PROCESS-DATE-CURSOR.                                        07990099
+      *                                                                 08000099
+           EXEC SQL                                                     08010099
+                  FETCH FISCAL_DATE_CSR                                 08020099
+                   INTO :PV-HOLD-DATE                                   08030099
+           END-EXEC                                                     08040099
+                                                                        08050099
+           EVALUATE SQLCODE                                             08060099
+               WHEN +0                                                  08070099
+                   DISPLAY '---------------------------------'          08080099
+                   ADD 1 TO PV-SUB1                                     08090099
+                   DISPLAY 'MONTH # ', PV-SUB1                          08100099
+                   DISPLAY 'PROCESS DATE: ', PV-HOLD-DATE               08110099
+                   PERFORM 7100-SELECT-DB2-DATES                        08120099
+                   PERFORM 7125-LOAD-DATE-TABLE                         08130099
+               WHEN +100                                                08140099
+                   DISPLAY 'NBR OF MONTHS PROCESSED THIS RUN: ', PV-SUB108150099
+                   IF PV-SUB1 > 1                                       08160099
+                       DISPLAY '   ', MLCNTL-OPN-FSCL-MN-DTE, ' THRU ' ,08170099
+                                      MLCNTL-MXPSTG-FSCL-MN-DTE         08180099
+                   END-IF                                               08190099
+                   MOVE PV-SUB1 TO PV-MAX-DATE-SUB                      08200099
+                   MOVE ZEROES  TO PV-SUB1                              08210099
+                   SET PS-DATE-TABLE-LOADED TO TRUE                     08220099
+               WHEN OTHER                                               08230099
+                   MOVE '7075-PROCESS-DATE-CSR' TO PV-PARAGRAPH-NAME    08240099
+                   MOVE PE-MSG-04 TO PV-OPERATION-ATTEMPTED             08250099
+                   PERFORM 9999-SQL-ABEND                               08260099
+           END-EVALUATE.                                                08270099
+      *                                                                 08280099
+           IF PV-SUB1 > 24                                              08290099
+               MOVE '7075-PROCESS-DATE-CSR' TO PV-PARAGRAPH-NAME        08300099
+               MOVE PE-MSG-15 TO PV-OPERATION-ATTEMPTED                 08310099
+               PERFORM 9999-SQL-ABEND                                   08320099
+           END-IF.                                                      08330099
+      *                                                                 08340099
+      *                                                                 08350099
+      *                                                                 08360099
+      ******************************************************************08370099
+      *                                                                 08380099
+      ******************************************************************08390099
+       7100-SELECT-DB2-DATES.                                           08400099
+      *                                                                 08410099
+           EXEC SQL                                                     08420099
+               SELECT  CAL_MN_NBR                                       08430099
+                      ,PFM_END_DTE                                      08440099
+                      ,SEA_BEG_DTE                                      08450099
+                      ,PREV_SEA_END_DTE                                 08460099
+                      ,FSCL_MN_NBR                                      08470099
+                      ,FSCL_YR_NBR                                      08480099
+                INTO  :DTATTR-CAL-MN-NBR                                08490099
+                     ,:DTATTR-PFM-END-DTE                               08500099
+                     ,:DTATTR-SEA-BEG-DTE                               08510099
+                     ,:DTATTR-PREV-SEA-END-DTE                          08520099
+                     ,:DTATTR-FSCL-MN-NBR                               08530099
+                     ,:DTATTR-FSCL-YR-NBR                               08540099
+                FROM TDTATTR                                            08550099
+                WHERE KY_DTE  = :PV-HOLD-DATE                           08560099
+           END-EXEC.                                                    08570099
+      *                                                                 08580099
+           EVALUATE SQLCODE                                             08590099
+               WHEN 0                                                   08600099
+                   DISPLAY 'CALENDAR MONTH       ', DTATTR-CAL-MN-NBR   08610099
+                   DISPLAY 'PREV MONTH END DTE   ', DTATTR-PFM-END-DTE  08620099
+                   DISPLAY 'SEASON BEGIN DATE    ', DTATTR-SEA-BEG-DTE  08630099
+                   DISPLAY 'PREV SEASON END DATE ',                     08640099
+                                                 DTATTR-PREV-SEA-END-DTE08650099
+                   DISPLAY 'FISCAL MONTH NBR     ', DTATTR-FSCL-MN-NBR  08660099
+                   DISPLAY 'FISCAL YEAR NBR      ', DTATTR-FSCL-YR-NBR  08670099
+               WHEN +100                                                08680099
+                   DISPLAY 'NO ROWS QUALIFY FOR RECALCULATION'          08690099
+               WHEN OTHER                                               08700099
+                  MOVE '7100-SELECT-DB2-DATES' TO PV-PARAGRAPH-NAME     08710099
+                  MOVE PE-MSG-02 TO PV-OPERATION-ATTEMPTED              08720099
+                  PERFORM 9999-SQL-ABEND                                08730099
+           END-EVALUATE.                                                08740099
+      *                                                                 08750099
+      *                                                                 08760099
+      ***************************************************************** 08770099
+      * POPULATE INTERNAL TABLE WITH DATES RELATED TO MONTH-END-DATE    08780099
+      ***************************************************************** 08790099
+       7125-LOAD-DATE-TABLE.                                            08800099
+           MOVE PV-HOLD-DATE            TO DT-OPN-MN-END-DTE(PV-SUB1).  08810099
+           MOVE DTATTR-CAL-MN-NBR       TO DT-CAL-MN-NBR(PV-SUB1).      08820099
+           MOVE DTATTR-PFM-END-DTE      TO DT-PFM-END-DTE(PV-SUB1)      08830099
+           MOVE DTATTR-SEA-BEG-DTE      TO DT-SEA-BEG-DTE(PV-SUB1).     08840099
+           MOVE DTATTR-PREV-SEA-END-DTE TO DT-PREV-SEA-END-DTE(PV-SUB1).08850099
+           MOVE DTATTR-FSCL-MN-NBR      TO DT-FSCL-MN-NBR(PV-SUB1).     08860099
+           MOVE DTATTR-FSCL-YR-NBR      TO DT-FSCL-YR-NBR(PV-SUB1).     08870099
+      *                                                                 08880099
+      *                                                                 08890099
+      ***************************************************************** 08900099
+      *                                                                 08910099
+      ***************************************************************** 08920099
+       7149-OPEN-MAJ-CL-CURSOR.                                         08930099
+      *                                                                 08940099
+           EXEC SQL                                                     08950099
+               OPEN MAJ_CL_CSR                                          08960099
+           END-EXEC                                                     08970099
+      *                                                                 08980099
+           EVALUATE SQLCODE                                             08990099
+               WHEN 0                                                   09000099
+                    CONTINUE                                            09010099
+               WHEN OTHER                                               09020099
+                  DISPLAY 'HOLD-DATE ', PV-HOLD-PFM-END-DTE             09030099
+                  DISPLAY 'MAX DATE  ', MLCNTL-MXPSTG-FSCL-MN-DTE       09040099
+                  MOVE '7149-OPEN-MAJ-CL-CSR' TO PV-PARAGRAPH-NAME      09050099
+                  MOVE PE-MSG-03 TO PV-OPERATION-ATTEMPTED              09060099
+                  PERFORM 9999-SQL-ABEND                                09070099
+           END-EVALUATE.                                                09080099
+      *                                                                 09090099
+      *                                                                 09100099
+      *                                                                 09110099
+      ***************************************************************** 09120099
+      * FETCH A DEPT / MCL TO PROCESS                                   09130099
+      ***************************************************************** 09140099
+       7150-PROCESS-MAJ-CL-CURSOR.                                      09150099
+      *                                                                 09160099
+           EXEC SQL                                                     09170099
+                  FETCH MAJ_CL_CSR                                      09180099
+                   INTO :MNMCL-DEPT-NBR                                 09190099
+                       ,:MNMCL-MAJ-CL-NBR                               09200099
+           END-EXEC                                                     09210099
+      *                                                                 09220099
+           EVALUATE SQLCODE                                             09230099
+               WHEN +0                                                  09240099
+                   CONTINUE                                             09250099
+               WHEN +100                                                09260099
+                   SET PS-END-OF-MAJ-CL-CURSOR TO TRUE                  09270099
+               WHEN OTHER                                               09280099
+                   MOVE '7150-PROCESS-MAJ-CL'  TO PV-PARAGRAPH-NAME     09290099
+                   MOVE PE-MSG-04              TO PV-OPERATION-ATTEMPTED09300099
+                   PERFORM 9999-SQL-ABEND                               09310099
+             END-EVALUATE.                                              09320099
+      *                                                                 09330099
+      *                                                                 09340099
+      ***************************************************************** 09350099
+      * RETRIEVES CURRENT MONTH SHRINK DOLLARS FROM TWKSHNK             09360099
+      ***************************************************************** 09370099
+*AML   7200-OBTAIN-SHRINK-DLRS.                                         09380099
+      *                                                                 09390099
+            EXEC SQL                                                    09400099
+                SELECT SUM(SHNK_RTL_AMT)                                09410099
+                 INTO  :PV-SHNK-RTL-AMT                                 09420099
+                 FROM  TWKSHNK                                          09430099
+                WHERE DEPT_NBR        = :PV-HOLD-DEPT-NBR               09440099
+                  AND SUB_CL_NBR  BETWEEN :PV-HOLD-MAJ-CL-NBR AND       09450099
+                                          :PV-HOLD-MAX-MAJ-CL-NBR       09460099
+                  AND FSCL_MN_END_DTE = :PV-HOLD-OPN-MN-END-DTE         09470099
+            END-EXEC.                                                   09480099
+                                                                        09490099
+           EVALUATE SQLCODE                                             09500099
+               WHEN 0                                                   09510099
+                   CONTINUE                                             09520099
+               WHEN -305                                                09530099
+                   MOVE +0            TO PV-SHNK-RTL-AMT                09540099
+               WHEN OTHER                                               09550099
+                  MOVE '7200-OBTAIN-SHRINK-DLRS' TO PV-PARAGRAPH-NAME   09560099
+                  MOVE PE-MSG-02 TO PV-OPERATION-ATTEMPTED              09570099
+                  PERFORM 9999-SQL-ABEND                                09580099
+           END-EVALUATE.                                                09590099
+      *                                                                 09600099
+      *                                                                 09610099
+      ***************************************************************** 09620099
+      * SELECT A ROW FROM DB2 TO BE RECALCED & UPDATED (OR INSERT/UPD)  09630099
+      ***************************************************************** 09640099
+       7300-SELECT-CURRENT-DOLLARS.                                     09650099
+      *                                                                 09660099
+           EXEC SQL                                                     09670099
+                SELECT  SLS_RTL_AMT                                     09680099
+                       ,MKDN_RTL_AMT                                    09690099
+                       ,MKUP_RTL_AMT                                    09700099
+                       ,XFER_IN_RTL_AMT                                 09710099
+                       ,XFER_OUT_RTL_AMT                                09720099
+                       ,RCPT_RTL_AMT                                    09730099
+                       ,PADJ_RTL_AMT                                    09740099
+                       ,INV_ADJ_RTL_AMT                                 09750099
+                  INTO :MNMCL-SLS-RTL-AMT                               09760099
+                      ,:MNMCL-MKDN-RTL-AMT                              09770099
+                      ,:MNMCL-MKUP-RTL-AMT                              09780099
+                      ,:MNMCL-XFER-IN-RTL-AMT                           09790099
+                      ,:MNMCL-XFER-OUT-RTL-AMT                          09800099
+                      ,:MNMCL-RCPT-RTL-AMT                              09810099
+                      ,:MNMCL-PADJ-RTL-AMT                              09820099
+                      ,:MNMCL-INV-ADJ-RTL-AMT                           09830099
+                  FROM TMNMCL                                           09840099
+                 WHERE FSCL_MN_NBR     = :PV-HOLD-FSCL-MN-NBR           09850099
+                   AND FSCL_MN_END_DTE = :PV-HOLD-OPN-MN-END-DTE        09860099
+                   AND DEPT_NBR        = :PV-HOLD-DEPT-NBR              09870099
+                   AND MAJ_CL_NBR      = :PV-HOLD-MAJ-CL-NBR            09880099
+           END-EXEC                                                     09890099
+      *                                                                 09900099
+           EVALUATE SQLCODE                                             09910099
+               WHEN +0                                                  09920099
+                   CONTINUE                                             09930099
+               WHEN +100                                                09940099
+                 SET PS-CURR-MONTH-ROW-NOT-FOUND   TO TRUE              09950099
+               WHEN OTHER                                               09960099
+                   MOVE '7300-SELECT-CURRENT'  TO PV-PARAGRAPH-NAME     09970099
+                   MOVE PE-MSG-04              TO PV-OPERATION-ATTEMPTED09980099
+                   PERFORM 9999-SQL-ABEND                               09990099
+             END-EVALUATE.                                              10000099
+      *                                                                 10010099
+      *                                                                 10020099
+      ******************************************************************10030099
+      * RETRIEVE LAST MONTH'S ENDING INVENTORY RETAIL/COST              10040099
+      *     THIS IS ALSO THE BEGINNING INVENTORY FOR THIS MONTH         10050099
+      ******************************************************************10060099
+       7350-SELECT-PREV-MONTH-END-INV.                                  10070099
+      *                                                                 10080099
+           EXEC SQL                                                     10090099
+                SELECT  END_INV_RTL_AMT                                 10100099
+                      , END_INV_COST_AMT                                10110099
+                  INTO  :PV-PREV-MONTH-END-INV-RTL                      10120099
+                       ,:PV-PREV-MONTH-END-INV-COST                     10130099
+                  FROM  TMNMCL                                          10140099
+                 WHERE (       DEPT_NBR = :PV-HOLD-DEPT-NBR)            10150099
+                   AND (     MAJ_CL_NBR = :PV-HOLD-MAJ-CL-NBR)          10160099
+                   AND (FSCL_MN_END_DTE = :PV-HOLD-PFM-END-DTE)         10170099
+           END-EXEC.                                                    10180099
+      *                                                                 10190099
+           EVALUATE SQLCODE                                             10200099
+               WHEN 0                                                   10210099
+                   IF ((PV-PREV-MONTH-END-INV-RTL  NOT = 0) OR          10220099
+                       (PV-PREV-MONTH-END-INV-COST NOT = 0))            10230099
+                       SET PS-PFM-INV-DOLLARS-FOUND TO TRUE             10240099
+                   END-IF                                               10250099
+               WHEN +100                                                10260099
+                   SET PS-PREV-MONTH-ROW-NOT-FOUND TO TRUE              10270099
+                   MOVE ZEROES TO PV-PREV-MONTH-END-INV-RTL             10280099
+                                  PV-PREV-MONTH-END-INV-COST            10290099
+               WHEN OTHER                                               10300099
+                   MOVE PE-MSG-02            TO PV-OPERATION-ATTEMPTED  10310099
+                   MOVE  '7350-SELECT-PREV-MONTH-END-INV'               10320099
+                                             TO PV-PARAGRAPH-NAME       10330099
+                   PERFORM 9999-SQL-ABEND                               10340099
+           END-EVALUATE.                                                10350099
+      *                                                                 10360099
+      *                                                                 10370099
+      ******************************************************************10380099
+      * 7400-PREV-SEASON-END-INV SELECTS THE ENDING INVENTORY COST &   *10390099
+      *      RETAIL FROM THE LAST DAY OF THE PREVIOUS FISCAL SEASON    *10400099
+      ******************************************************************10410099
+       7400-PREV-SEASON-END-INV.                                        10420099
+      *                                                                 10430099
+           MOVE 'N'    TO PS-PREV-SEASON-INV-SW.                        10440099
+      *                                                                 10450099
+           EXEC SQL                                                     10460099
+                SELECT  END_INV_RTL_AMT                                 10470099
+                       ,END_INV_COST_AMT                                10480099
+                  INTO  :MNMCL-END-INV-RTL-AMT                          10490099
+                       ,:MNMCL-END-INV-COST-AMT                         10500099
+                  FROM  TMNMCL                                          10510099
+                 WHERE (DEPT_NBR =        :PV-HOLD-DEPT-NBR)            10520099
+                   AND (MAJ_CL_NBR =      :PV-HOLD-MAJ-CL-NBR)          10530099
+                   AND (FSCL_MN_END_DTE = :PV-HOLD-PREV-SEA-END-DTE)    10540099
+           END-EXEC.                                                    10550099
+      *                                                                 10560099
+           EVALUATE SQLCODE                                             10570099
+               WHEN 0                                                   10580099
+                   CONTINUE                                             10590099
+               WHEN +100                                                10600099
+                   SET PS-NO-PREV-SEASONAL-INV       TO TRUE            10610099
+               WHEN OTHER                                               10620099
+                   MOVE PE-MSG-02            TO PV-OPERATION-ATTEMPTED  10630099
+                   MOVE  '7400-PREV-SEASON-END-INV'                     10640099
+                                             TO PV-PARAGRAPH-NAME       10650099
+                   PERFORM 9999-SQL-ABEND                               10660099
+           END-EVALUATE.                                                10670099
+      *                                                                 10680099
+      *                                                                 10690099
+      ***************************************************************** 10700099
+      * OPEN CURSOR FOR MONTH-END VALUES FOR THIS SEASON                10710099
+      ***************************************************************** 10720099
+       7425-OPEN-SEASON-CURSOR.                                         10730099
+      *                                                                 10740099
+           EXEC SQL                                                     10750099
+               OPEN SEASON_TO_DATE_CSR                                  10760099
+           END-EXEC                                                     10770099
+      *                                                                 10780099
+           IF SQLCODE = +0                                              10790099
+               CONTINUE                                                 10800099
+           ELSE                                                         10810099
+               MOVE PE-MSG-03                 TO PV-OPERATION-ATTEMPTED 10820099
+               MOVE '7425-OPEN-SEASON-CURSOR' TO PV-PARAGRAPH-NAME      10830099
+               PERFORM 9999-SQL-ABEND                                   10840099
+           END-IF.                                                      10850099
+      *                                                                 10860099
+      *                                                                 10870099
+      ******************************************************************10880099
+      * 7450-PROCESS-SEASON-CURSOR WILL RETRIEVE ALL ROWS WITH AN ENDING10890099
+      * INVENTORY AMOUNT FOR EACH MONTH END DATE FOR THE CURRENT SEASON.10900099
+      ******************************************************************10910099
+       7450-PROCESS-SEASONAL-CURSOR.                                    10920099
+      *                                                                 10930099
+           MOVE 'N'    TO PS-CURR-SEASON-CURSOR-SW.                     10940099
+      *                                                                 10950099
+           EXEC SQL                                                     10960099
+                 FETCH SEASON_TO_DATE_CSR                               10970099
+**NET             INTO  :MNMCL-XFER-IN-RTL-AMT                          10980099
+**NET                  ,:MNMCL-XFER-OUT-RTL-AMT                         10990099
+                       ,:MNMCL-RCPT-RTL-AMT                             11000099
+                       ,:MNMCL-RCPT-NET-COST-AMT                        11010099
+                       ,:MNMCL-PADJ-RTL-AMT                             11020099
+                       ,:MNMCL-PADJ-NET-COST-AMT                        11030099
+                       ,:MNMCL-MKUP-RTL-AMT                             11040099
+           END-EXEC.                                                    11050099
+      *                                                                 11060099
+           EVALUATE SQLCODE                                             11070099
+                WHEN 0                                                  11080099
+                    CONTINUE                                            11090099
+                WHEN +100                                               11100099
+                    SET PS-END-OF-CURR-SEASON-CSR    TO TRUE            11110099
+                WHEN OTHER                                              11120099
+                    MOVE PE-MSG-04             TO PV-OPERATION-ATTEMPTED11130099
+                    MOVE '7450-PROCESS-SEASONAL-CURSOR'                 11140099
+                                               TO PV-PARAGRAPH-NAME     11150099
+                    PERFORM 9999-SQL-ABEND                              11160099
+           END-EVALUATE.                                                11170099
+      *                                                                 11180099
+      *                                                                 11190099
+      ******************************************************************11200099
+      * 7475-CURR-SEASON-COST SELECTS THE ENDING INVENTORY COST &      *11210099
+      *      RETAIL FROM THE LAST DAY OF THE PREVIOUS FISCAL SEASON    *11220099
+      ******************************************************************11230099
+       7475-CURR-SEASON-COST.                                           11240099
+                                                                        11250099
+           MOVE 'N'    TO PS-CURRENT-PURCH-COST-SW.                     11260099
+      *                                                                 11270099
+           EXEC SQL                                                     11280099
+                SELECT  RCPT_NET_COST_AMT                               11290099
+                       ,PADJ_NET_COST_AMT                               11300099
+                  INTO  :PV-CURR-MONTH-RCPT-NET-COST                    11310099
+                       ,:PV-CURR-MONTH-PADJ-NET-COST                    11320099
+                  FROM  TMNMCL                                          11330099
+                 WHERE (DEPT_NBR =        :PV-HOLD-DEPT-NBR)            11340099
+                   AND (MAJ_CL_NBR =      :PV-HOLD-MAJ-CL-NBR)          11350099
+                   AND (FSCL_MN_END_DTE = :PV-HOLD-OPN-MN-END-DTE)      11360099
+           END-EXEC.                                                    11370099
+      *                                                                 11380099
+           EVALUATE SQLCODE                                             11390099
+               WHEN 0                                                   11400099
+                   CONTINUE                                             11410099
+               WHEN +100                                                11420099
+                   SET PS-NO-CURRENT-PURCH-COSTS     TO TRUE            11430099
+               WHEN OTHER                                               11440099
+                   MOVE PE-MSG-02            TO PV-OPERATION-ATTEMPTED  11450099
+                   MOVE  '7475-CURRENT-SEASON-COST'                     11460099
+                                             TO PV-PARAGRAPH-NAME       11470099
+                   PERFORM 9999-SQL-ABEND                               11480099
+           END-EVALUATE.                                                11490099
+      *                                                                 11500099
+      *                                                                 11510099
+      ******************************************************************11520099
+      * UPDATE COLUMNS WITH VALUES JUST CALCULATED FOR THIS DEPARTMENT  11530099
+      ******************************************************************11540099
+       7500-UPDATE-PROCESSING.                                          11550099
+      *                                                                 11560099
+           EXEC SQL                                                     11570099
+               UPDATE TMNMCL                                            11580099
+                  SET  SHNK_RTL_AMT     = :PV-SHNK-RTL-AMT              11590099
+                      ,END_INV_RTL_AMT  = :PV-END-INV-RTL-AMT           11600099
+                      ,CUM_MKUP_PCT     = :PV-CUM-MKUP-PCT              11610099
+                      ,END_INV_COST_AMT = :PV-END-INV-COST-AMT          11620099
+                      ,SLS_COST_AMT     = :PV-SLS-COST-AMT              11630099
+                      ,GRO_MRGN_AMT     = :PV-GRO-MRGN-AMT              11640099
+                WHERE FSCL_MN_NBR       = :PV-HOLD-FSCL-MN-NBR          11650099
+                  AND FSCL_MN_END_DTE   = :PV-HOLD-OPN-MN-END-DTE       11660099
+                  AND DEPT_NBR          = :PV-HOLD-DEPT-NBR             11670099
+                  AND MAJ_CL_NBR        = :PV-HOLD-MAJ-CL-NBR           11680099
+           END-EXEC                                                     11690099
+  *                                                                     11700099
+           EVALUATE SQLCODE                                             11710099
+               WHEN 0                                                   11720099
+                    ADD 1                TO PA-UPDATE-COUNT             11730099
+               WHEN OTHER                                               11740099
+                    DISPLAY '*************************************'     11750099
+                    DISPLAY 'ROW IN PROCESS  : ', PV-HOLD-ROW           11760099
+                    DISPLAY 'MONTH-END-DATE  : ',                       11770099
+                                              PV-HOLD-OPN-MN-END-DTE    11780099
+                    DISPLAY 'FISCAL MONTH NBR: ',                       11790099
+                                                 PV-HOLD-FSCL-MN-NBR    11800099
+                    MOVE PE-MSG-06        TO PV-OPERATION-ATTEMPTED     11810099
+                    MOVE '7500-UPDATE-PROCESSING'                       11820099
+                                          TO PV-PARAGRAPH-NAME          11830099
+                    PERFORM 9999-SQL-ABEND                              11840099
+           END-EVALUATE.                                                11850099
+      *                                                                 11860099
+      *                                                                 11870099
+      ******************************************************************11880099
+      * PERFORMED BY END OF JOB PROCESSING                              11890099
+      ******************************************************************11900099
+       7550-CLOSE-MAJ-CL-CURSOR.                                        11910099
+           EXEC SQL                                                     11920099
+               CLOSE MAJ_CL_CSR                                         11930099
+           END-EXEC.                                                    11940099
+      *                                                                 11950099
+           EVALUATE SQLCODE                                             11960099
+               WHEN 0                                                   11970099
+                   CONTINUE                                             11980099
+               WHEN OTHER                                               11990099
+                   MOVE PE-MSG-05            TO PV-OPERATION-ATTEMPTED  12000099
+                   MOVE  '7550-CLOSE-MAJ-CL-CSR ' TO PV-PARAGRAPH-NAME  12010099
+                   PERFORM 9999-SQL-ABEND                               12020099
+           END-EVALUATE.                                                12030099
+      *                                                                 12040099
+      *                                                                 12050099
+      ******************************************************************12060099
+      *                                                                 12070099
+      ******************************************************************12080099
+       7575-CLOSE-SEASON-CURSOR.                                        12090099
+      *                                                                 12100099
+           EXEC SQL                                                     12110099
+               CLOSE SEASON_TO_DATE_CSR                                 12120099
+           END-EXEC.                                                    12130099
+      *                                                                 12140099
+           EVALUATE SQLCODE                                             12150099
+               WHEN 0                                                   12160099
+                   CONTINUE                                             12170099
+               WHEN OTHER                                               12180099
+                   MOVE PE-MSG-05            TO PV-OPERATION-ATTEMPTED  12190099
+                   MOVE '7575-CLOSE-SEASON-CURSOR' TO PV-PARAGRAPH-NAME 12200099
+                   PERFORM 9999-SQL-ABEND                               12210099
+           END-EVALUATE.                                                12220099
+      *                                                                 12230099
+      *                                                                 12240099
+      ******************************************************************12250099
+      * 7600-GET-COMMIT-TIMESTAMP.                                     *12260099
+      *   GET THE TIMESTAMP FROM THE CHECKPOINT TABLE FOR NEXT COMMIT  *12270099
+      ******************************************************************12280099
+       7600-GET-COMMIT-TIMESTAMP.                                       12290099
+      *                                                                 12300099
+           EXEC SQL                                                     12310099
+             SELECT (CURRENT TIMESTAMP + CKPT_FRQNCY_QTY SECONDS)       12320099
+               INTO :PV-COMMIT-TIMESTAMP                                12330099
+               FROM TCKRSTCNTL                                          12340099
+              WHERE JOB_NAME  = :PC-JOB-NAME                            12350099
+                AND PLAN_NAME = :PC-PROGRAM-NAME                        12360099
+           END-EXEC.                                                    12370099
+      *                                                                 12380099
+           EVALUATE TRUE                                                12390099
+               WHEN SQLCODE = 0                                         12400099
+                   CONTINUE                                             12410099
+               WHEN SQLCODE NOT EQUAL ZERO                              12420099
+                   MOVE '7600-GET-COMMIT-TIMESTAMP' TO PV-PARAGRAPH-NAME12430099
+                   MOVE PE-MSG-07             TO PV-OPERATION-ATTEMPTED 12440099
+                   PERFORM 9999-SQL-ABEND                               12450099
+           END-EVALUATE.                                                12460099
+      *                                                                 12470099
+      *                                                                 12480099
+      ******************************************************************12490099
+      * 7650-INIT-CHECKPOINT-SELECT                                    *12500099
+      * CHECK STATUS CODE TO SEE IF THIS IS A RESTART CONDITION        *12510099
+      ******************************************************************12520099
+       7650-INIT-CHECKPOINT-SELECT.                                     12530099
+      *                                                                 12540099
+           EXEC SQL                                                     12550099
+             SELECT  CKPT_STAT_CODE                                     12560099
+                    ,CKPT_FRQNCY_QTY                                    12570099
+               INTO  :TCKRSTCNTL-CKPT-STAT-CODE                         12580099
+                    ,:TCKRSTCNTL-CKPT-FRQNCY-QTY                        12590099
+               FROM  TCKRSTCNTL                                         12600099
+              WHERE  JOB_NAME  = :PC-JOB-NAME                           12610099
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                       12620099
+           END-EXEC.                                                    12630099
+      *                                                                 12640099
+           IF SQLCODE = 0                                               12650099
+               CONTINUE                                                 12660099
+           ELSE                                                         12670099
+               MOVE '7650-INIT-CHECKPOINT-SELECT' TO PV-PARAGRAPH-NAME  12680099
+               MOVE PE-MSG-07             TO PV-OPERATION-ATTEMPTED     12690099
+               PERFORM 9999-SQL-ABEND                                   12700099
+           END-IF.                                                      12710099
+      *                                                                 12720099
+      *                                                                 12730099
+      ******************************************************************12740099
+      * 7700-SELECT-RESTART-INFO                                       *12750099
+      * OBTAIN INFORMATION REGARDING WHERE TO RESTART TABLE PROCESSING *12760099
+      ******************************************************************12770099
+       7700-SELECT-RESTART-INFO.                                        12780099
+      *                                                                 12790099
+           EXEC SQL                                                     12800099
+             SELECT  WORK_STRG_DESC                                     12810099
+               INTO  :TCKRSTINF-WORK-STRG-DESC                          12820099
+               FROM  TCKRSTINF                                          12830099
+              WHERE  JOB_NAME  = :PC-JOB-NAME                           12840099
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                       12850099
+           END-EXEC.                                                    12860099
+      *                                                                 12870099
+           IF SQLCODE = 0                                               12880099
+               CONTINUE                                                 12890099
+           ELSE                                                         12900099
+               MOVE '*7700-SELECT-RESTART-INFO*' TO PV-PARAGRAPH-NAME   12910099
+               MOVE PE-MSG-11             TO PV-OPERATION-ATTEMPTED     12920099
+               PERFORM 9999-SQL-ABEND                                   12930099
+           END-IF.                                                      12940099
+      *                                                                 12950099
+      *                                                                 12960099
+      ******************************************************************12970099
+      * 7750-SET-CURRENT-TIMESTAMP.                                    *12980099
+      * CURRENT TIMESTAMP SET TO BE COMPARED TO COMMIT TIMESTAMP       *12990099
+      ******************************************************************13000099
+       7750-SET-CURRENT-TIMESTAMP.                                      13010099
+      *                                                                 13020099
+           EXEC SQL                                                     13030099
+                SET :PV-CURRENT-TIMESTAMP = CURRENT TIMESTAMP           13040099
+           END-EXEC.                                                    13050099
+      *                                                                 13060099
+           IF SQLCODE = 0                                               13070099
+               CONTINUE                                                 13080099
+           ELSE                                                         13090099
+               MOVE PE-MSG-12             TO PV-OPERATION-ATTEMPTED     13100099
+               MOVE '*7750-SET-CURRENT-TIMESTAMP*' TO PV-PARAGRAPH-NAME 13110099
+               PERFORM 9999-SQL-ABEND                                   13120099
+           END-IF.                                                      13130099
+      *                                                                 13140099
+      *                                                                 13150099
+      ******************************************************************13160099
+      * 7800-COMMIT-PROCESSING.                                        *13170099
+      * COMPARE COMMIT TIMESTAMP TO CURRENT TO DETERMINE IF COMMIT REQD*13180099
+      ******************************************************************13190099
+       7800-COMMIT-PROCESSING.                                          13200099
+           MOVE '*7800-COMMIT-PROCESSING*'    TO PV-PARAGRAPH-NAME.     13210099
+      *                                                                 13220099
+           PERFORM 7750-SET-CURRENT-TIMESTAMP.                          13230099
+      *                                                                 13240099
+           IF (PV-CURRENT-TIMESTAMP > PV-COMMIT-TIMESTAMP)  OR          13250099
+              (PS-END-OF-MAJ-CL-CURSOR)                                 13260099
+      * PREPARE COMMIT RECORD FOR UPDATE                                13270099
+               ADD 1                          TO PA-COMMIT-COUNT        13280099
+               MOVE PV-HOLD-OPN-MN-END-DTE    TO CR-FISCAL-MN-END-DTE   13290099
+               MOVE PV-HOLD-FSCL-MN-NBR       TO CR-FISCAL-MN-NBR       13300099
+               MOVE PV-HOLD-DEPT-NBR          TO CR-DEPT-NBR            13310099
+               MOVE PV-HOLD-MAJ-CL-NBR        TO CR-MAJ-CL-NBR          13320099
+               MOVE PA-DEPT-MCL-COUNT         TO CR-TMNMCL-FETCH-COUNT  13330099
+               MOVE PA-UPDATE-COUNT           TO CR-TMNMCL-UPDATE-COUNT 13340099
+               MOVE PA-INSERT-COUNT           TO CR-TMNMCL-INSERT-COUNT 13350099
+               MOVE PA-COMMIT-COUNT           TO CR-TMNMCL-COMMIT-COUNT 13360099
+      * MOVE COMMIT INFO TO WORKING STORAGE ROW                         13370099
+               MOVE CR-CHECKPOINT-RESTART-AREA TO                       13380099
+                                                TCKRSTINF-WORK-STRG-DESC13390099
+               IF PS-FIRST-COMMIT                                       13400099
+                   MOVE '9' TO TCKRSTCNTL-CKPT-STAT-CODE                13410099
+                   PERFORM 7900-UPDATE-CHECKPOINT-STATUS                13420099
+                   MOVE 'N' TO PS-FIRST-COMMIT-SW                       13430099
+               END-IF                                                   13440099
+      *                                                                 13450099
+               PERFORM 7850-COMMIT-CHANGES                              13460099
+      *                                                                 13470099
+               MOVE 1 TO PV-SUB1                                        13480099
+               PERFORM 2800-FORMAT-DATES                                13490099
+               PERFORM 7149-OPEN-MAJ-CL-CURSOR                          13500099
+      * REOPEN CURSOR AND REPOSITION TO CORRECT ROW FOLLOWING A 'COMMIT'13510099
+               PERFORM 7999-REPOSITION-CURSOR                           13520099
+                   UNTIL PS-RESTART-KEY-ESTABLISHED                     13530099
+                   OR    PS-END-OF-MAJ-CL-CURSOR                        13540099
+      *                                                                 13550099
+               PERFORM 7600-GET-COMMIT-TIMESTAMP                        13560099
+           END-IF.                                                      13570099
+      *                                                                 13580099
+      *                                                                 13590099
+      ******************************************************************13600099
+      * 7850-COMMIT-CHANGES.                                            13610099
+      * UPDATE CHECKPOINT INFORMATION TABLE. TAKE A COMMIT.             13620099
+      ******************************************************************13630099
+       7850-COMMIT-CHANGES.                                             13640099
+      *                                                                 13650099
+           EXEC SQL                                                     13660099
+             UPDATE TCKRSTINF                                           13670099
+                SET WORK_STRG_DESC = :TCKRSTINF-WORK-STRG-DESC          13680099
+              WHERE JOB_NAME       = :PC-JOB-NAME                       13690099
+                AND PLAN_NAME      = :PC-PROGRAM-NAME                   13700099
+           END-EXEC.                                                    13710099
+      *                                                                 13720099
+           IF SQLCODE = 0                                               13730099
+               CONTINUE                                                 13740099
+           ELSE                                                         13750099
+               MOVE PE-MSG-08                  TO PV-OPERATION-ATTEMPTED13760099
+               MOVE  '* 7850-COMMIT-CHANGES *' TO PV-PARAGRAPH-NAME     13770099
+               PERFORM 9999-SQL-ABEND                                   13780099
+           END-IF.                                                      13790099
+      *                                                                 13800099
+           EXEC SQL                                                     13810099
+               COMMIT                                                   13820099
+           END-EXEC.                                                    13830099
+      *                                                                 13840099
+           IF SQLCODE = 0                                               13850099
+               CONTINUE                                                 13860099
+           ELSE                                                         13870099
+               MOVE PE-MSG-09                  TO PV-OPERATION-ATTEMPTED13880099
+               MOVE  '* 7850-COMMIT-CHANGES *' TO PV-PARAGRAPH-NAME     13890099
+               PERFORM 9999-SQL-ABEND                                   13900099
+           END-IF.                                                      13910099
+      *                                                                 13920099
+      *                                                                 13930099
+      ******************************************************************13940099
+      * UPDATE CHECKPOINT STATUS                                        13950099
+      ******************************************************************13960099
+       7900-UPDATE-CHECKPOINT-STATUS.                                   13970099
+      *                                                                 13980099
+           EXEC SQL                                                     13990099
+             UPDATE  TCKRSTCNTL                                         14000099
+                SET  CKPT_STAT_CODE = :TCKRSTCNTL-CKPT-STAT-CODE        14010099
+              WHERE  JOB_NAME  = :PC-JOB-NAME                           14020099
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                       14030099
+           END-EXEC.                                                    14040099
+      *                                                                 14050099
+           IF SQLCODE = 0                                               14060099
+               CONTINUE                                                 14070099
+           ELSE                                                         14080099
+               MOVE '7900-UPDATE-CHECKPOINT-STATUS' TO PV-PARAGRAPH-NAME14090099
+               MOVE PE-MSG-10                  TO PV-OPERATION-ATTEMPTED14100099
+               PERFORM 9999-SQL-ABEND                                   14110099
+           END-IF.                                                      14120099
+      *                                                                 14130099
+           EJECT                                                        14140099
+      *                                                                 14150099
+      *                                                                 14160099
+      ******************************************************************14170099
+      * 7950-INSERT-CARRY-FWD-ROW                                       14180099
+      * PERFORMED IF NO ROW IS FOUND ON DB2 (FOR THIS PROCESSING MONTH) 14190099
+      * BUT INVENTORY DOLLARS (COST AND/OR RETAIL) FOUND FOR LAST MONTH 14200099
+      ******************************************************************14210099
+       7950-INSERT-CARRY-FWD-ROW.                                       14220099
+      *                                                                 14230099
+           DISPLAY 'INSERTED ROW : ', PV-HOLD-DEPT-NBR, '-',            14240099
+             PV-HOLD-MAJ-CL-NBR, ' ', PV-HOLD-OPN-MN-END-DTE            14250099
+      *                                                                 14260099
+           EXEC SQL                                                     14270099
+               INSERT INTO TMNMCL                                       14280099
+                   ( FSCL_MN_NBR                                        14290099
+                    ,FSCL_MN_END_DTE                                    14300099
+                    ,DEPT_NBR                                           14310099
+                    ,MAJ_CL_NBR                                         14320099
+                    ,SLS_RTL_AMT                                        14330099
+                    ,MKDN_RTL_AMT                                       14340099
+                    ,MKUP_RTL_AMT                                       14350099
+                    ,XFER_IN_RTL_AMT                                    14360099
+                    ,XFER_OUT_RTL_AMT                                   14370099
+                    ,RCPT_RTL_AMT                                       14380099
+                    ,RCPT_NET_COST_AMT                                  14390099
+                    ,PADJ_RTL_AMT                                       14400099
+                    ,PADJ_NET_COST_AMT                                  14410099
+                    ,INV_ADJ_RTL_AMT                                    14420099
+                    ,SHNK_RTL_AMT                                       14430099
+                    ,END_INV_RTL_AMT                                    14440099
+                    ,CUM_MKUP_PCT                                       14450099
+                    ,END_INV_COST_AMT                                   14460099
+                    ,SLS_COST_AMT                                       14470099
+                    ,GRO_MRGN_AMT )                                     14480099
+               VALUES (:PV-HOLD-FSCL-MN-NBR                             14490099
+                      ,:PV-HOLD-OPN-MN-END-DTE                          14500099
+                      ,:PV-HOLD-DEPT-NBR                                14510099
+                      ,:PV-HOLD-MAJ-CL-NBR                              14520099
+                      ,0                                                14530099
+                      ,0                                                14540099
+                      ,0                                                14550099
+                      ,0                                                14560099
+                      ,0                                                14570099
+                      ,0                                                14580099
+                      ,0                                                14590099
+                      ,0                                                14600099
+                      ,0                                                14610099
+                      ,0                                                14620099
+                      ,0                                                14630099
+                      ,:PV-PREV-MONTH-END-INV-RTL                       14640099
+                      ,0                                                14650099
+                      ,:PV-PREV-MONTH-END-INV-COST                      14660099
+                      ,0                                                14670099
+                      ,0  )                                             14680099
+           END-EXEC                                                     14690099
+      *                                                                 14700099
+           IF SQLCODE = 0                                               14710099
+               ADD 1                      TO PA-INSERT-COUNT            14720099
+           ELSE                                                         14730099
+               MOVE '7950-INSERT-CARRY-FWD-ROW' TO PV-PARAGRAPH-NAME    14740099
+               MOVE PE-MSG-14             TO PV-OPERATION-ATTEMPTED     14750099
+               PERFORM 9999-SQL-ABEND                                   14760099
+           END-IF.                                                      14770099
+      *                                                                 14780099
+      *                                                                 14790099
+      ******************************************************************14800099
+      *  FIND RESTART RECORD AND CKPT RESTART AT POINT OF LAST COMMIT. *14810099
+      ******************************************************************14820099
+       7999-REPOSITION-CURSOR.                                          14830099
+      *                                                                 14840099
+           PERFORM 7150-PROCESS-MAJ-CL-CURSOR.                          14850099
+                                                                        14860099
+           IF MNMCL-DEPT-NBR > PV-HOLD-DEPT-NBR                         14870099
+               SET PS-RESTART-KEY-ESTABLISHED TO TRUE                   14880099
+           ELSE                                                         14890099
+               IF MNMCL-MAJ-CL-NBR > PV-HOLD-MAJ-CL-NBR                 14900099
+                   SET PS-RESTART-KEY-ESTABLISHED TO TRUE               14910099
+               END-IF                                                   14920099
+           END-IF.                                                      14930099
+      * RESTART KEY AND HOLD KEY SET EQUAL                              14940099
+           IF PS-RESTART-KEY-ESTABLISHED                                14950099
+               MOVE MNMCL-DEPT-NBR   TO PV-HOLD-DEPT-NBR                14960099
+               MOVE MNMCL-MAJ-CL-NBR TO PV-HOLD-MAJ-CL-NBR              14970099
+           END-IF.                                                      14980099
+      *                                                                 14990099
+      *                                                                 15000099
+      ******************************************************************15010099
+      *  RESET STATUS CODE, DISPLAY FINAL COUNTS , CLOSE INPUT FILE    *15020099
+      ******************************************************************15030099
+       8000-EOJ-ROUTINE.                                                15040099
+      *                                                                 15050099
+      *    COMMIT ANY FINAL CHANGES THAT MAY HAVE BEEN MADE             15060099
+           IF PS-EMPTY-RESULT-TABLE                                     15070099
+               CONTINUE                                                 15080099
+           ELSE                                                         15090099
+               PERFORM 7800-COMMIT-PROCESSING                           15100099
+               PERFORM 7550-CLOSE-MAJ-CL-CURSOR                         15110099
+           END-IF.                                                      15120099
+                                                                        15130099
+           MOVE '0' TO TCKRSTCNTL-CKPT-STAT-CODE.                       15140099
+           PERFORM 7900-UPDATE-CHECKPOINT-STATUS.                       15150099
+      *                                                                 15160099
+           DISPLAY '                                             '.     15170099
+           DISPLAY '******* END OF JOB STATISTICS ********'.            15180099
+           DISPLAY '                                             '.     15190099
+           DISPLAY 'DEPT/MCL ROWS PROCESSED ', PA-DEPT-MCL-COUNT.       15200099
+           DISPLAY '  TMNMCL ROWS UPDATED   ', PA-UPDATE-COUNT.         15210099
+           DISPLAY '  TMNMCL ROWS INSERTED  ', PA-INSERT-COUNT.         15220099
+           DISPLAY '                                             '.     15230099
+           DISPLAY '  COMMITS TAKEN         ', PA-COMMIT-COUNT.         15240099
+           DISPLAY '                                             '.     15250099
+           DISPLAY 'EOJ EOJ EOJ EOJ EOJ EOJ EOJ EOJ EOJ EOJ EOJ EOJ '.  15260099
+      *                                                                 15270099
+      *                                                                 15280099
+      ******************************************************************15290099
+      *  STANDARD DB2 ERROR ABEND ROUTINE                               15300099
+      *  THIS ROUTINE FORCES AN ABEND DUE TO A DB2 PROBLEM.             15310099
+      ******************************************************************15320099
+       9999-SQL-ABEND.                                                  15330099
+                                                                        15340099
+           MOVE +4013                 TO ABEND-CODE.                    15350099
+           DISPLAY '**  ABEND     **'.                                  15360099
+           DISPLAY '**  PROGRAM   ** => ' PC-PROGRAM-NAME.              15370099
+           DISPLAY '**  PARAGRAPH **  = ' PV-PARAGRAPH-NAME.            15380099
+           DISPLAY '**  OPERATION **  = ' PV-OPERATION-ATTEMPTED.       15390099
+                                                                        15400099
+      *    THE FOLLOWING COPYBOOK UTILIZES THE DB2 ABEND MODULE         15410099
+      *    DSNTIAR TO CONVERT SQLCA INTO UNDERSTANDABLE VERBAGE.        15420099
+                                                                        15430099
+           COPY DPPD004.                                                15440099
+           CALL 'ILBOABN0'  USING ABEND-CODE.                           15450099
+      *                                                                 15460099

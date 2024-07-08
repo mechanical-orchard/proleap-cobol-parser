@@ -1,0 +1,604 @@
+       IDENTIFICATION DIVISION.                                         00010004
+       PROGRAM-ID.      INKUP175.                                       00020004
+       AUTHOR.          THERESE RAMSEYER                                00030004
+       DATE-WRITTEN.    05/13/09.                                       00040004
+      *                                                                 00050004
+      ******************************************************************00060004
+      * PURPOSE:  THIS PROGRAM IS A 48 MONTH ROLLING PURGE TO           00070006
+      *   DELETE INACTIVE CYCLE INFORMATION BY INV_ID FROM:             00080004
+      *                                                                 00090004
+      *   TINCNTL                                                       00100004
+      *   TINVPAR                                                       00110004
+      *   TINVLAP                                                       00120004
+      *   INT_INV_PARM_MDSE                                             00130004
+      *                                                                 00140004
+      *   THE PROGRAM WILL OPEN A CURSOR AGAINST TINCNTL AND FIND       00150004
+      *   CYCLE ID'S THAT ARE DEACTIVATED. IF THE OPN_FSCL_MN_DTE       00160004
+      *   PLUS 48 MONTHS IS LESS THAN THE CURRENT DATE, THE CYCLE       00170007
+      *   WILL BE LOADED INTO AN INTERNAL TABLE. THE CYCLES FROM THE    00180004
+      *   INTERNAL TABLE WILL THEN BE PROCESSED AND ALL THE             00190004
+      *   ROWS WILL BE DELETED - ROWS FROM TINCNTL WILL BE DELETED      00200004
+      *   LAST TO ELIMINATE THE NEED FOR CHECKPOINT RESTART.            00210004
+      ******************************************************************00220004
+      ******************** HISTORY OF CHANGES **************************00230004
+      * CHG ID/                                                        *00240004
+      * WR/PROJ  DATE        DESCRIPTION OF CHANGES                    *00250004
+      * -------  ----------  ----------------------------------------  *00260004
+      * WR#33304 05/13/2009  THERESE RAMSEYER - INITIAL IMPLEMENTATION *00270004
+      * PB#41185 05/17/2013  CHANGED THE ROLL OVER MONTH FROM 24 TO 36 *00280005
+265616* WR#65616 12/17/2021  CHANGED THE ROLL OVER MONTH FROM 36 TO 48 *00281011
+265616*                      ALSO MODIFIED THE LOGIC IN THE PROGRAM TO *00282011
+      *                      DELETE THE CYCLE ID'S IF THE COUNT IS     *00283009
+      *                      GREATER THAN 0                            *00284009
+      ******************************************************************00290004
+                                                                        00300004
+       ENVIRONMENT DIVISION.                                            00310004
+                                                                        00320004
+       CONFIGURATION SECTION.                                           00330004
+                                                                        00340004
+       SOURCE-COMPUTER.    IBM-3090.                                    00350004
+       OBJECT-COMPUTER.    IBM-3090.                                    00360004
+                                                                        00370004
+       INPUT-OUTPUT SECTION.                                            00380004
+                                                                        00390004
+       FILE-CONTROL.                                                    00400004
+                                                                        00410004
+       DATA DIVISION.                                                   00420004
+                                                                        00430004
+       FILE SECTION.                                                    00440004
+                                                                        00450004
+       WORKING-STORAGE SECTION.                                         00460004
+                                                                        00470004
+       01  ABEND-CODE                       PIC S9(04) COMP SYNC        00480004
+                                                       VALUE +0.        00490004
+       01  PROGRAM-ACCUMULATORS.                                        00500004
+           05  PA-TINVLAP-DELETES           PIC S9(09) COMP-3 VALUE +0. 00510004
+           05  PA-PARMMDSE-DELETES          PIC S9(09) COMP-3 VALUE +0. 00520004
+           05  PA-TINVPAR-DELETES           PIC S9(09) COMP-3 VALUE +0. 00530004
+           05  PA-TINCNTL-DELETES           PIC S9(09) COMP-3 VALUE +0. 00540004
+           05  PA-TOT-CYCLE-ID-FOUND        PIC S9(09) COMP-3 VALUE +0. 00550004
+           05  PA-TOT-TINVLAP-DELETES       PIC S9(09) COMP-3 VALUE +0. 00560004
+           05  PA-TOT-PARMMDSE-DELETES      PIC S9(09) COMP-3 VALUE +0. 00570004
+           05  PA-TOT-TINVPAR-DELETES       PIC S9(09) COMP-3 VALUE +0. 00580004
+           05  PA-TOT-TINCNTL-DELETES       PIC S9(09) COMP-3 VALUE +0. 00590004
+           05  PA-TOT-COMMITS               PIC S9(09) COMP-3 VALUE +0. 00600004
+                                                                        00610004
+       01  PROGRAM-CONSTANTS.                                           00620004
+           05  PC-MAX-RETRIES               PIC S9(04) COMP SYNC        00630004
+                                                       VALUE +2.        00640004
+           05  PC-PROGRAM-NAME              PIC  X(08) VALUE 'INKUP175'.00650004
+           05  PC-ACTIVE                    PIC  X(01) VALUE 'Y'.       00660004
+           05  PC-INACTIVE                  PIC  X(01) VALUE 'N'.       00670004
+                                                                        00680004
+       01  PROGRAM-SWITCHES.                                            00690004
+           05  PS-END-OF-CNTL-CSR-SW        PIC X      VALUE 'N'.       00700004
+               88  PS-END-OF-CNTL-CSR                  VALUE 'Y'.       00710004
+               88  PS-NOT-END-OF-CNTL-CSR              VALUE 'N'.       00720004
+                                                                        00730004
+       01  PROGRAM-VARIABLES.                                           00740004
+           05  PV-DB2-OPER-ATTEMPTED        PIC  X(30) VALUE SPACE.     00750004
+           05  PV-SQLERRD3                  PIC S9(09) COMP-3 VALUE +0. 00760004
+           05  PV-PARAGRAPH-NAME            PIC  X(30) VALUE SPACE.     00770004
+           05  PV-CUR-INV-ID                PIC S9(09) COMP VALUE +0.   00780004
+           05  PV-COUNT                     PIC S9(09) COMP VALUE +0.   00790004
+           05  PV-DUMMY                     PIC S9(07) COMP VALUE +0.   00800004
+           05  PV-SQL-SUB                   PIC  9(03) VALUE ZERO.      00810004
+           05  PV-INV-ID                    PIC ZZZZ9.                  00820004
+           05  PV-CURRENT-TMST              PIC X(26) VALUE SPACES.     00830004
+           05  PV-RETRY-COUNTER             PIC S9(04) VALUE +0.        00840004
+                                                                        00850004
+       01  PT-INV-ID-AREA.                                              00860004
+           05  PT-INV-ID-TBL      OCCURS 99999 TIMES                    00870004
+                                  INDEXED BY INV-ID-INDEX.              00880004
+               10  PT-INV-ID               PIC S9(9)  COMP VALUE ZEROES.00890004
+                                                                        00900004
+      ******************************************************************00910004
+      *  DB2 FORMATTED MESSAGE AREA                                     00920004
+      ******************************************************************00930004
+           COPY DPWS004.                                                00940004
+                                                                        00950004
+      ******************************************************************00960004
+      * SQL COMMUNICATIONS WORK AREA                                    00970004
+      ******************************************************************00980004
+                                                                        00990004
+           EXEC SQL                                                     01000004
+               INCLUDE SQLCA                                            01010004
+           END-EXEC.                                                    01020004
+                                                                        01030004
+      ******************************************************************01040004
+      * DB2 INVENTORY CONTROL TABLE                                     01050004
+      ******************************************************************01060004
+                                                                        01070004
+           EXEC SQL                                                     01080004
+               INCLUDE TINCNTL                                          01090004
+           END-EXEC.                                                    01100004
+                                                                        01110004
+      ******************************************************************01120004
+      * DB2 INVENTORY - PARAMETER MERCHANDISE TABLE                     01130004
+      ******************************************************************01140004
+                                                                        01150004
+           EXEC SQL                                                     01160004
+               INCLUDE INT00004                                         01170004
+           END-EXEC.                                                    01180004
+                                                                        01190004
+      ******************************************************************01200004
+      * DB2 INVENTORY PARAMETERS TABLE                                  01210004
+      ******************************************************************01220004
+                                                                        01230004
+           EXEC SQL                                                     01240004
+               INCLUDE TINVPAR                                          01250004
+           END-EXEC.                                                    01260004
+                                                                        01270004
+      ******************************************************************01280004
+      * DB2 IN  - PHYSICAL INVENTORY LAPTOP                             01290004
+      ******************************************************************01300004
+                                                                        01310004
+           EXEC SQL                                                     01320004
+               INCLUDE TINVLAP                                          01330004
+           END-EXEC.                                                    01340004
+                                                                        01350004
+      ******************************************************************01360004
+      * SQL CURSORS                                                     01370004
+      ******************************************************************01380004
+      *                                                                 01390004
+           EXEC SQL                                                     01400004
+             DECLARE CNTL_CSR CURSOR FOR                                01410004
+              SELECT INV_ID                                             01420004
+              FROM TINCNTL                                              01430004
+              WHERE ACTV_IND    = :PC-INACTIVE                          01440004
+265616        AND   (DATE(OPN_FSCL_MN_DTE + 48 MONTHS)) < CURRENT DATE  01450011
+              WITH UR                                                   01460004
+           END-EXEC.                                                    01470004
+                                                                        01480004
+       PROCEDURE DIVISION.                                              01490004
+                                                                        01500004
+       0000-MAINLINE-PROCESSING.                                        01510004
+                                                                        01520004
+           PERFORM 1000-INITIALIZATION.                                 01530004
+           PERFORM 1500-OPEN-CNTL-CSR.                                  01540004
+                                                                        01550004
+           PERFORM 2000-FETCH-CNTL-CSR                                  01560004
+             UNTIL PS-END-OF-CNTL-CSR                                   01570004
+           PERFORM 3000-CLOSE-CNTL-CSR.                                 01580004
+                                                                        01590004
+265616     IF PA-TOT-CYCLE-ID-FOUND > 0                                 01600011
+              SET INV-ID-INDEX TO +1                                    01610004
+              PERFORM 4000-DELETES                                      01620004
+                UNTIL INV-ID-INDEX > PA-TOT-CYCLE-ID-FOUND              01630004
+           ELSE                                                         01640004
+              DISPLAY ' '                                               01650004
+              DISPLAY 'NO CYCLES TO DELETE'                             01660004
+              DISPLAY ' '                                               01670004
+           END-IF.                                                      01680004
+                                                                        01690004
+265616     IF PA-TOT-CYCLE-ID-FOUND > 0                                 01700012
+              PERFORM 9000-EOJ-ROUTINE                                  01710004
+           END-IF.                                                      01720004
+                                                                        01730004
+           STOP RUN.                                                    01740004
+                                                                        01750004
+                                                                        01760004
+      ******************************************************************01770004
+      *  SET UP INTERNAL TABLE TO HOLD CYCLE ID'S                      *01780004
+      ******************************************************************01790004
+       1000-INITIALIZATION.                                             01800004
+                                                                        01810004
+           INITIALIZE DCLTINCNTL.                                       01820004
+           MOVE ZEROES TO PT-INV-ID-AREA.                               01830004
+           SET INV-ID-INDEX TO +1.                                      01840004
+                                                                        01850004
+      ******************************************************************01860004
+      *    OPEN INVENTORY CONTROL CURSOR (CNTL_CSR)                     01870004
+      ******************************************************************01880004
+       1500-OPEN-CNTL-CSR.                                              01890004
+                                                                        01900004
+           PERFORM                                                      01910004
+               WITH TEST AFTER                                          01920004
+               VARYING PV-RETRY-COUNTER                                 01930004
+               FROM 1 BY 1                                              01940004
+               UNTIL ((PV-RETRY-COUNTER > PC-MAX-RETRIES)               01950004
+                         OR (SQLCODE = ZERO))                           01960004
+                                                                        01970004
+                                                                        01980004
+               EXEC SQL                                                 01990004
+                   OPEN CNTL_CSR                                        02000004
+               END-EXEC                                                 02010004
+                                                                        02020004
+               EVALUATE TRUE                                            02030004
+                 WHEN SQLCODE = ZERO                                    02040004
+                     CONTINUE                                           02050004
+                 WHEN SQLWARN0 NOT EQUAL SPACE                          02060004
+                 WHEN SQLCODE NOT EQUAL ZERO                            02070004
+                     DISPLAY '**************************************'   02080004
+                     DISPLAY '** ABEND                            **'   02090004
+                     DISPLAY '** PROGRAM = INKUP175               **'   02100004
+                     DISPLAY '** PARA = 1500-OPEN-CNTL-CSR        **'   02110004
+                     DISPLAY '** OPEN CNTL_CSR                    **'   02120004
+                     DISPLAY '**************************************'   02130004
+                     PERFORM 9999-SQL-ABEND                             02140004
+             END-EVALUATE                                               02150004
+           END-PERFORM.                                                 02160004
+                                                                        02170004
+           IF  PV-RETRY-COUNTER > PC-MAX-RETRIES AND                    02180004
+               (SQLCODE NOT = ZERO)                                     02190004
+               DISPLAY '****************************************'       02200004
+               DISPLAY '** MAX RETRIES EXCEEDED ATTEMPTING TO **'       02210004
+               DISPLAY '** OPEN CNTL_CSR                      **'       02220004
+               DISPLAY '** PARA = 1500-OPEN-CNTL-CSR          **'       02230004
+               DISPLAY '****************************************'       02240004
+               PERFORM 9999-SQL-ABEND                                   02250004
+           END-IF.                                                      02260004
+                                                                        02270004
+      ******************************************************************02280004
+      *  FETCH ROWS FOR CNTL_CSR AND LOAD EACH CYCLE ID INTO THE        02290004
+      *  INTERNAL TABLE.                                                02300004
+      ******************************************************************02310004
+       2000-FETCH-CNTL-CSR.                                             02320004
+                                                                        02330004
+           EXEC SQL                                                     02340004
+             FETCH                                                      02350004
+               FROM  CNTL_CSR                                           02360004
+               INTO :INCNTL-INV-ID                                      02370004
+           END-EXEC.                                                    02380004
+                                                                        02390004
+           EVALUATE TRUE                                                02400004
+               WHEN SQLCODE = ZERO                                      02410004
+                   MOVE INCNTL-INV-ID TO PT-INV-ID (INV-ID-INDEX)       02420004
+                   SET INV-ID-INDEX UP BY +1                            02430004
+                   ADD +1             TO PA-TOT-CYCLE-ID-FOUND          02440004
+                                                                        02450004
+               WHEN SQLCODE = +100                                      02460004
+                   SET PS-END-OF-CNTL-CSR      TO TRUE                  02470004
+                                                                        02480004
+               WHEN SQLWARN0 NOT EQUAL SPACE                            02490004
+               WHEN SQLCODE NOT EQUAL ZERO                              02500004
+                   DISPLAY '***************************************'    02510004
+                   DISPLAY '** ABEND                             **'    02520004
+                   DISPLAY '** PROGRAM = INKUP175                **'    02530004
+                   DISPLAY '** PARA = 2000-FETCH-CNT-CSR         **'    02540004
+                   DISPLAY '**************************************'     02550004
+                   PERFORM 9999-SQL-ABEND                               02560004
+           END-EVALUATE.                                                02570004
+                                                                        02580004
+      ******************************************************************02590004
+      *    CLOSE INVENTORY CONTROL (CNTL_CSR) CURSOR                    02600004
+      ******************************************************************02610004
+       3000-CLOSE-CNTL-CSR.                                             02620004
+                                                                        02630004
+           PERFORM                                                      02640004
+               WITH TEST AFTER                                          02650004
+               VARYING PV-RETRY-COUNTER                                 02660004
+               FROM 1 BY 1                                              02670004
+               UNTIL ((PV-RETRY-COUNTER > PC-MAX-RETRIES)               02680004
+                         OR (SQLCODE = ZERO))                           02690004
+                                                                        02700004
+                                                                        02710004
+               EXEC SQL                                                 02720004
+                   CLOSE CNTL_CSR                                       02730004
+               END-EXEC                                                 02740004
+                                                                        02750004
+               EVALUATE TRUE                                            02760004
+                 WHEN SQLCODE = ZERO                                    02770004
+                     CONTINUE                                           02780004
+                 WHEN SQLWARN0 NOT EQUAL SPACE                          02790004
+                 WHEN SQLCODE NOT EQUAL ZERO                            02800004
+                     DISPLAY '**************************************'   02810004
+                     DISPLAY '** ABEND                            **'   02820004
+                     DISPLAY '** PROGRAM = INKUP175               **'   02830004
+                     DISPLAY '** PARA = 3000-CLOSE-CNT-CSR        **'   02840004
+                     DISPLAY '** CLOSE CNTL_CSR                   **'   02850004
+                     DISPLAY '**************************************'   02860004
+                     PERFORM 9999-SQL-ABEND                             02870004
+             END-EVALUATE                                               02880004
+           END-PERFORM.                                                 02890004
+                                                                        02900004
+           IF  PV-RETRY-COUNTER > PC-MAX-RETRIES AND                    02910004
+               (SQLCODE NOT = ZERO)                                     02920004
+               DISPLAY '****************************************'       02930004
+               DISPLAY '** MAX RETRIES EXCEEDED ATTEMPTING TO **'       02940004
+               DISPLAY '** CLOSE CNTL_CSR                     **'       02950004
+               DISPLAY '** PARA   = 3000-CLOSE-CNTL-CSR       **'       02960004
+               DISPLAY '****************************************'       02970004
+               PERFORM 9999-SQL-ABEND                                   02980004
+           END-IF.                                                      02990004
+                                                                        03000004
+      ******************************************************************03010004
+      * DELETE FROM THE 4 TABLES ALL ROWS WHERE THE KEY INV_ID MATCHES  03020004
+      * THE INV_ID INDEXED ON THE INTERNAL TABLE OF DEACTIVATED CYCLES. 03030004
+      ******************************************************************03040004
+       4000-DELETES.                                                    03050004
+                                                                        03060004
+           MOVE PT-INV-ID (INV-ID-INDEX) TO PV-CUR-INV-ID.              03070004
+                                                                        03080004
+           DISPLAY ' '                                                  03090004
+           DISPLAY ' '                                                  03100004
+           DISPLAY '*********************************'                  03110004
+           DISPLAY '  CYCLE ID:' PV-CUR-INV-ID                          03120004
+           DISPLAY '*********************************'                  03130004
+                                                                        03140004
+           PERFORM 4200-DELETE-TINVLAP.                                 03150004
+                                                                        03160004
+           PERFORM 4300-DELETE-INT00004.                                03170004
+                                                                        03180004
+           PERFORM 4400-DELETE-TINVPAR.                                 03190004
+                                                                        03200004
+           PERFORM 4500-DELETE-TINCNTL.                                 03210004
+                                                                        03220004
+           PERFORM 8000-COMMIT.                                         03230004
+                                                                        03240004
+           SET INV-ID-INDEX UP BY +1.                                   03250004
+                                                                        03260004
+      ******************************************************************03270004
+      * DELETE FROM TINVLAP ALL RECORDS FOR THE INV_ID KEY THAT         03280004
+      * MATCHES THE CURRENT INV_ID INDEXED IN THE INTERNAL TABLE.       03290004
+      ******************************************************************03300004
+       4200-DELETE-TINVLAP.                                             03310004
+                                                                        03320004
+           PERFORM                                                      03330004
+               WITH TEST AFTER                                          03340004
+               VARYING PV-RETRY-COUNTER                                 03350004
+               FROM 1 BY 1                                              03360004
+               UNTIL ((PV-RETRY-COUNTER > PC-MAX-RETRIES)               03370004
+                         OR (SQLCODE = ZERO)                            03380004
+                         OR (SQLCODE = +100))                           03390004
+                                                                        03400004
+              EXEC SQL                                                  03410004
+                DELETE                                                  03420004
+                  FROM TINVLAP                                          03430004
+                  WHERE INV_ID = :PV-CUR-INV-ID                         03440004
+              END-EXEC                                                  03450004
+                                                                        03460004
+              EVALUATE TRUE                                             03470004
+                  WHEN SQLCODE = ZERO                                   03480004
+                       MOVE SQLERRD(3) TO PV-SQLERRD3                   03490004
+                       MOVE PV-SQLERRD3 TO PA-TINVLAP-DELETES           03500004
+                       ADD  PV-SQLERRD3 TO PA-TOT-TINVLAP-DELETES       03510004
+                       DISPLAY 'TINVLAP ROWS DELETED  :' PV-SQLERRD3    03520004
+                                                                        03530004
+                  WHEN SQLCODE = +100                                   03540004
+                      CONTINUE                                          03550004
+                                                                        03560004
+                  WHEN SQLWARN0 NOT EQUAL SPACE                         03570004
+                  WHEN SQLCODE NOT EQUAL ZERO                           03580004
+                      DISPLAY '***************************************' 03590004
+                      DISPLAY '** ABEND                             **' 03600004
+                      DISPLAY '** PROGRAM = INKUP175                **' 03610004
+                      DISPLAY '** PARA = 4200-DELETE-TINVLAP        **' 03620004
+                      DISPLAY '** CYCLE INV_ID: ' PV-CUR-INV-ID         03630004
+                      DISPLAY '**************************************'  03640004
+                      PERFORM 9999-SQL-ABEND                            03650004
+              END-EVALUATE                                              03660004
+           END-PERFORM.                                                 03670004
+                                                                        03680004
+           IF  PV-RETRY-COUNTER > PC-MAX-RETRIES AND                    03690004
+               (SQLCODE NOT = ZERO) AND                                 03700004
+               (SQLCODE NOT = +100)                                     03710004
+               DISPLAY '****************************************'       03720004
+               DISPLAY '** ABEND PROGRAM = INKUP175           **'       03730004
+               DISPLAY '** MAX RETRIES EXCEEDED ATTEMPTING TO **'       03740004
+               DISPLAY '** DELETE FROM TINVLAP                **'       03750004
+               DISPLAY '** PARA = 4200-DELETE-TINVLAP         **'       03760004
+               DISPLAY '** CYCLE INV_ID: ' PV-CUR-INV-ID                03770004
+               DISPLAY '****************************************'       03780004
+               PERFORM 9999-SQL-ABEND                                   03790004
+           END-IF.                                                      03800004
+                                                                        03810004
+      ******************************************************************03820004
+      * DELETE FROM INT00004 ALL RECORDS FOR THE INV_ID KEY THAT        03830004
+      * MATCHES THE CURRENT INV_ID INDEXED IN THE INTERNAL TABLE.       03840004
+      ******************************************************************03850004
+       4300-DELETE-INT00004.                                            03860004
+                                                                        03870004
+           PERFORM                                                      03880004
+               WITH TEST AFTER                                          03890004
+               VARYING PV-RETRY-COUNTER                                 03900004
+               FROM 1 BY 1                                              03910004
+               UNTIL ((PV-RETRY-COUNTER > PC-MAX-RETRIES)               03920004
+                         OR (SQLCODE = ZERO)                            03930004
+                         OR (SQLCODE = +100))                           03940004
+                                                                        03950004
+              EXEC SQL                                                  03960004
+                DELETE                                                  03970004
+                  FROM INT_INV_PARM_MDSE                                03980004
+                  WHERE INV_ID = :PV-CUR-INV-ID                         03990004
+              END-EXEC                                                  04000004
+                                                                        04010004
+              EVALUATE TRUE                                             04020004
+                  WHEN SQLCODE = ZERO                                   04030004
+                       MOVE SQLERRD(3) TO PV-SQLERRD3                   04040004
+                       MOVE PV-SQLERRD3 TO PA-PARMMDSE-DELETES          04050004
+                       ADD  PV-SQLERRD3 TO PA-TOT-PARMMDSE-DELETES      04060004
+                       DISPLAY 'PARM MDSE ROWS DELETED:' PV-SQLERRD3    04070004
+                                                                        04080004
+                  WHEN SQLCODE = +100                                   04090004
+                      CONTINUE                                          04100004
+                                                                        04110004
+                  WHEN SQLWARN0 NOT EQUAL SPACE                         04120004
+                  WHEN SQLCODE NOT EQUAL ZERO                           04130004
+                      DISPLAY '***************************************' 04140004
+                      DISPLAY '** ABEND                             **' 04150004
+                      DISPLAY '** PROGRAM = INKUP175                **' 04160004
+                      DISPLAY '** PARA = 4300-DELETE-INT00004       **' 04170004
+                      DISPLAY '** CYCLE INV_ID: ' PV-CUR-INV-ID         04180004
+                      DISPLAY '**************************************'  04190004
+                      PERFORM 9999-SQL-ABEND                            04200004
+              END-EVALUATE                                              04210004
+           END-PERFORM.                                                 04220004
+                                                                        04230004
+           IF  PV-RETRY-COUNTER > PC-MAX-RETRIES AND                    04240004
+               (SQLCODE NOT = ZERO) AND                                 04250004
+               (SQLCODE NOT = +100)                                     04260004
+               DISPLAY '****************************************'       04270004
+               DISPLAY '** ABEND PROGRAM = INKUP175           **'       04280004
+               DISPLAY '** MAX RETRIES EXCEEDED ATTEMPTING TO **'       04290004
+               DISPLAY '** DELETE FROM INT0004                **'       04300004
+               DISPLAY '** PARA = 4300-DELETE-INT00004        **'       04310004
+               DISPLAY '** CYCLE INV_ID: ' PV-CUR-INV-ID                04320004
+               DISPLAY '****************************************'       04330004
+               PERFORM 9999-SQL-ABEND                                   04340004
+           END-IF.                                                      04350004
+                                                                        04360004
+      ******************************************************************04370004
+      * DELETE FROM TINVPAR ALL RECORDS FOR THE INV_ID KEY THAT         04380004
+      * MATCHES THE CURRENT INV_ID INDEXED IN THE INTERNAL TABLE.       04390004
+      ******************************************************************04400004
+       4400-DELETE-TINVPAR.                                             04410004
+                                                                        04420004
+           PERFORM                                                      04430004
+               WITH TEST AFTER                                          04440004
+               VARYING PV-RETRY-COUNTER                                 04450004
+               FROM 1 BY 1                                              04460004
+               UNTIL ((PV-RETRY-COUNTER > PC-MAX-RETRIES)               04470004
+                         OR (SQLCODE = ZERO)                            04480004
+                         OR (SQLCODE = +100))                           04490004
+                                                                        04500004
+              EXEC SQL                                                  04510004
+                DELETE                                                  04520004
+                  FROM TINVPAR                                          04530004
+                  WHERE INV_ID = :PV-CUR-INV-ID                         04540004
+              END-EXEC                                                  04550004
+                                                                        04560004
+              EVALUATE TRUE                                             04570004
+                  WHEN SQLCODE = ZERO                                   04580004
+                       MOVE SQLERRD(3) TO PV-SQLERRD3                   04590004
+                       MOVE PV-SQLERRD3 TO PA-TINVPAR-DELETES           04600004
+                       ADD  PV-SQLERRD3 TO PA-TOT-TINVPAR-DELETES       04610004
+                       DISPLAY 'TINVPAR ROWS DELETED  :' PV-SQLERRD3    04620004
+                                                                        04630004
+                  WHEN SQLCODE = +100                                   04640004
+                      CONTINUE                                          04650004
+                                                                        04660004
+                  WHEN SQLWARN0 NOT EQUAL SPACE                         04670004
+                  WHEN SQLCODE NOT EQUAL ZERO                           04680004
+                      DISPLAY '***************************************' 04690004
+                      DISPLAY '** ABEND                             **' 04700004
+                      DISPLAY '** PROGRAM = INKUP175                **' 04710004
+                      DISPLAY '** PARA = 4400-DELETE-TINVPAR        **' 04720004
+                      DISPLAY '** CYCLE INV_ID: ' PV-CUR-INV-ID         04730004
+                      DISPLAY '**************************************'  04740004
+                      PERFORM 9999-SQL-ABEND                            04750004
+              END-EVALUATE                                              04760004
+           END-PERFORM.                                                 04770004
+                                                                        04780004
+           IF  PV-RETRY-COUNTER > PC-MAX-RETRIES AND                    04790004
+               (SQLCODE NOT = ZERO) AND                                 04800004
+               (SQLCODE NOT = +100)                                     04810004
+               DISPLAY '****************************************'       04820004
+               DISPLAY '** ABEND PROGRAM = INKUP175           **'       04830004
+               DISPLAY '** MAX RETRIES EXCEEDED ATTEMPTING TO **'       04840004
+               DISPLAY '** DELETE FROM TINVPAR                **'       04850004
+               DISPLAY '** PARA = 4400-DELETE-TINVPAR         **'       04860004
+               DISPLAY '** CYCLE INV_ID: ' PV-CUR-INV-ID                04870004
+               DISPLAY '****************************************'       04880004
+               PERFORM 9999-SQL-ABEND                                   04890004
+           END-IF.                                                      04900004
+                                                                        04910004
+      ******************************************************************04920004
+      * DELETE FROM TINCNTL ALL RECORDS FOR THE INV_ID KEY THAT         04930004
+      * MATCHES THE CURRENT INV_ID INDEXED IN THE INTERNAL TABLE.       04940004
+      ******************************************************************04950004
+       4500-DELETE-TINCNTL.                                             04960004
+                                                                        04970004
+           PERFORM                                                      04980004
+               WITH TEST AFTER                                          04990004
+               VARYING PV-RETRY-COUNTER                                 05000004
+               FROM 1 BY 1                                              05010004
+               UNTIL ((PV-RETRY-COUNTER > PC-MAX-RETRIES)               05020004
+                         OR (SQLCODE = ZERO)                            05030004
+                         OR (SQLCODE = +100))                           05040004
+                                                                        05050004
+              EXEC SQL                                                  05060004
+                DELETE                                                  05070004
+                  FROM TINCNTL                                          05080004
+                  WHERE INV_ID = :PV-CUR-INV-ID                         05090004
+              END-EXEC                                                  05100004
+                                                                        05110004
+              EVALUATE TRUE                                             05120004
+                  WHEN SQLCODE = ZERO                                   05130004
+                       MOVE SQLERRD(3) TO PV-SQLERRD3                   05140004
+                       MOVE PV-SQLERRD3 TO PA-TINCNTL-DELETES           05150004
+                       ADD  PV-SQLERRD3 TO PA-TOT-TINCNTL-DELETES       05160004
+                       DISPLAY 'TINCNTL ROWS DELETED  :' PV-SQLERRD3    05170004
+                                                                        05180004
+                  WHEN SQLCODE = +100                                   05190004
+                      CONTINUE                                          05200004
+                                                                        05210004
+                  WHEN SQLWARN0 NOT EQUAL SPACE                         05220004
+                  WHEN SQLCODE NOT EQUAL ZERO                           05230004
+                      DISPLAY '***************************************' 05240004
+                      DISPLAY '** ABEND                             **' 05250004
+                      DISPLAY '** PROGRAM = INKUP175                **' 05260004
+                      DISPLAY '** PARA = 4500-DELETE-TINCNTL        **' 05270004
+                      DISPLAY '** CYCLE INV_ID: ' PV-CUR-INV-ID         05280004
+                      DISPLAY '**************************************'  05290004
+                      PERFORM 9999-SQL-ABEND                            05300004
+              END-EVALUATE                                              05310004
+           END-PERFORM.                                                 05320004
+                                                                        05330004
+           IF  PV-RETRY-COUNTER > PC-MAX-RETRIES AND                    05340004
+               (SQLCODE NOT = ZERO) AND                                 05350004
+               (SQLCODE NOT = +100)                                     05360004
+               DISPLAY '****************************************'       05370004
+               DISPLAY '** ABEND PROGRAM = INKUP175           **'       05380004
+               DISPLAY '** MAX RETRIES EXCEEDED ATTEMPTING TO **'       05390004
+               DISPLAY '** DELETE FROM TINCNTL                **'       05400004
+               DISPLAY '** PARA = 4500-DELETE-TINCNTL         **'       05410004
+               DISPLAY '** CYCLE INV_ID: ' PV-CUR-INV-ID                05420004
+               DISPLAY '****************************************'       05430004
+               PERFORM 9999-SQL-ABEND                                   05440004
+           END-IF.                                                      05450004
+                                                                        05460004
+      ******************************************************************05470004
+      * COMMIT THE UNIT OF WORK WHICH IS ALL DELETES FOR THE 4 TABLES   05480004
+      * WHERE THEIR INV_ID MATCHES THE INV_ID ON THE INTERNAL TABLE.    05490004
+      ******************************************************************05500004
+       8000-COMMIT.                                                     05510004
+                                                                        05520004
+           EXEC SQL                                                     05530004
+               COMMIT                                                   05540004
+           END-EXEC.                                                    05550004
+                                                                        05560004
+           ADD +1 TO PA-TOT-COMMITS.                                    05570004
+                                                                        05580004
+      ******************************************************************05590004
+      *  DISPLAY SUMMARY STATISTICS FOR THE DELETES                    *05600004
+      ******************************************************************05610004
+       9000-EOJ-ROUTINE.                                                05620004
+                                                                        05630004
+           DISPLAY SPACE.                                               05640004
+           DISPLAY '*********************************'                  05650004
+           DISPLAY '*  INKUP175 SUMMARY STATISTICS *'                   05660004
+           DISPLAY '*********************************'                  05670004
+           DISPLAY 'TOT CYCLES DELETED....:' PA-TOT-CYCLE-ID-FOUND      05680004
+           DISPLAY 'TOT TINVLAP DELETES...:' PA-TOT-TINVLAP-DELETES     05690004
+           DISPLAY 'TOT PARM MDSE DELETES.:' PA-TOT-PARMMDSE-DELETES    05700004
+           DISPLAY 'TOT TINVPAR DELETES...:' PA-TOT-TINVPAR-DELETES     05710004
+           DISPLAY 'TOT TINCNTL DELETES...:' PA-TOT-TINCNTL-DELETES     05720004
+           DISPLAY 'TOT COMMITS...........:' PA-TOT-COMMITS             05730004
+           DISPLAY '*********************************'                  05740004
+                                                                        05750004
+           DISPLAY SPACE.                                               05760004
+                                                                        05770004
+      ******************************************************************05780004
+      * ABEND THE PROGRAM IN THE EVENT THAT AN SQL ERROR OR WARNING     05790004
+      * CODE OCCURS.                                                    05800004
+      ******************************************************************05810004
+       9999-SQL-ABEND.                                                  05820004
+                                                                        05830004
+           DISPLAY '** ABEND     **'.                                   05840004
+           DISPLAY '** PROGRAM   ** = ' PC-PROGRAM-NAME.                05850004
+           DISPLAY '** PARAGRAPH ** = ' PV-PARAGRAPH-NAME.              05860004
+           DISPLAY '** OPERATION ** = ' PV-DB2-OPER-ATTEMPTED.          05870004
+                                                                        05880004
+      *--------------------------------------------------------------*  05890004
+      * THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-    05900004
+      * MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE         05910004
+      * 'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE     05920004
+      * FORMAT.                                                         05930004
+      *--------------------------------------------------------------*  05940004
+                                                                        05950004
+           COPY DPPD004.                                                05960004
+                                                                        05970004
+           MOVE +4013 TO ABEND-CODE.                                    05980004
+           CALL 'ILBOABN0' USING ABEND-CODE.                            05990004
+                                                                        06000004

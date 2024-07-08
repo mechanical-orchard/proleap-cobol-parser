@@ -1,0 +1,1931 @@
+000100 IDENTIFICATION DIVISION.                                         00010000
+000200 PROGRAM-ID.         WSKUP006.                                    00020000
+000300 AUTHOR.             JIM ARENDT.                                  00030000
+000400 INSTALLATION.       KOHLS DEPARTMENT STORES.                     00040000
+000500 DATE-WRITTEN.       JANUARY 2017.                                00050000
+000600******************************************************************00060000
+000700*          WEB ORDERS to EIS via MQ (XML format)                  00070000
+000800* This program reads from the DB2 Repository tables (WST_DAT_CNTL 00080000
+000900* & WST_DAT_XFER) and creates MQ messages after generating XML    00090000
+001000* tags for the data.  These messages are sent to EIS for WMoS.    00100000
+001100******************************************************************00110000
+001200******************************************************************00120099
+001300*  CHANGE LOG                                                     00130099
+001400*  DATE       CHANGED BY    DESC                                  00140056
+001500*  ---------- ------------- --------------------------------------00150056
+001600*  08/02/2017 JIM ARENDT    INITIAL IMPLEMENTATION                00160056
+001700******************************************************************00170056
+001710*  01/02/2019 JIM ARENDT    CHANGED PROGRAM TO BE ABLE TO PROCESS 00171099
+001711*                           ALL EFC's.  INPUT RECORD WILL         00171199
+001712*                           DETERMINE THE QUEUE TO WRITE TO.      00171299
+001720******************************************************************00172099
+001730*  02/05/2019 JIM ARENDT    CHANGED PROGRAM TO ONLY WRITE OUT TO  00173099
+001740*                           PickticketDtlInstruction ROWS THAT    00174099
+001750*                           HAVE DATA.                            00175099
+001760******************************************************************00176099
+001800 ENVIRONMENT DIVISION.                                            00180000
+001900******************************************************************00190000
+002000 CONFIGURATION SECTION.                                           00200000
+002100 SOURCE-COMPUTER.    IBM-3090.                                    00210000
+002200 OBJECT-COMPUTER.    IBM-3090.                                    00220000
+002300                                                                  00230000
+002400 INPUT-OUTPUT SECTION.                                            00240000
+002500 FILE-CONTROL.                                                    00250000
+002600******************************************************************00260000
+002700 DATA DIVISION.                                                   00270000
+002800******************************************************************00280000
+002900 FILE SECTION.                                                    00290000
+003000                                                                  00300000
+003100 WORKING-STORAGE SECTION.                                         00310000
+003200******************************************************************00320000
+003300 01  PS-PROGRAM-SWITCHES.                                         00330000
+003400     05  PS-END-OF-CONTROL-CARDS-SW  PIC X(01) VALUE 'N'.         00340000
+003500         88  PS-END-OF-CONTROL-CARDS           VALUE 'Y'.         00350000
+003600         88  PS-NOT-END-OF-CONTROL-CARDS       VALUE 'N'.         00360000
+003700     05  PS-END-OF-CNTL-CSR-SW       PIC X(01) VALUE 'N'.         00370099
+003800         88  PS-END-OF-CNTL-CSR-Y              VALUE 'Y'.         00380099
+003900         88  PS-END-OF-CNTL-CSR-N              VALUE 'N'.         00390099
+004000     05  PS-END-OF-XFER-CSR-SW       PIC X(01) VALUE 'N'.         00400099
+004100         88  PS-END-OF-XFER-CSR-Y              VALUE 'Y'.         00410099
+004200         88  PS-END-OF-XFER-CSR-N              VALUE 'N'.         00420099
+004300     05  PS-MQPUT-SUCCESSFUL-IND     PIC X(01) VALUE SPACES.      00430000
+004400         88  PS-MQPUT-SUCCESSFUL               VALUE 'Y'.         00440000
+004500                                                                  00450000
+004600 01  PC-PROGRAM-CONSTANTS.                                        00460000
+004700     05  PC-CURRENT-PROGRAM-NAME     PIC X(08) VALUE 'WSKUP006'.  00470000
+004800     05  PC-RAND-PGM                 PIC X(08) VALUE 'DPKUT902'.  00480000
+004900     05  PC-MAX-RETRIES              PIC S9(3) VALUE +5 COMP-3.   00490000
+005000     05  PC-READY                    PIC X(06) VALUE 'READY '.    00500000
+005100     05  PC-ERROR                    PIC X(06) VALUE 'ERROR '.    00510000
+005200     05  PC-WAIT-15-SECS             PIC S9(9) VALUE 1500.        00520000
+005300     05  PC-MQPUT-RETRY-COUNTER      PIC 9(3)  VALUE ZERO.        00530000
+005400     05  PC-DELAY-INTERVAL.                                       00540000
+005500         10  FILLER                  PIC X(2)  VALUE SPACES.      00550000
+005600         10  PC-DELAY-TIME           PIC 9(8)  VALUE 3000.        00560000
+005700     05  PC-X                        PIC X(01) VALUE 'X'.         00570000
+005800     05  PC-Y                        PIC X(01) VALUE 'Y'.         00580000
+005900     05  PC-XML-LENGTH               PIC 9(4)  VALUE 625.         00590048
+006000                                                                  00600000
+006100 01  DK-DATABASE-KEYS.                                            00610000
+006200     05  DK-STORE-NBR                PIC S9(4) COMP.              00620067
+006300     05  DK-TRAN-TYPE                PIC X(08).                   00630000
+006400     05  DK-STATUS-CODE              PIC X(06).                   00640000
+006500     05  DK-PO-NBR                   PIC X(09).                   00650000
+006600     05  DK-ITEM-ID                  PIC X(08).                   00660000
+006700     05  DK-DISTRO-NBR               PIC X(09).                   00670000
+006800                                                                  00680000
+006900 01  PA-PROGRAM-ACCUMULATORS.                                     00690000
+007000     05  PA-INPUT-READ               PIC S9(9) VALUE +0 COMP-3.   00700099
+007010     05  PA-CNTL-READ                PIC S9(9) VALUE +0 COMP-3.   00701099
+007100     05  PA-XFER-READ                PIC S9(9) VALUE +0 COMP-3.   00710000
+007200     05  PA-TOTAL-MQ-MSGS-SENT       PIC S9(9) VALUE +0 COMP-3.   00720000
+007300                                                                  00730000
+007400 01  PV-PROGRAM-VARIABLES.                                        00740000
+007500     05  A                           PIC 9(08) VALUE ZEROES.      00750000
+007600     05  B                           PIC 9(08) VALUE ZEROES.      00760000
+007700     05  L                           PIC 9(08) VALUE ZEROES.      00770000
+007800     05  M                           PIC 9(08) VALUE ZEROES.      00780000
+007900     05  N                           PIC 9(08) VALUE ZEROES.      00790000
+008000     05  D                           PIC 9(08) VALUE ZEROES.      00800000
+008100     05  X                           PIC 9(08) VALUE ZEROES.      00810000
+008200     05  S                           PIC 9(05) VALUE ZEROES.      00820048
+008300     05  T                           PIC 9(05) VALUE ZEROES.      00830048
+008310     05  F                           PIC 9(05) VALUE ZEROES.      00831099
+008400     05  PV-HDR-INS-COUNT            PIC S9(9) VALUE +0 COMP.     00840000
+008500     05  PV-HDR-DTL-COUNT            PIC S9(9) VALUE +0 COMP.     00850000
+008600     05  PV-DTL-INS-COUNT            PIC S9(9) VALUE +0 COMP.     00860000
+008700     05  PV-HDRINS-CNT               PIC 99    VALUE 0.           00870000
+008800     05  PV-DTL-CNT                  PIC 9999  VALUE 0.           00880000
+008900     05  PV-DTLINS-CNT               PIC 99    VALUE 0.           00890000
+008910     05  PV-INSTR-CNT                PIC 99    VALUE 0.           00891099
+009000     05  PV-DC-NBR                   PIC 9(04).                   00900000
+009100     05  PV-PKT-DTL-1-20             PIC X(20).                   00910000
+009200     05  PV-PKT-SEQ-NBR              PIC 9(09) VALUE ZEROES.      00920000
+009300     05  PV-PKT-SEQ-NBR-X            PIC X(09).                   00930000
+009400     05  PV-COUNTER                  PIC 9(05) VALUE ZEROES.      00940000
+009500     05  PV-CURRENT-TMST             PIC X(26) VALUE SPACES.      00950000
+009600     05  PV-RETRY-COUNTER            PIC S9(4) VALUE +0 COMP SYNC.00960000
+009700     05  PV-PARAGRAPH                PIC X(48) VALUE SPACES.      00970000
+009800     05  PV-MSG-LENGTH               PIC S9(9) BINARY.            00980000
+009900     05  PV-MSG-LENGTH-DISPLAY       PIC 9(09).                   00990000
+010000     05  PV-HOLD-COMPLETION-CODE     PIC S9(9) BINARY.            01000000
+010100     05  PV-HOLD-REASON              PIC S9(9) BINARY.            01010000
+010200     05  PV-HOLD-PROCESS-TYPE        PIC X(16) VALUE SPACES.      01020000
+010300     05  PV-SAVE-PROCESS-TYPE        PIC X(16).                   01030000
+010400     05  PV-HOLD-GROUP-PROCESS-ID    PIC 9(18) VALUE ZEROES.      01040000
+010500     05  PV-CURR-GROUP-PROCESS-ID    PIC 9(18) VALUE ZEROES.      01050000
+010600     05  PV-CURR-STR-NBR             PIC 9(04) VALUE ZEROES.      01060000
+010700     05  PV-XML-BANNER               PIC X(39) VALUE              01070000
+010800         '<?xml version="1.0" encoding="UTF-8" ?>'.               01080000
+010900                                                                  01090000
+011000     05  PV-CNT1                     PIC 9(04) VALUE ZEROES.      01100000
+011100     05  PV-CNT2                     PIC 9(04) VALUE ZEROES.      01110000
+011200                                                                  01120000
+011300***************************************************************** 01130048
+011400* HOLD AREA FOR PickticketHeaderFields OF COPYBOOK WSRD100        01140048
+011500* WHICH IS 625 BYTES                                              01150048
+011600***************************************************************** 01160048
+011700 01  PV-HOLD-HEADER.                                              01170048
+011800     05  PV-MASTER-CHAR    OCCURS 625 TIMES                       01180048
+011900                                     PIC X(01).                   01190048
+012000                                                                  01200048
+012100 01  ABEND-CODE                      PIC S9(4) VALUE +0 COMP SYNC.01210000
+012200 01  PV-ABEND-VARIABLES.                                          01220000
+012300     05  PV-SQLCODE                  PIC S9(9).                   01230000
+012400     05  PV-DISPLAY-SQLCODE          PIC -------999.              01240000
+012500     05  PV-ABEND-PROGRAM            PIC X(08) VALUE 'WSKUP006'.  01250000
+012600     05  PV-ABEND-PARAGRAPH          PIC X(25) VALUE SPACES.      01260000
+012700     05  PV-ABEND-OPERATION          PIC X(20) VALUE SPACES.      01270000
+012800     05  PV-ABEND-TABLE-1            PIC X(18) VALUE SPACES.      01280054
+012900     05  PV-DB2-OPERATION-MESSAGE-1  PIC X(79) VALUE SPACES.      01290000
+013000     05  PV-ABEND-CODE               PIC S9(4) VALUE +0 COMP SYNC.01300000
+013100                                                                  01310000
+013200*Random Number Generation.                                        01320000
+013300     COPY DPWS902.                                                01330000
+013400                                                                  01340000
+013500*XML output copybook.                                             01350000
+013600     COPY WSRD100.                                                01360000
+013700                                                                  01370000
+013800 01  PV-MY-OPTIONAL.                                              01380000
+013900     05  PV-MY-OPTIONAL1         PIC X(246).                      01390000
+014000     05  PV-MY-OPTIONAL2         PIC X(231).                      01400000
+014100     05  PV-MY-OPTIONAL3         PIC X(243).                      01410000
+014200     05  PV-MY-OPTIONAL4         PIC X(51).                       01420000
+014300                                                                  01430000
+014400 01  PV-MY-OPT-TAG1              PIC X(55).                       01440000
+014500 01  PV-MY-OPT-TAG2              PIC X(61).                       01450000
+014600 01  PV-MY-OPT-TAG3              PIC X(57).                       01460000
+014700                                                                  01470000
+014800 01  PV-NULL-DTL-INSTR.                                           01480000
+014900     05  PV-DTL-INSTR1           PIC X(213).                      01490000
+015000     05  PV-DTL-INSTR2           PIC X(231).                      01500000
+015100     05  PV-DTL-INSTR3           PIC X(185).                      01510000
+015200                                                                  01520000
+015300**** This is how big the incoming XML field can be.  Try to choose01530000
+015400**** a more realistic size to prevent allocating too much memory. 01540000
+015500*01  PV-XML                      PIC X(16777215) VALUE SPACES.    01550000
+015600 01  PV-XML                      PIC X(2048000)  VALUE SPACES.    01560099
+015700                                                                  01570000
+015800 01  PV-DESC                     PIC X(132)      VALUE SPACES.    01580000
+015900 01  PV-DISPLAY                  PIC X(132)      VALUE SPACES.    01590000
+016000                                                                  01600000
+016100 01  IN-XML                      PIC X(80)       VALUE SPACES.    01610000
+016200 01  IN-EOF-SW                   PIC X           VALUE 'N'.       01620000
+016300     88  IN-EOF                                  VALUE 'Y'.       01630000
+016400                                                                  01640000
+016500 01  XML-LENGTH                  PIC 9(9)    COMP.                01650000
+016600                                                                  01660000
+016700     COPY ISWS007.                                                01670000
+016800     COPY ISWS008.                                                01680000
+016900     COPY ISWS009.                                                01690000
+017000*jpl COPY ISWS012.                                                01700000
+017100 01  IS012-EMPTY-TAG        PIC X(771)      VALUE SPACES.         01710000
+017200 01  IS012-EMPTY-TAG-LENGTH PIC 9(06)       VALUE 0.              01720000
+017300 01  IS012-BEFORE           PIC X(2048000).                       01730000
+017400 01  IS012-AFTER            PIC X(2048000).                       01740000
+017500 01  IS012-BEFORE-CNT       PIC 9(09)       VALUE ZERO.           01750000
+017600 01  IS012-AFTER-CNT        PIC 9(09)       VALUE ZERO.           01760000
+017700                                                                  01770000
+017800 01  PV-HOLD-MSGBUFFER.                                           01780000
+017900     05  PV-MSGBUFFER-CHAR OCCURS 2048000 TIMES                   01790000
+018000                                     PIC X(01).                   01800000
+018100 01  PV-MSG.                                                      01810000
+018200     05  PV-MQC-CONTROL-RECORD.                                   01820000
+018300         10  PV-MQC-PROCESS-TYPE     PIC X(10) VALUE SPACES.      01830000
+018400         10  PV-MQC-GROUP-ID-X       PIC X(06) VALUE SPACES.      01840000
+018500         10  PV-MQC-GROUP-ID     REDEFINES                        01850000
+018600             PV-MQC-GROUP-ID-X       PIC 9(06).                   01860000
+018700         10  PV-MQC-STR-NBR-X        PIC X(04) VALUE SPACES.      01870000
+018800         10  PV-MQC-STR-NBR      REDEFINES                        01880000
+018900             PV-MQC-STR-NBR-X        PIC 9(04).                   01890000
+019000     05  PV-DTL                      PIC X(10) VALUE SPACES.      01900000
+019100                                                                  01910000
+019200***************************************************************** 01920000
+019300 01  CC-CONTROL-CARD-PARAMETERS.                                  01930000
+019400     05  CC-STORE-NBR                PIC 9(04).                   01940000
+019500     05  FILLER                      PIC X(01) VALUE SPACE.       01950000
+019600     05  CC-PROCESS-TYPE             PIC X(08) VALUE SPACE.       01960000
+019700     05  FILLER                      PIC X(01) VALUE SPACE.       01970000
+019800     05  CC-STATUS-CODE              PIC X(06) VALUE SPACE.       01980000
+019900     05  FILLER                      PIC X(60) VALUE SPACE.       01990000
+020000                                                                  02000051
+020100***************************************************************** 02010000
+020200 01  PE-MQ-ABEND-VARIABLES.                                       02020000
+020300     05  PE-MQ-QMANAGER              PIC X(05) VALUE SPACES.      02030000
+020400     05  PE-MQ-QMANAGER-REMOTE       PIC X(30) VALUE SPACES.      02040000
+020500     05  PE-MQ-QNAME                 PIC X(48) VALUE SPACES.      02050000
+020600     05  PE-MQ-COMPLETION-CODE       PIC 9(04) VALUE ZEROES.      02060000
+020700     05  PE-MQ-REASON-CODE           PIC 9(04) VALUE ZEROES.      02070000
+020800                                                                  02080000
+020900******************************************************************02090000
+021000*                I N P U T   L A Y O U T S                        02100000
+021100******************************************************************02110000
+021200*(WST_DAT_XFER)                                                   02120000
+021300 01  WS-LOAD-DAT-TXT-TEXT            PIC X(1500).                 02130000
+021400                                                                  02140000
+021500*WS001-PICK-TICKET-HDR (800).                                     02150000
+021600     COPY WSRD001.                                                02160000
+021700                                                                  02170000
+021800*WS002-PICK-TICKET-DTL (200).                                     02180000
+021900     COPY WSRD002.                                                02190000
+022000                                                                  02200000
+022100*WS003-PICK-TICKET-INST (200).                                    02210000
+022200     COPY WSRD003.                                                02220000
+022300                                                                  02230000
+022400******************************************************************02240000
+022500*  DB2 FORMATTED MESSAGE AREA                                     02250000
+022600******************************************************************02260000
+022700     COPY DPWS004.                                                02270000
+022800                                                                  02280000
+022900******************************************************************02290000
+023000*  COMMUNICATIONS AREA FOR DB2                                    02300000
+023100******************************************************************02310000
+023200     EXEC SQL                                                     02320000
+023300          INCLUDE SQLCA                                           02330000
+023400     END-EXEC.                                                    02340000
+023500                                                                  02350000
+023600******************************************************************02360000
+023700*  DB2 DECLARATION - WMOS CUST ORDERS CONTROL TABLE               02370000
+023800*      TABLE (WST_DAT_CNTL)                                       02380000
+023900******************************************************************02390000
+024000     EXEC SQL                                                     02400000
+024100         INCLUDE WST00003                                         02410000
+024200     END-EXEC.                                                    02420000
+024300                                                                  02430000
+024400******************************************************************02440000
+024500*  DB2 DECLARATION - WMOS CUST ORDERS DETAIL TABLE                02450000
+024600*      TABLE (WST_DAT_XFER)                                       02460000
+024700******************************************************************02470000
+024800     EXEC SQL                                                     02480000
+024900         INCLUDE WST00004                                         02490000
+025000     END-EXEC.                                                    02500000
+025100                                                                  02510000
+025200******************************************************************02520000
+025300*  DB2 DECLARATION - WMOS - Provider Queue information (Put/Write)02530000
+025400*      TABLE (WSV_PRVDR_QUE)                                      02540000
+025500******************************************************************02550000
+025600     EXEC SQL                                                     02560000
+025700         INCLUDE WSV00005                                         02570000
+025800     END-EXEC.                                                    02580000
+025900                                                                  02590000
+026000******************************************************************02600000
+026100* COBOL CURSOR DELCARATION TO READ E-FULFILLMENT LOAD CONTROL    *02610000
+026200******************************************************************02620000
+026300     EXEC SQL                                                     02630000
+026400         DECLARE CNTL-CSR CURSOR WITH HOLD FOR                    02640099
+026500          SELECT TRN_TYP_CDE                                      02650000
+026600               , PRC_GP_ID                                        02660000
+026700               , PRC_CNTL_TMST                                    02670000
+026800               , LOC_NBR                                          02680000
+026900               , STAT_CDE                                         02690000
+027000            FROM WST_DAT_CNTL                                     02700000
+027100           WHERE TRN_TYP_CDE   = :DK-TRAN-TYPE                    02710000
+027200             AND LOC_NBR       = :DK-STORE-NBR                    02720000
+027300             AND STAT_CDE      = :DK-STATUS-CODE                  02730099
+027400         ORDER BY PRC_CNTL_TMST                                   02740000
+027500     END-EXEC.                                                    02750000
+027600                                                                  02760000
+027700******************************************************************02770000
+027800* COBOL CURSOR DELCARATION TO READ E-FULFILLMENT LOAD TRANSACTION*02780000
+027900******************************************************************02790000
+028000     EXEC SQL                                                     02800000
+028100         DECLARE XFER-CSR CURSOR FOR                              02810099
+028200          SELECT RDM_PRC_TYP_CDE                                  02820000
+028300               , LOD_DAT_TXT                                      02830000
+028400            FROM WST_DAT_XFER                                     02840000
+028500           WHERE PRC_CNTL_TMST  = :WST00003-PRC-CNTL-TMST         02850000
+028600             AND PRC_GP_ID      = :WST00003-PRC-GP-ID             02860099
+028700             AND TRN_TYP_CDE    = :DK-TRAN-TYPE                   02870000
+028800        ORDER BY PRC_LOD_SEQ_ID                                   02880000
+028900            WITH UR                                               02890000
+029000     END-EXEC.                                                    02900000
+029100                                                                  02910000
+029200****************************************************************  02920000
+029300**                                                            **  02930000
+029400**     M Q   S E R I E S    W O R K I N G   S T O R A G E     **  02940000
+029500**                                                            **  02950000
+029600**                  M  Q    C O P Y B O O K S                 **  02960000
+029700**                                                            **  02970000
+029800****************************************************************  02980000
+029900 01  MQM-OBJECT-DESCRIPTOR.                                       02990000
+030000     COPY CMQODV.                                                 03000000
+030100                                                                  03010000
+030200 01  MQM-MESSAGE-DESCRIPTOR.                                      03020000
+030300     COPY CMQMDV.                                                 03030000
+030400                                                                  03040000
+030500 01  MQM-PUT-MESSAGE-OPTIONS.                                     03050000
+030600     COPY CMQPMOV.                                                03060000
+030700                                                                  03070000
+030800 01  MQM-GET-MESSAGE-OPTIONS.                                     03080000
+030900     COPY CMQGMOV.                                                03090000
+031000                                                                  03100000
+031100 01  MQM-CONSTANTS.                                               03110000
+031200     COPY CMQV.                                                   03120000
+031300                                                                  03130000
+031400****************************************************************  03140000
+031500** CONTROL CARDS FOR QUEUE MANAGER AND QUEUE NAME                 03150000
+031600****************************************************************  03160000
+031700 01  CC-CONTROL-CARD-1.                                           03170000
+031800     05  CC-QMGR-NAME-REMOTE         PIC X(50).                   03180000
+031900                                                                  03190000
+032000 01  CC-CONTROL-CARD-2.                                           03200000
+032100     05  CC-TRANS-QUEUE-NAME         PIC X(50).                   03210000
+032200                                                                  03220000
+032300 01  CC-CONTROL-CARD-3.                                           03230000
+032400     05  CC-DC-NBR                   PIC S9(9) COMP.              03240000
+032500                                                                  03250000
+032600 01  CC-CONTROL-CARD-4.                                           03260000
+032700     05  CC-QMGR-NAME                PIC X(50).                   03270000
+032800                                                                  03280000
+032900****************************************************************  03290000
+033000** MQ SERIES CONSTANTS FOR CALLING MODULES SUCH AS GET AND    **  03300000
+033100*  OPEN, CONNECT, DISCONNECT.                                     03310000
+033200****************************************************************  03320000
+033300 01  MQ-WORKING-STORAGE.                                          03330000
+033400     05  PC-MQCONN                   PIC X(08) VALUE 'CSQBCONN'.  03340000
+033500     05  PC-MQOPEN                   PIC X(08) VALUE 'CSQBOPEN'.  03350000
+033600     05  PC-MQINQ                    PIC X(08) VALUE 'CSQBINQ'.   03360000
+033700     05  PC-MQPUT                    PIC X(08) VALUE 'CSQBPUT'.   03370000
+033800     05  PC-MQGET                    PIC X(08) VALUE 'CSQBGET'.   03380000
+033900     05  PC-MQCMIT                   PIC X(08) VALUE 'CSQBCOMM'.  03390000
+034000     05  PC-MQBACK                   PIC X(08) VALUE 'CSQBBACK'.  03400000
+034100     05  PC-MQCLOSE                  PIC X(08) VALUE 'CSQBCLOS'.  03410000
+034200     05  PC-MQDISC                   PIC X(08) VALUE 'CSQBDISC'.  03420000
+034300     05  PC-QMGR-NAME                PIC X(04) VALUE SPACES.      03430000
+034400         88  PC-PROD-QMGR-NAME                 VALUE 'QKSP'.      03440000
+034500         88  PC-ACCEPT-QMGR-NAME               VALUE 'QKSQ'.      03450000
+034600         88  PC-TEST-QMGR-NAME                 VALUE 'QKST'.      03460000
+034700     05  PC-TRANS-QNAME              PIC X(48) VALUE SPACES.      03470000
+034800                                                                  03480000
+034900****************************************************************  03490000
+035000** QUEUE MANAGER HANDLE                                           03500000
+035100*  QUEUE HANDLE                                                   03510000
+035200****************************************************************  03520000
+035300 01 PV-MQ-PROGRAM-HANDLES.                                        03530000
+035400     05  PV-QM-NAME                  PIC X(48).                   03540000
+035500     05  PV-QM-NAME-REMOTE           PIC X(48).                   03550000
+035600     05  PV-HCONN                    PIC S9(9) BINARY VALUE 0.    03560000
+035700     05  PV-PQ-HANDLE                PIC S9(9) BINARY VALUE 0.    03570000
+035800                                                                  03580000
+035900****************************************************************  03590000
+036000* ERROR PROCESSING VARIABLES                                      03600000
+036100* CODES FROM CALLS ARE STORED HERE                                03610000
+036200****************************************************************  03620000
+036300 01 PV-MQ-PROGRAM-VARIABLES.                                      03630000
+036400     05  PV-COMPLETION-CODE          PIC S9(9) BINARY.            03640000
+036500     05  PV-REASON                   PIC S9(9) BINARY.            03650000
+036600     05  PV-CON-REASON               PIC S9(9) BINARY.            03660000
+036700     05  PV-MQCHECK                  PIC X(08) VALUE 'MQR2C'.     03670000
+036800     05  PV-ERROR-MESSAGE            PIC X(48) VALUE SPACES.      03680000
+036900     05  PV-OPEN-OPTIONS             PIC S9(9) BINARY.            03690000
+037000     05  PV-MQ-REASON-TEXT           PIC X(30) VALUE SPACES.      03700000
+037100*    05  PV-MSGBUFFER                PIC X(999999) VALUE SPACES.  03710000
+037200     05  PV-MSGBUFFER.                                            03720000
+037300         10  PV-MSGBUFFER-banner     PIC X(39) VALUE SPACES.      03730000
+037400         10  PV-MSGBUFFER-data       PIC X(2048000) VALUE SPACES. 03740000
+037500                                                                  03750000
+037600****************************************************************  03760000
+037700* RETURN CODES ARE EVALUATED AND THIS SWITCH IS USED TO           03770000
+037800* INDICATE ANY ERRORS (FROM WHAT I'VE SEEN THIS SWITCH IS         03780000
+037900* USELESS SINCE THE PROGRAM ABENDS BEFORE IT IS USED ANYWHERE) *  03790000
+038000****************************************************************  03800000
+038100 01 PV-MQ-PROGRAM-SWITCHES.                                       03810000
+038200     05  PS-MQ-ERROR-SW              PIC X(01) VALUE 'N'.         03820000
+038300         88  PS-NO-MQ-ERROR                    VALUE 'N'.         03830000
+038400         88  PS-MQ-ERROR                       VALUE 'Y'.         03840000
+038500****************************************************************  03850000
+038600**                     E N D   O F   M Q                      **  03860000
+038700****************************************************************  03870000
+038800                                                                  03880000
+038900***************************************************************   03890000
+039000 PROCEDURE DIVISION.                                              03900000
+039100***************************************************************   03910000
+039200 0000-MAINLINE.                                                   03920000
+039300     DISPLAY ' '.                                                 03930000
+039400     DISPLAY '************ START OF WSKUP006 ***************'     03940000
+039500     DISPLAY ' '.                                                 03950000
+039600                                                                  03960000
+039700     PERFORM 1000-INITIALIZE.                                     03970000
+039800                                                                  03980000
+039900     MOVE ZEROES TO PV-COUNTER.                                   03990000
+040000     SET PS-NOT-END-OF-CONTROL-CARDS TO TRUE.                     04000000
+040100     PERFORM 2000-PROCESS-CONTROL-CARD                            04010000
+040200       UNTIL PS-END-OF-CONTROL-CARDS.                             04020000
+040300                                                                  04030000
+041000* END OF JOB ROUTINE.                                             04100000
+041100     PERFORM 9000-EOJ-ROUTINE.                                    04110000
+041200                                                                  04120000
+041300     DISPLAY '************  END OF WSKUP006  ***************'     04130000
+041400     STOP RUN.                                                    04140000
+041500                                                                  04150000
+041600******************************************************************04160000
+042100 1000-INITIALIZE.                                                 04210000
+042500                                                                  04250000
+042700     PERFORM 1100-SET-CURRENT-TMST.                               04270091
+042800                                                                  04280000
+043800******************************************************************04380000
+043900* SET THE CURRENT TIMESTAMP.                                      04390091
+044000******************************************************************04400000
+044100 1100-SET-CURRENT-TMST.                                           04410091
+044200                                                                  04420000
+044300     EXEC SQL                                                     04430000
+044400         SET :PV-CURRENT-TMST = CURRENT TIMESTAMP                 04440000
+044500     END-EXEC                                                     04450000
+044600                                                                  04460000
+044700     EVALUATE TRUE                                                04470000
+044800       WHEN SQLCODE = ZERO                                        04480000
+044900           CONTINUE                                               04490000
+045000                                                                  04500000
+045100       WHEN SQLWARN0 NOT EQUAL SPACE                              04510000
+045200       WHEN SQLCODE NOT EQUAL ZERO                                04520000
+045300           MOVE '1100-SET-CURRENT-TMST'                           04530091
+045310                                    TO PV-ABEND-PARAGRAPH         04531067
+045400           MOVE 'SET CURR TMST'     TO PV-ABEND-OPERATION         04540067
+045500           PERFORM 9900-DB2-ABEND                                 04550000
+045600     END-EVALUATE.                                                04560000
+045700                                                                  04570000
+045800****************************************************************  04580091
+045900* GET MQ INFORMATION FROM DB2 TABLES.                             04590000
+045910****************************************************************  04591091
+046100 1200-GET-MQ-QUEUE-INFO.                                          04610000
+046200                                                                  04620000
+046300     EXEC SQL                                                     04630000
+046400        SELECT A.INTGRTN_TYP_DESC                                 04640000
+046500             , A.LCL_QUE_MGR                                      04650000
+046600             , A.RMT_QUE_MGR                                      04660000
+046700             , A.QUE_NM                                           04670000
+046900          INTO :WSV00005-INTGRTN-TYP-DESC                         04690000
+047000             , :WSV00005-LCL-QUE-MGR                              04700000
+047100             , :WSV00005-RMT-QUE-MGR                              04710000
+047200             , :WSV00005-QUE-NM                                   04720000
+047400          FROM WSV_PRVDR_QUE A                                    04740000
+047500         WHERE A.APPL_FUNC_DESC    = 'LEGCYINBDQ'                 04750000
+047600           AND A.INTGRTN_TYP_CDE   = 'ORDBRKRQ'                   04760099
+047610           AND A.DC_NBR            = :WSV00005-DC-NBR             04761099
+047700     END-EXEC.                                                    04770000
+047800                                                                  04780000
+047900     EVALUATE TRUE                                                04790000
+048000       WHEN SQLCODE = ZERO                                        04800000
+048100           MOVE WSV00005-LCL-QUE-MGR-TEXT                         04810000
+048200                                     TO CC-QMGR-NAME              04820000
+048300           MOVE WSV00005-RMT-QUE-MGR-TEXT                         04830000
+048400                                     TO CC-QMGR-NAME-REMOTE       04840000
+048500           MOVE WSV00005-QUE-NM-TEXT TO CC-TRANS-QUEUE-NAME       04850000
+048600           MOVE WSV00005-DC-NBR      TO CC-DC-NBR                 04860000
+048800           MOVE CC-DC-NBR            TO PV-DC-NBR                 04880091
+048810                                                                  04881091
+048900           DISPLAY '  CC1 (REMOTE MANAGER): ' CC-QMGR-NAME-REMOTE 04890099
+049000           DISPLAY '  CC2 (QUEUE NAME)    : ' CC-TRANS-QUEUE-NAME 04900099
+049100           DISPLAY '  CC3 (DC NUMBER)     : ' PV-DC-NBR           04910099
+049200           DISPLAY '  CC4 (QUEUE MANAGER) : ' CC-QMGR-NAME        04920099
+049210           DISPLAY ' '                                            04921099
+049300                                                                  04930000
+049400       WHEN OTHER                                                 04940000
+049500           MOVE '1200-GET-MQ-QUEUE-INFO' TO PV-ABEND-PARAGRAPH    04950000
+049600           MOVE 'GET MQ ORDBRKRQ'        TO PV-ABEND-OPERATION    04960071
+049700           MOVE 'WSV_PRVDR_QUE'          TO PV-ABEND-TABLE-1      04970054
+049800           PERFORM 9900-DB2-ABEND                                 04980054
+049900     END-EVALUATE.                                                04990000
+050000                                                                  05000000
+050100****************************************************************  05010000
+050200** CONNECT TO THE QUEUE MANAGER                                   05020000
+050300** GET THE HANDLE TO THE QUEUE MANAGER - PV-HCONN                 05030000
+050400****************************************************************  05040000
+050500 1300-MQ-CONNECT-TO-QMGR.                                         05050000
+050600     MOVE '1300-MQ-CONNECT-TO-QMGR' TO PV-PARAGRAPH.              05060000
+050700                                                                  05070000
+050800* CONNECT TO THE QUEUE                                            05080000
+050900* CONTROL CARD 1 - QMGR NAME                                      05090000
+051000     MOVE CC-QMGR-NAME TO PC-QMGR-NAME                            05100000
+051100     MOVE PC-QMGR-NAME TO PV-QM-NAME.                             05110000
+051200                                                                  05120000
+051300     CALL PC-MQCONN USING PV-QM-NAME                              05130000
+051400                          PV-HCONN                                05140000
+051500                          PV-COMPLETION-CODE                      05150000
+051600                          PV-REASON.                              05160000
+051700                                                                  05170000
+051800*    IF CONNECTION FAILED, DISPLAY ERROR MESSAGE AND EXIT         05180000
+051900     MOVE PV-REASON TO PV-CON-REASON.                             05190000
+052000     IF PV-COMPLETION-CODE = MQCC-OK                              05200000
+052100         CONTINUE                                                 05210000
+052200     ELSE                                                         05220000
+052300         CALL PV-MQCHECK USING PV-REASON                          05230000
+052400                               PV-MQ-REASON-TEXT                  05240000
+052500         MOVE PV-QM-NAME           TO PE-MQ-QMANAGER              05250000
+052600         MOVE PV-COMPLETION-CODE   TO PE-MQ-COMPLETION-CODE       05260000
+052700         MOVE PV-REASON            TO PE-MQ-REASON-CODE           05270000
+052800         MOVE '1300-MQ-CONNECT-TO-QMGR'                           05280000
+052900                                   TO PV-ERROR-MESSAGE            05290000
+053000         PERFORM 9200-MQ-ABEND                                    05300000
+053100     END-IF.                                                      05310000
+053200                                                                  05320000
+053300****************************************************************  05330000
+053400** OPEN THE QUEUE FOR 'PUT'                                       05340000
+053500*  NOTE !!! IF YOU WANT TO WRITE TO A LOCAL QUEUE FOR TESTING     05350000
+053600*  PURPOSES, YOU MUST MOVE THE NAME OF THE LOCAL QUEUE QMGR TO    05360000
+053700*  MQOD-OBJECTQMGRNAME IN THIS OPEN CALL (INSTEAD OF MOVING THE   05370000
+053800*  NAME OF THE UNIX BOX). THIS SINGLE CHANGE IS THE DIFFERENCE    05380000
+053900*  BETWEEN WRITING TO THE LOCAL QUEUE AS OPPOSED TO WRITING OUT   05390000
+054000*  TO THE REMOTE QUEUE (REMOTE QUEUE HAS A DIFFERENT QMGR).       05400000
+054100****************************************************************  05410000
+054200 1400-MQ-QUEUE-OPEN.                                              05420000
+054300     MOVE '1400-MQ-QUEUE-OPEN' TO PV-PARAGRAPH.                   05430000
+054400                                                                  05440000
+054500* CONTROL CARD 2 - QUEUE NAME                                     05450000
+054600     MOVE SPACES               TO PC-TRANS-QNAME.                 05460099
+054610     MOVE CC-TRANS-QUEUE-NAME  TO PC-TRANS-QNAME.                 05461079
+054700     COMPUTE PV-OPEN-OPTIONS = MQOO-OUTPUT                        05470000
+054800                             + MQOO-SET-IDENTITY-CONTEXT          05480000
+054900                             + MQOO-FAIL-IF-QUIESCING.            05490000
+055000     MOVE PC-TRANS-QNAME       TO MQOD-OBJECTNAME.                05500000
+055100                                                                  05510000
+055200* CONTROL CARD 3 - REMOTE QMGR NAME                               05520000
+055300                                                                  05530000
+055400*THIS IS THE NAME OF THE UNIX BOX (TO WRITE TO REMOTE QUEUE)      05540000
+055500*LEAVE BOTH LINES UNCOMMENTED TO WRITE TO REMOTE QUEUE.           05550000
+055600*COMMENT OUT THE LINE BELOW (PV-QM-NAME).                         05560000
+055700     MOVE CC-QMGR-NAME-REMOTE  TO PV-QM-NAME-REMOTE.              05570074
+055800     MOVE PV-QM-NAME-REMOTE    TO MQOD-OBJECTQMGRNAME.            05580074
+055900                                                                  05590000
+056000******************************************************************05600000
+056100*REPLACE REMOTE QMGR NAME WITH LOCAL QMGR NAME TO WRITE TO LOCAL Q05610000
+056200******************************************************************05620000
+056300*TO WRITE TO A LOCAL QUEUE, UNCOMMENT THE LINE BELOW,             05630000
+056400*AND COMMENT OUT THE ABOVE TWO LINES.                             05640000
+056500*    MOVE PV-QM-NAME           TO MQOD-OBJECTQMGRNAME.            05650074
+056600                                                                  05660000
+056700     CALL PC-MQOPEN USING PV-HCONN                                05670000
+056800                          MQM-OBJECT-DESCRIPTOR                   05680000
+056900                          PV-OPEN-OPTIONS                         05690000
+057000                          PV-PQ-HANDLE                            05700000
+057100                          PV-COMPLETION-CODE                      05710000
+057200                          PV-REASON.                              05720000
+057300                                                                  05730000
+057400     IF PV-COMPLETION-CODE = MQCC-OK THEN                         05740000
+057500         CONTINUE                                                 05750000
+057600     ELSE                                                         05760000
+057700         CALL PV-MQCHECK USING PV-REASON                          05770000
+057800                               PV-MQ-REASON-TEXT                  05780000
+057900         MOVE PV-QM-NAME-REMOTE    TO PE-MQ-QMANAGER-REMOTE       05790000
+058000         MOVE PC-TRANS-QNAME       TO PE-MQ-QNAME                 05800000
+058100         MOVE PV-COMPLETION-CODE   TO PE-MQ-COMPLETION-CODE       05810000
+058200         MOVE PV-REASON            TO PE-MQ-REASON-CODE           05820000
+058300         MOVE '1400-MQ-QUEUE-OPEN' TO PV-ERROR-MESSAGE            05830000
+058400         PERFORM 9200-MQ-ABEND                                    05840000
+058500     END-IF.                                                      05850000
+058600                                                                  05860000
+058700****************************************************************  05870000
+058800** CLOSES THE MQ QUEUE.                                           05880000
+058900****************************************************************  05890000
+059000 1500-MQ-QUEUE-CLOSE.                                             05900000
+059100     MOVE '1500-MQ-QUEUE-CLOSE' TO PV-PARAGRAPH.                  05910000
+059200                                                                  05920000
+059300     CALL PC-MQCLOSE USING PV-HCONN                               05930000
+059400                           PV-PQ-HANDLE                           05940000
+059500                           MQCO-NONE                              05950000
+059600                           PV-COMPLETION-CODE                     05960000
+059700                           PV-REASON.                             05970000
+059800                                                                  05980000
+059900     IF PV-COMPLETION-CODE = MQCC-OK                              05990000
+060000         CONTINUE                                                 06000000
+060100     ELSE                                                         06010000
+060200         CALL PV-MQCHECK USING PV-REASON                          06020000
+060300                               PV-MQ-REASON-TEXT                  06030000
+060400         MOVE PV-QM-NAME           TO PE-MQ-QMANAGER              06040000
+060500         MOVE PC-TRANS-QNAME       TO PE-MQ-QNAME                 06050000
+060600         MOVE PV-COMPLETION-CODE   TO PE-MQ-COMPLETION-CODE       06060000
+060700         MOVE PV-REASON            TO PE-MQ-REASON-CODE           06070000
+060800         MOVE 'PE-MQ-CLOSE'        TO PV-ERROR-MESSAGE            06080000
+060900         PERFORM 9200-MQ-ABEND                                    06090000
+061000     END-IF.                                                      06100000
+061100                                                                  06110000
+061200****************************************************************  06120000
+061300** DISCONNECT FROM THE QUEUE MANAGER                              06130000
+061400****************************************************************  06140000
+061500 1600-DISCONNECT-QMGR.                                            06150000
+061600     MOVE '1600-DISCONNECT-QMGR' TO PV-PARAGRAPH.                 06160000
+061700                                                                  06170000
+061800     CALL PC-MQDISC USING PV-HCONN                                06180000
+061900                          PV-COMPLETION-CODE                      06190000
+062000                          PV-REASON                               06200000
+062100                                                                  06210000
+062200     IF PV-COMPLETION-CODE = MQCC-OK                              06220000
+062300        CONTINUE                                                  06230000
+062400     ELSE                                                         06240000
+062500        CALL PV-MQCHECK USING PV-REASON                           06250000
+062600                              PV-MQ-REASON-TEXT                   06260000
+062700        MOVE PV-QM-NAME             TO PE-MQ-QMANAGER             06270000
+062800        MOVE PC-TRANS-QNAME         TO PE-MQ-QNAME                06280000
+062900        MOVE PV-COMPLETION-CODE     TO PE-MQ-COMPLETION-CODE      06290000
+063000        MOVE PV-REASON              TO PE-MQ-REASON-CODE          06300000
+063100        MOVE '1600-DISCONNECT-QMGR' TO PV-ERROR-MESSAGE           06310000
+063200        PERFORM 9200-MQ-ABEND                                     06320000
+063300     END-IF.                                                      06330000
+063400                                                                  06340000
+063500******************************************************************06350000
+063600*                                                                *06360000
+063700*         2 0 0 0 - R E A D   C O N T R O L   C A R D S          *06370000
+063800*                                                                *06380000
+063900******************************************************************06390000
+064000 2000-PROCESS-CONTROL-CARD.                                       06400000
+064100                                                                  06410000
+064200     INITIALIZE CC-CONTROL-CARD-PARAMETERS.                       06420000
+064300     ACCEPT CC-CONTROL-CARD-PARAMETERS FROM SYSIN.                06430000
+064400                                                                  06440000
+064500     IF CC-STORE-NBR = 0                                          06450000
+064600         SET PS-END-OF-CONTROL-CARDS TO TRUE                      06460000
+064700     ELSE                                                         06470000
+064710         ADD  +1              TO PA-INPUT-READ                    06471099
+064800         MOVE CC-STORE-NBR    TO DK-STORE-NBR                     06480091
+064810                                 WSV00005-DC-NBR                  06481099
+064900         MOVE CC-PROCESS-TYPE TO DK-TRAN-TYPE                     06490000
+065000         MOVE CC-STATUS-CODE  TO DK-STATUS-CODE                   06500000
+065100     END-IF.                                                      06510000
+065200                                                                  06520000
+065300     IF PS-NOT-END-OF-CONTROL-CARDS                               06530000
+065400         DISPLAY ' '                                              06540000
+065500         DISPLAY 'INPUT CONTROL CARD READ: '                      06550086
+065600                 CC-CONTROL-CARD-PARAMETERS                       06560000
+065700         DISPLAY ' '                                              06570000
+065800         PERFORM 2100-PROCESS-CC-REQUESTS                         06580000
+065900     END-IF.                                                      06590000
+066000                                                                  06600000
+066100******************************************************************06610000
+066200 2100-PROCESS-CC-REQUESTS.                                        06620000
+066300                                                                  06630000
+066310     PERFORM 2105-MQ-BEGIN-RTN.                                   06631099
+066320                                                                  06632067
+066400     PERFORM 2110-OPEN-CNTL-CURSOR.                               06640000
+066500                                                                  06650000
+066600     PERFORM 2120-FETCH-CNTL-CURSOR.                              06660000
+066700                                                                  06670000
+066800     IF PS-END-OF-CNTL-CSR-Y                                      06680099
+066900         DISPLAY '*************************************'          06690000
+067000         DISPLAY '**               NO                **'          06700000
+067100         DISPLAY '**        ' CC-PROCESS-TYPE                     06710000
+067200                 '  ' CC-STATUS-CODE                              06720000
+067300                 '  ' CC-STORE-NBR               '   **'          06730000
+067400         DISPLAY '**      FOUND ON WST_DAT_CNTL      **'          06740000
+067500         DISPLAY '*************************************'          06750000
+067600     ELSE                                                         06760000
+067700         MOVE WST00003-PRC-GP-ID TO PV-HOLD-GROUP-PROCESS-ID      06770000
+067800*                                                                 06780000
+067900*  initialization missing on change of control / input store      06790000
+068000*                                                                 06800000
+068100         MOVE ZEROES TO L M N D                                   06810000
+068200         INITIALIZE PV-MY-OPTIONAL                                06820000
+068300         PERFORM 3010-INIT-PICKTICKET                             06830063
+068400                                                                  06840000
+068500     END-IF.                                                      06850000
+068600                                                                  06860000
+068700*PROCESS CNTL RECORDS. CC-STORE-NBR                               06870000
+068800     PERFORM                                                      06880000
+068900       UNTIL PS-END-OF-CNTL-CSR-Y                                 06890099
+069000*PROCESS 'XFER' RECORDS ASSOCIATED WITH THE 'CNTL' RECORD.        06900000
+069100         PERFORM 3000-PROCESS-XFER1                               06910000
+069200*UPDATE 'CNTL' RECORD.                                            06920000
+069300         PERFORM 2140-UPDATE-CNTL-STAT-CDE                        06930099
+069310*** for testing - comment out above line <<--------               06931099
+069400*COMMIT DB2 DATA.                                                 06940000
+069500         PERFORM 2200-DB2-COMMIT                                  06950000
+069600*MQ COMMIT                                                        06960000
+069700         PERFORM 2300-MQ-COMMIT                                   06970000
+069800*GET NEXT 'CNTL' RECORD.                                          06980000
+069900         PERFORM 2120-FETCH-CNTL-CURSOR                           06990000
+070000         IF PS-END-OF-CNTL-CSR-Y                                  07000099
+070100**           PERFORM 3999-CLEAR-DTL-INSTRS                        07010099
+070200             PERFORM 4000-CREATE-MSGS                             07020000
+070300         END-IF                                                   07030000
+070400     END-PERFORM.                                                 07040000
+070500                                                                  07050000
+070600*CLOSE THE 'CNTL' CURSOR.                                         07060098
+070700     PERFORM 2150-CLOSE-CNTL-CURSOR.                              07070098
+070800                                                                  07080099
+070802*CLOSE THE TRANSACTION QUEUE.                                     07080299
+070803     PERFORM 1500-MQ-QUEUE-CLOSE.                                 07080399
+070804                                                                  07080499
+070805*DISCONNECT FROM THE QMGR.                                        07080599
+070806     PERFORM 1600-DISCONNECT-QMGR.                                07080699
+070807                                                                  07080799
+070810******************************************************************07081099
+070820 2105-MQ-BEGIN-RTN.                                               07082099
+070830                                                                  07083099
+070832*INITIALIZE TABLES.                                               07083267
+070833     INITIALIZE PV-MY-OPTIONAL                                    07083379
+070834                WSV00005-QUE-NM                                   07083482
+070855                WSV00005-LCL-QUE-MGR                              07085581
+070856                WSV00005-RMT-QUE-MGR                              07085681
+070858                WSV00005-INTGRTN-TYP-DESC.                        07085882
+070859                                                                  07085967
+070860*READ MQ CONTROL CARDS.                                           07086099
+070861     PERFORM 1200-GET-MQ-QUEUE-INFO.                              07086199
+070862                                                                  07086299
+070870*CONNECT TO QUEUE MANAGER                                         07087099
+070880     PERFORM 1300-MQ-CONNECT-TO-QMGR.                             07088099
+070890                                                                  07089099
+070891*OPEN THE QUEUE FOR PUTS                                          07089199
+070892     PERFORM 1400-MQ-QUEUE-OPEN.                                  07089299
+070893                                                                  07089367
+070900******************************************************************07090000
+071000 2110-OPEN-CNTL-CURSOR.                                           07100000
+071100                                                                  07110000
+071200     EXEC SQL                                                     07120000
+071300         OPEN CNTL-CSR                                            07130099
+071400     END-EXEC.                                                    07140000
+071500                                                                  07150000
+071600     EVALUATE TRUE                                                07160000
+071700       WHEN SQLCODE = ZERO                                        07170000
+071800           SET PS-END-OF-CNTL-CSR-N     TO TRUE                   07180099
+071900                                                                  07190054
+072000       WHEN OTHER                                                 07200000
+072100           MOVE '2110-OPEN-CNTL-CURSOR' TO PV-ABEND-PARAGRAPH     07210000
+072200           MOVE 'OPEN CNTL-CSR'         TO PV-ABEND-OPERATION     07220099
+072300           MOVE 'WST_DAT_CNTL'          TO PV-ABEND-TABLE-1       07230054
+072400           PERFORM 9900-DB2-ABEND                                 07240000
+072500     END-EVALUATE.                                                07250000
+072600                                                                  07260000
+072700******************************************************************07270000
+072800 2120-FETCH-CNTL-CURSOR.                                          07280000
+072900***  DISPLAY '2120-FETCH-CNTL-CURSOR'.                            07290091
+073000                                                                  07300000
+073100     EXEC SQL                                                     07310000
+073200         FETCH CNTL-CSR                                           07320099
+073300          INTO :WST00003-TRN-TYP-CDE                              07330000
+073400             , :WST00003-PRC-GP-ID                                07340000
+073500             , :WST00003-PRC-CNTL-TMST                            07350000
+073600             , :WST00003-LOC-NBR                                  07360000
+073700             , :WST00003-STAT-CDE                                 07370000
+073800     END-EXEC.                                                    07380000
+073900                                                                  07390000
+074000     EVALUATE TRUE                                                07400000
+074100       WHEN SQLCODE = ZERO                                        07410000
+074200           ADD +1 TO PA-CNTL-READ                                 07420000
+074300           ADD 1  TO PV-COUNTER                                   07430099
+074400           IF PV-COUNTER > 14999                                  07440000
+074500               DISPLAY                                            07450000
+074600                 '***  15,000 PROCESS GROUP LIMIT REACHED ***'    07460000
+074700               SET PS-END-OF-CNTL-CSR-Y TO TRUE                   07470099
+074800           ELSE                                                   07480000
+074900               MOVE WST00003-PRC-GP-ID TO PV-CURR-GROUP-PROCESS-ID07490000
+075000               MOVE WST00003-LOC-NBR   TO PV-CURR-STR-NBR         07500000
+075100               PERFORM 2130-UPDATE-CNTL-BEG-TMST                  07510099
+075200           END-IF                                                 07520000
+075300                                                                  07530000
+075400       WHEN SQLCODE = +100                                        07540000
+075500           SET PS-END-OF-CNTL-CSR-Y      TO TRUE                  07550099
+075600                                                                  07560000
+075700       WHEN OTHER                                                 07570000
+075800           MOVE '2120-FETCH-CNTL-CURSOR' TO PV-ABEND-PARAGRAPH    07580000
+075900           MOVE 'FETCH CNTL-CSR'         TO PV-ABEND-OPERATION    07590099
+076000           MOVE 'WST_DAT_CNTL'           TO PV-ABEND-TABLE-1      07600054
+076100           PERFORM 9900-DB2-ABEND                                 07610000
+076200     END-EVALUATE.                                                07620000
+076300                                                                  07630000
+076400******************************************************************07640000
+076500 2130-UPDATE-CNTL-BEG-TMST.                                       07650099
+076600                                                                  07660099
+076700     PERFORM WITH TEST AFTER                                      07670099
+076800       VARYING PV-RETRY-COUNTER FROM 1 BY 1                       07680099
+076900         UNTIL PV-RETRY-COUNTER > PC-MAX-RETRIES                  07690099
+077000            OR SQLCODE = ZERO                                     07700099
+077100                                                                  07710099
+077200         EXEC SQL                                                 07720099
+077300             UPDATE WST_DAT_CNTL                                  07730099
+077400                SET BEG_PRC_TMST  = CURRENT TIMESTAMP             07740099
+077500              WHERE TRN_TYP_CDE   = :WST00003-TRN-TYP-CDE         07750099
+077600                AND PRC_GP_ID     = :WST00003-PRC-GP-ID           07760099
+077700                AND PRC_CNTL_TMST = :WST00003-PRC-CNTL-TMST       07770099
+077800                AND LOC_NBR       = :WST00003-LOC-NBR             07780099
+077900                AND STAT_CDE      = :WST00003-STAT-CDE            07790099
+078000         END-EXEC                                                 07800099
+078100                                                                  07810099
+078200         EVALUATE TRUE                                            07820099
+078300           WHEN SQLCODE = ZERO                                    07830099
+078400               CONTINUE                                           07840099
+078500                                                                  07850099
+078600           WHEN OTHER                                             07860099
+078700               MOVE '2130-UPDATE-BEG-TMST' TO PV-ABEND-PARAGRAPH  07870099
+078800               MOVE 'UPDATE WST_DAT_CNTL'  TO PV-ABEND-OPERATION  07880099
+078900               MOVE 'WST_DAT_CNTL'         TO PV-ABEND-TABLE-1    07890099
+079000               PERFORM 9900-DB2-ABEND                             07900099
+079100         END-EVALUATE                                             07910099
+079200                                                                  07920099
+079300     END-PERFORM.                                                 07930099
+079400                                                                  07940099
+079500     IF PV-RETRY-COUNTER > PC-MAX-RETRIES                         07950099
+079600       AND SQLCODE NOT = ZERO                                     07960099
+079700         MOVE '2130-UPDATE-BEG-TMST' TO PV-ABEND-PARAGRAPH        07970099
+079800         MOVE 'MAX TRIES     '       TO PV-ABEND-OPERATION        07980099
+079900         PERFORM 9900-DB2-ABEND                                   07990099
+080000     END-IF.                                                      08000099
+080100                                                                  08010000
+080200******************************************************************08020000
+080300 2140-UPDATE-CNTL-STAT-CDE.                                       08030099
+080400                                                                  08040099
+080500     EXEC SQL                                                     08050099
+080600         UPDATE WST_DAT_CNTL                                      08060099
+080700            SET STAT_CDE     = 'CMPLTD'                           08070099
+080800              , END_PRC_TMST = CURRENT TIMESTAMP                  08080099
+080900          WHERE TRN_TYP_CDE   = :WST00003-TRN-TYP-CDE             08090099
+081000            AND PRC_GP_ID     = :WST00003-PRC-GP-ID               08100099
+081100            AND PRC_CNTL_TMST = :WST00003-PRC-CNTL-TMST           08110099
+081200            AND LOC_NBR       = :WST00003-LOC-NBR                 08120099
+081300            AND STAT_CDE      = :WST00003-STAT-CDE                08130099
+081400     END-EXEC.                                                    08140099
+081500                                                                  08150099
+081600     EVALUATE TRUE                                                08160099
+081700       WHEN SQLCODE = ZERO                                        08170099
+081800           CONTINUE                                               08180099
+081900                                                                  08190099
+082000       WHEN OTHER                                                 08200099
+082100           MOVE '2140-UPDATE-CNTL-STAT-CDE' TO PV-ABEND-PARAGRAPH 08210099
+082200           MOVE 'UPDATE WST_DAT_CNTL'       TO PV-ABEND-OPERATION 08220099
+082300           MOVE 'WST_DAT_CNTL'              TO PV-ABEND-TABLE-1   08230099
+082400           PERFORM 9900-DB2-ABEND                                 08240099
+082500     END-EVALUATE.                                                08250099
+082600                                                                  08260099
+082700******************************************************************08270000
+082800 2150-CLOSE-CNTL-CURSOR.                                          08280000
+082900                                                                  08290000
+083000     EXEC SQL                                                     08300000
+083100         CLOSE CNTL-CSR                                           08310099
+083200     END-EXEC.                                                    08320000
+083300                                                                  08330000
+083400     EVALUATE TRUE                                                08340000
+083500       WHEN SQLCODE = ZERO                                        08350000
+083600           CONTINUE                                               08360000
+083700                                                                  08370000
+083800       WHEN OTHER                                                 08380000
+083900           MOVE '2150-CLOSE-CNTL-CURSOR' TO PV-ABEND-PARAGRAPH    08390000
+084000           MOVE 'CLOSE CNTL-CSR'         TO PV-ABEND-OPERATION    08400099
+084100           MOVE 'WST_DAT_CNTL'           TO PV-ABEND-TABLE-1      08410054
+084200           PERFORM 9900-DB2-ABEND                                 08420000
+084300     END-EVALUATE.                                                08430000
+084400                                                                  08440000
+084500******************************************************************08450000
+084600******************************************************************08460000
+084700 2200-DB2-COMMIT.                                                 08470000
+084800                                                                  08480000
+084900     EXEC SQL                                                     08490000
+085000         COMMIT                                                   08500000
+085100     END-EXEC.                                                    08510000
+085200                                                                  08520000
+085300     EVALUATE TRUE                                                08530000
+085400       WHEN SQLCODE = ZERO                                        08540000
+085500           CONTINUE                                               08550000
+085600                                                                  08560000
+085700       WHEN OTHER                                                 08570000
+085800           MOVE '2200-DB2-COMMIT'     TO PV-ABEND-PARAGRAPH       08580000
+085900           MOVE 'COMMIT WST_DAT_CNTL' TO PV-ABEND-OPERATION       08590000
+086000           PERFORM 9900-DB2-ABEND                                 08600000
+086100     END-EVALUATE.                                                08610000
+086200                                                                  08620000
+086300******************************************************************08630000
+086400*  COMMIT MQ PROCESSING SINCE THE POINT OF THE LAST COMMIT        08640000
+086500******************************************************************08650000
+086600 2300-MQ-COMMIT.                                                  08660000
+086700                                                                  08670000
+086800     CALL PC-MQCMIT USING PV-HCONN                                08680000
+086900                          PV-COMPLETION-CODE                      08690000
+087000                          PV-REASON.                              08700000
+087100                                                                  08710000
+087200     IF (PV-COMPLETION-CODE NOT = MQCC-OK)                        08720000
+087300        CALL PV-MQCHECK USING PV-REASON                           08730000
+087400                              PV-MQ-REASON-TEXT                   08740000
+087500        MOVE '2300-COMMIT-MQ'   TO PV-PARAGRAPH                   08750000
+087600        MOVE 'MQCMIT ERROR'     TO PV-ERROR-MESSAGE               08760000
+087700        MOVE PV-COMPLETION-CODE TO PV-HOLD-COMPLETION-CODE        08770000
+087800                                   PE-MQ-COMPLETION-CODE          08780000
+087900        MOVE PV-REASON          TO PV-HOLD-REASON                 08790000
+088000                                   PE-MQ-REASON-CODE              08800000
+088100        PERFORM 5100-BACK-OUT-MQ                                  08810000
+088200        MOVE PV-HOLD-COMPLETION-CODE TO PV-COMPLETION-CODE        08820000
+088300        MOVE PV-HOLD-REASON          TO PV-REASON                 08830000
+088400        PERFORM 9200-MQ-ABEND                                     08840000
+088500     END-IF.                                                      08850000
+088600                                                                  08860000
+088700******************************************************************08870000
+088800*                                                                *08880000
+088900*       3 0 0 0 - P R O C E S S   D A T A   R E C O R D S        *08890000
+089000*                                                                *08900000
+089100******************************************************************08910000
+089200 3000-PROCESS-XFER1.                                              08920000
+089300                                                                  08930000
+089400*COMPARE CURR-GROUP-ID TO PREV-GROUP-ID.  IF NOT EQUAL, CREATE    08940000
+089500*MQ MESSAGE(S) FROM THE WORKING STORAGE HOLD TABLES.  THEN        08950000
+089600*CLEAR THE W-S HOLD TABLES AND RESET COUNTERS                     08960000
+089700     IF PV-CURR-GROUP-PROCESS-ID NOT = PV-HOLD-GROUP-PROCESS-ID   08970000
+089800**       PERFORM 3999-CLEAR-DTL-INSTRS                            08980099
+089900         PERFORM 4000-CREATE-MSGS                                 08990000
+090000         MOVE ZEROES TO L M N D                                   09000000
+090100         INITIALIZE PV-MY-OPTIONAL                                09010000
+090200         PERFORM 3010-INIT-PICKTICKET                             09020000
+090300         MOVE PV-CURR-GROUP-PROCESS-ID TO                         09030099
+090400                                       PV-HOLD-GROUP-PROCESS-ID   09040099
+090500     END-IF.                                                      09050000
+090600                                                                  09060000
+090700     PERFORM 3100-OPEN-XFER-CURSOR.                               09070000
+090800                                                                  09080000
+090900     PERFORM                                                      09090000
+091000       UNTIL PS-END-OF-XFER-CSR-Y                                 09100099
+091100         PERFORM 3200-FETCH-XFER-CURSOR                           09110000
+091200     END-PERFORM.                                                 09120000
+091300                                                                  09130000
+091400     PERFORM 3300-CLOSE-XFER-CURSOR.                              09140000
+091500                                                                  09150000
+091600******************************************************************09160000
+091700 3010-INIT-PICKTICKET.                                            09170000
+091710*    DISPLAY '3010-INIT-PICKTICKET'.                              09171099
+091800                                                                  09180000
+092820     Move SPACES     TO                                           09282099
+092830                Company                                           09283099
+092840                Divisiox                                          09284099
+092850                PktCtlNbr                                         09285099
+092860                Warehouse                                         09286099
+092870                PktNbr                                            09287099
+092880                OrderNbr                                          09288099
+092890                OrderType                                         09289099
+092891                BatchCtlNbr                                       09289199
+092892                PickticketHeaderFields.                           09289299
+092900                                                                  09290099
+093000     MOVE 5          TO PV-HDRINS-CNT.                            09300099
+093100                                                                  09310099
+093420     MOVE SPACES     TO PickticketHdrInstruction (1)              09342099
+093430                        PickticketHdrInstruction (2)              09343099
+093440                        PickticketHdrInstruction (3)              09344099
+093450                        PickticketHdrInstruction (4)              09345099
+093460                        PickticketHdrInstruction (5).             09346099
+093500                                                                  09350099
+093600     MOVE 10         TO PV-INSTR-CNT.                             09360099
+093700     MOVE 1000       TO PV-DTL-CNT.                               09370099
+093800                                                                  09380099
+095110     PERFORM VARYING F FROM 1 BY 1 UNTIL F > 1000                 09511099
+095120         MOVE ZEROES     TO PktLineNbr (F)                        09512099
+095130         MOVE SPACES     TO SKU (F)                               09513099
+095140                            PickticketDetailFields (F)            09514099
+095150                            TPESupplPktDtl (F)                    09515099
+095160                            PickticketDtlInstruction (F 1)        09516099
+095170                            PickticketDtlInstruction (F 2)        09517099
+095180                            PickticketDtlInstruction (F 3)        09518099
+095190                            PickticketDtlInstruction (F 4)        09519099
+095191                            PickticketDtlInstruction (F 5)        09519199
+095192                            PickticketDtlInstruction (F 6)        09519299
+095193                            PickticketDtlInstruction (F 7)        09519399
+095194                            PickticketDtlInstruction (F 8)        09519499
+095195                            PickticketDtlInstruction (F 9)        09519599
+095196                            PickticketDtlInstruction (F 10)       09519699
+095197     END-PERFORM.                                                 09519799
+095198                                                                  09519899
+095199     MOVE 0          TO PV-HDRINS-CNT.                            09519999
+095200     MOVE 0          TO PV-INSTR-CNT.                             09520099
+095201     MOVE 0          TO PV-DTL-CNT.                               09520199
+095202                                                                  09520299
+095210                                                                  09521000
+095300******************************************************************09530000
+095400 3100-OPEN-XFER-CURSOR.                                           09540000
+095500                                                                  09550000
+095600     EXEC SQL                                                     09560000
+095700         OPEN XFER-CSR                                            09570099
+095800     END-EXEC.                                                    09580000
+095900                                                                  09590000
+096000     EVALUATE TRUE                                                09600000
+096100       WHEN SQLCODE = ZERO                                        09610000
+096200           SET PS-END-OF-XFER-CSR-N     TO TRUE                   09620099
+096300                                                                  09630000
+096400       WHEN OTHER                                                 09640000
+096500           MOVE '3100-OPEN-XFER-CURSOR' TO PV-ABEND-PARAGRAPH     09650000
+096600           MOVE 'OPEN XFER-CSR'         TO PV-ABEND-OPERATION     09660099
+096700           MOVE 'WST_DAT_XFER'          TO PV-ABEND-TABLE-1       09670054
+096800           PERFORM 9900-DB2-ABEND                                 09680000
+096900     END-EVALUATE.                                                09690000
+097000                                                                  09700000
+097100******************************************************************09710000
+097200 3200-FETCH-XFER-CURSOR.                                          09720000
+097300                                                                  09730000
+097400     EXEC SQL                                                     09740000
+097500         FETCH XFER-CSR                                           09750099
+097600          INTO :WST00004-RDM-PRC-TYP-CDE                          09760000
+097700             , :WST00004-LOD-DAT-TXT                              09770000
+097800     END-EXEC.                                                    09780000
+097900                                                                  09790000
+098000     EVALUATE TRUE                                                09800000
+098100       WHEN SQLCODE = ZERO                                        09810000
+098200           ADD +1 TO PA-XFER-READ                                 09820000
+098300           MOVE WST00004-RDM-PRC-TYP-CDE  TO PV-HOLD-PROCESS-TYPE 09830000
+098400           MOVE WST00004-LOD-DAT-TXT-TEXT TO WS-LOAD-DAT-TXT-TEXT 09840000
+098500           PERFORM 3210-TABLE-PKT-ROWS                            09850000
+098600                                                                  09860000
+098700       WHEN SQLCODE = +100                                        09870000
+098800           SET PS-END-OF-XFER-CSR-Y      TO TRUE                  09880099
+098900                                                                  09890000
+099000       WHEN OTHER                                                 09900000
+099100           MOVE '3200-FETCH-XFER-CURSOR' TO PV-ABEND-PARAGRAPH    09910000
+099200           MOVE 'FETCH XFER-CSR'         TO PV-ABEND-OPERATION    09920099
+099300           MOVE 'WST_DAT_XFER'           TO PV-ABEND-TABLE-1      09930054
+099400           PERFORM 9900-DB2-ABEND                                 09940000
+099500     END-EVALUATE.                                                09950000
+099600                                                                  09960000
+099700******************************************************************09970000
+099800 3210-TABLE-PKT-ROWS.                                             09980000
+099900***  DISPLAY '3210-TABLE-PKT-ROWS - ' PV-HOLD-PROCESS-TYPE.       09990099
+100000                                                                  10000000
+100100     ADD +1 TO L.                                                 10010048
+100200                                                                  10020000
+100310     IF PV-HOLD-PROCESS-TYPE = 'PKTCRE          '                 10031096
+100400                            OR 'PKTMOD          '                 10040000
+100500                            OR 'PKTDEL          '                 10050000
+100600         MOVE WS-LOAD-DAT-TXT-TEXT TO WS001-PICK-TICKET-HDR       10060000
+100700         MOVE PV-HOLD-PROCESS-TYPE TO PV-SAVE-PROCESS-TYPE        10070000
+100800         PERFORM 3220-TABLE-HDR-ROW                               10080000
+100900         PERFORM 3221-COUNT-HDR-INSTR                             10090000
+101000         PERFORM 3222-COUNT-HDR-DTLS                              10100000
+101100     END-IF.                                                      10110000
+101200     IF PV-HOLD-PROCESS-TYPE = 'PKTDCRE         '                 10120000
+101300                            OR 'PKTDMOD         '                 10130000
+101400                            OR 'PKTDDEL         '                 10140000
+101500         MOVE WS-LOAD-DAT-TXT-TEXT TO WS002-PICK-TICKET-DTL       10150000
+101600                                      PV-PKT-DTL-1-20             10160000
+101700         PERFORM 3231-COUNT-DTL-INSTR                             10170000
+101800         PERFORM 3230-TABLE-DTL-ROW                               10180032
+101900     END-IF.                                                      10190000
+102000     IF PV-HOLD-PROCESS-TYPE = 'PKTHICRE        '                 10200000
+102100                            OR 'PKTHIMOD        '                 10210000
+102200                            OR 'PKTHIDEL        '                 10220000
+102300                            OR 'PKTDICRE        '                 10230000
+102400                            OR 'PKTDIMOD        '                 10240000
+102500                            OR 'PKTDIDEL        '                 10250000
+102600         MOVE WS-LOAD-DAT-TXT-TEXT TO WS003-PICK-TICKET-INST      10260000
+102700         PERFORM 3240-TABLE-INS-ROW                               10270000
+102800     END-IF.                                                      10280000
+102900                                                                  10290000
+103000******************************************************************10300000
+103100 3220-TABLE-HDR-ROW.                                              10310000
+103200                                                                  10320000
+103300     MOVE WS001-CREATE-DATE-TIME  TO DateCreated.                 10330000
+103400     MOVE '01'                    TO Company.                     10340000
+103500     MOVE '01'                    TO Divisiox.                    10350000
+103600     MOVE WS001-PKT-CTRL-NBR      TO PktCtlNbr.                   10360000
+103710     MOVE WS001-WHSE              TO Warehouse.                   10371096
+103800     MOVE WS001-PKT-NBR           TO PktNbr.                      10380000
+103900     MOVE WS001-ORD-NBR           TO OrderNbr.                    10390000
+104000     MOVE WS001-ORD-TYPE          TO OrderType.                   10400000
+104100*added 5/8/07.                                                    10410000
+104200     PERFORM 8000-GET-RANDOM-NBR.                                 10420000
+104300     MOVE DP902-RANDOM-NUMBER     TO BatchCtlNbr.                 10430000
+104400                                                                  10440000
+104500     MOVE WS001-SHIPTO-NAME       TO ShipToName.                  10450000
+104600     MOVE WS001-SHIPTO-ADDR-1     TO ShipToAddr1.                 10460000
+104700     MOVE WS001-SHIPTO-ADDR-2     TO ShipToAddr2.                 10470000
+104800     MOVE WS001-SHIPTO-CITY       TO ShipToCity.                  10480000
+104900     MOVE WS001-SHIPTO-STATE      TO ShipToState.                 10490000
+105000     MOVE WS001-SHIPTO-ZIP        TO ShipToZip.                   10500000
+105100     MOVE WS001-SHIPTO-CNTRY      TO ShipToCountry.               10510000
+105200     MOVE WS001-SOLDTO-NAME       TO SoldToName.                  10520000
+105300     MOVE WS001-SOLDTO-ADDR-1     TO SoldToAddr1.                 10530000
+105400     MOVE WS001-SOLDTO-ADDR-2     TO SoldToAddr2.                 10540000
+105500     MOVE WS001-SOLDTO-CITY       TO SoldToCity.                  10550000
+105600     MOVE WS001-SOLDTO-STATE      TO SoldToState.                 10560000
+105700     MOVE WS001-SOLDTO-ZIP        TO SoldToZip.                   10570000
+105800     MOVE WS001-SOLDTO-CNTRY      TO SoldToCountry.               10580000
+105900                                                                  10590000
+106000     MOVE WS001-CUST-PO-NBR       TO CustomerPONumber.            10600000
+106100                                                                  10610000
+106200*'ST' = print collate amounts, or 'GF' = do not print.            10620000
+106300     MOVE 'ST'                    TO PriorityCode.                10630000
+106400     IF WS001-ALT-SHIP-ADDR = 'Y'                                 10640000
+106500       AND (WS001-ORD-TYPE = 'GW'                                 10650000
+106600        OR WS001-GIFT-RCPT-IND = 'Y')                             10660000
+106700         MOVE 'GF'                TO PriorityCode                 10670000
+106800     END-IF.                                                      10680000
+106900                                                                  10690000
+107000     MOVE WS001-TERR-CODE         TO TerritoryCode.               10700000
+107100     MOVE WS001-ORD-DATE          TO OrderDate.                   10710000
+107200     MOVE WS001-PKT-CURR-DAT-TIME TO PktGenerationDate.           10720000
+107300*    MOVE WS001-SCHED-DLVRY-DATE  TO ScheduleDeliveryDate.        10730000
+107400     MOVE WS001-PKT-TYPE          TO PickticketType.              10740000
+107500                                                                  10750000
+107600*set to 'COL' for CustOrders & spaces for Central Stock.          10760000
+107700     IF WS001-PKT-CTRL-NBR(1:1) = 'W'                             10770000
+107800         MOVE 'COL'               TO ContentLabelType             10780000
+107900     ELSE                                                         10790000
+108000         MOVE SPACES              TO ContentLabelType             10800000
+108100     END-IF.                                                      10810000
+108200                                                                  10820000
+108300     MOVE WS001-CUST-RTE          TO CustomerRouting.             10830000
+108400*    MOVE WS001-RTE-ATTR          TO RoutingAttribute.            10840000
+108500     MOVE WS001-TOT-NBR-OF-UNITS  TO TotNumberOfUnits.            10850000
+108600     MOVE WS001-STAT-CODE         TO StatusCode.                  10860000
+108700     MOVE WS001-RTE-GUIDE-NBR     TO RoutingGuideNumber.          10870000
+108800     MOVE WS001-SPL-INSTR-CODE-1  TO SpeclInstrCode1              10880000
+108900                                  OF PickticketHeaderFields.      10890000
+109000     MOVE WS001-SPL-INSTR-CODE-2  TO SpeclInstrCode2              10900000
+109100                                  OF PickticketHeaderFields.      10910000
+109200     MOVE WS001-IS-HAZMAT-FLAG    TO HazmatFlag.                  10920000
+109300*jpl - default wmos into shipvia to prevent <hex.>                10930000
+109400     MOVE 'WMOS'                  TO ShipVia.                     10940000
+109500*Set SHIP_VIA for APO/FPO orders to USPS Priority.                10950000
+109600*cjk 2009-10-19 : Remove this functionality replacing it below    10960000
+109700*    IF (WS001-SPL-INSTR-CODE-2  = 'AA ' OR 'AE ' OR 'AP '        10970000
+109800*                               OR 'FA ' OR 'FE ' OR 'FP ')       10980000
+109900*        MOVE 'PM  '              TO ShipVia                      10990000
+110000*        move ' '                 TO RoutingGuideNumber           11000000
+110100*        MOVE 'N'                 TO CustomerRouting              11010000
+110200*    END-IF.                                                      11020000
+110300*cjk 2009-09-15 : Replacing this sentence of code because EFC     11030000
+110400*                 wants flexibility in routing PO Box Orders.     11040000
+110500*Set SHIP_VIA for 'PO BOX' orders to USPS Priority.               11050000
+110600*    IF WS001-SHIP-METHOD = 'POSTD '                              11060000
+110700*        MOVE 'PMDC'              TO ShipVia                      11070000
+110800*        move ' '                 TO RoutingGuideNumber           11080000
+110900*        MOVE 'N'                 TO CustomerRouting              11090000
+111000*    END-IF.                                                      11100000
+111100*If this is a non-hazardous PO Box item, then ...                 11110000
+111200*Overwrite the RoutingGuideNumber with 'PO_APOBox' instead of     11120000
+111300*simply erasing its contents as above.                            11130000
+111400*Do not overwrite ShipVia with 'PMDC' as above.  Therefore,       11140000
+111500*it should remain set to 'WMOS'or 'PM  ' as it was originally set 11150000
+111600*above.                                                           11160000
+111700*Do not overwrite the CustomerRouting flag to 'N' as above.       11170000
+111800     If ws001-is-hazmat-flag is equal to 'Y'                      11180094
+111900     then                                                         11190000
+112000       if ws001-spl-instr-code-2 is equal to    'AA ' or 'AE '    11200000
+112100                                             or 'AP ' or 'FA '    11210000
+112200                                             or 'FE ' or 'FP '    11220000
+112300       then                                                       11230000
+112400         move 'PP  ' to ShipVia                                   11240000
+112500         move 'N' to CustomerRouting                              11250000
+112600       end-if                                                     11260000
+112700     else                                                         11270000
+112800       if    ws001-ship-method is equal to 'POSTD '               11280000
+112900          or (ws001-spl-instr-code-2 is equal to    'AA '         11290000
+113000                                                 or 'AE '         11300000
+113100                                                 or 'AP '         11310000
+113200                                                 or 'FA '         11320000
+113300                                                 or 'FE '         11330000
+113400                                                 or 'FP ')        11340000
+113500       then                                                       11350000
+113600         move 'PO_APOBox ' to RoutingGuideNumber                  11360000
+113700       end-if                                                     11370000
+113800     end-if.                                                      11380000
+113900*cjk 2009-09-15 : End of change.                                  11390000
+114000*cjk 2009-10-19 : End of change.                                  11400000
+114100*                                                                 11410000
+114200*                                                                 11420000
+114300*  SET DESTINATION WAREHOUSE FOR WAREHOUSE TRANSFERS              11430000
+114400*  SET TRANSFER FLAG FOR WAREHOUSE TRANSFERS                      11440000
+114500*                                                                 11450000
+114600     IF WS001-PKT-CTRL-NBR(1:1) = PC-X                            11460000
+114700         MOVE PC-Y                TO WarehouseTransferFlag        11470000
+114800         MOVE WS001-SOLDTO-ADDR-1(17:3)                           11480000
+114900                                  TO TransferWarehouses           11490000
+115000     ELSE                                                         11500000
+115100         MOVE SPACES              TO WarehouseTransferFlag        11510000
+115200                                     TransferWarehouses           11520000
+115300     END-IF.                                                      11530000
+115400                                                                  11540000
+115500                                                                  11550000
+115600******************************************************************11560000
+115700 3221-COUNT-HDR-INSTR.                                            11570000
+115800                                                                  11580000
+115900     MOVE ZEROES TO PV-HDR-INS-COUNT.                             11590000
+116000                                                                  11600000
+116100     EXEC SQL                                                     11610000
+116200        SELECT COUNT (*)                                          11620000
+116300          INTO :PV-HDR-INS-COUNT                                  11630000
+116400          FROM WST_DAT_XFER                                       11640000
+116500         WHERE PRC_CNTL_TMST   = :WST00003-PRC-CNTL-TMST          11650000
+116600           AND PRC_GP_ID       = :WST00003-PRC-GP-ID              11660000
+116700           AND TRN_TYP_CDE     = :DK-TRAN-TYPE                    11670000
+116800           AND RDM_PRC_TYP_CDE IN ('PKTHICRE        ',            11680000
+116900                                   'PKTHIMOD        ',            11690000
+117000                                   'PKTHIDEL        ')            11700000
+117100     END-EXEC.                                                    11710000
+117200                                                                  11720000
+117300     EVALUATE TRUE                                                11730000
+117400       WHEN SQLCODE = ZERO                                        11740000
+117500           MOVE PV-HDR-INS-COUNT TO PV-HDRINS-CNT                 11750000
+117600           DISPLAY '  -- There are ' PV-HDRINS-CNT                11760099
+117700                   ' Header instructions for ' WS001-PKT-CTRL-NBR 11770000
+117800                                                                  11780000
+117900       WHEN OTHER                                                 11790000
+118000           MOVE '3221-COUNT-HDR-INSTR' TO PV-ABEND-PARAGRAPH      11800000
+118100           MOVE 'COUNT HDR INSTRUCTS'  TO PV-ABEND-OPERATION      11810000
+118200           MOVE 'WST_DAT_XFER'         TO PV-ABEND-TABLE-1        11820054
+118300           PERFORM 9900-DB2-ABEND                                 11830000
+118400     END-EVALUATE.                                                11840000
+118500                                                                  11850000
+118600******************************************************************11860000
+118700 3222-COUNT-HDR-DTLS.                                             11870000
+118800                                                                  11880000
+118900     MOVE ZEROES TO PV-HDR-DTL-COUNT.                             11890000
+119000                                                                  11900000
+119100     EXEC SQL                                                     11910000
+119200        SELECT COUNT (*)                                          11920000
+119300          INTO :PV-HDR-DTL-COUNT                                  11930000
+119400          FROM WST_DAT_XFER                                       11940000
+119500         WHERE PRC_CNTL_TMST   = :WST00003-PRC-CNTL-TMST          11950000
+119600           AND PRC_GP_ID       = :WST00003-PRC-GP-ID              11960000
+119700           AND TRN_TYP_CDE     = :DK-TRAN-TYPE                    11970000
+119800           AND RDM_PRC_TYP_CDE IN ('PKTDCRE         ',            11980000
+119900                                   'PKTDMOD         ',            11990000
+120000                                   'PKTDDEL         ')            12000000
+120100     END-EXEC.                                                    12010000
+120200                                                                  12020000
+120300     EVALUATE TRUE                                                12030000
+120400       WHEN SQLCODE = ZERO                                        12040000
+120500           MOVE PV-HDR-DTL-COUNT TO PV-DTL-CNT                    12050000
+120600           DISPLAY '  -- There are ' PV-DTL-CNT                   12060099
+120700                   ' detail lines for ' WS001-PKT-CTRL-NBR        12070000
+120800                                                                  12080000
+120900       WHEN OTHER                                                 12090000
+121000           MOVE '3222-COUNT-HDR-DTL' TO PV-ABEND-PARAGRAPH        12100000
+121100           MOVE 'COUNT PKT DETAILS'  TO PV-ABEND-OPERATION        12110000
+121200           MOVE 'WST_DAT_XFER'       TO PV-ABEND-TABLE-1          12120054
+121300           PERFORM 9900-DB2-ABEND                                 12130000
+121400     END-EVALUATE.                                                12140000
+121500                                                                  12150000
+121630******************************************************************12163000
+121700 3230-TABLE-DTL-ROW.                                              12170000
+121800                                                                  12180000
+121900     ADD +1 TO D.                                                 12190000
+122000                                                                  12200000
+122100     MOVE WS002-PKT-SEQ-NBR       TO PktLineNbr (D)               12210000
+122200                                     PV-PKT-SEQ-NBR.              12220000
+122300     MOVE PV-PKT-SEQ-NBR          TO PV-PKT-SEQ-NBR-X.            12230000
+122400     MOVE WS002-SKU-ID            TO SkuID (D)                    12240000
+122500                                     StyleSuffix (D).             12250000
+122600     MOVE '01'                    TO Companz (D)                  12260000
+122700     MOVE '01'                    TO Divisioy (D).                12270095
+122800     MOVE WS002-ORIG-ORD-QTY      TO OrigOrderQty (D)             12280000
+122900                                     PktQty (D).                  12290000
+123000     MOVE WS002-ORIG-PKT-QTY      TO OrigPktQty (D).              12300000
+123100     MOVE WS002-CARTON-TYPE       TO CartonType (D).              12310000
+123200     MOVE WS002-CARTON-BREAK-ATTR TO CrtnBrkAttribute (D).        12320000
+123300     MOVE WS002-SPL-INSTR-CODE-1  TO SpeclInstrCode1              12330000
+123400                                  OF PickticketDetail (D).        12340000
+123500     MOVE WS002-SPL-INSTR-CODE-2  TO SpeclInstrCode2              12350000
+123600                                  OF PickticketDetail (D).        12360000
+123700     MOVE WS002-SPL-INSTR-CODE-3  TO SpeclInstrCode3              12370000
+123800                                  OF PickticketDetail (D).        12380000
+123900*    MOVE WS002-PPACK-QTY         TO 9(09).                       12390000
+124000     MOVE WS002-CHUTE-ASSIGN-TYPE TO ChuteAssignmentType (D).     12400000
+124100     MOVE WS002-IS-HAZMAT-FLAG    TO TpeIsHazmat (D).             12410000
+124200                                                                  12420000
+124300     MOVE ZEROES TO N.                                            12430000
+124400                                                                  12440000
+124500******************************************************************12450000
+124600 3231-COUNT-DTL-INSTR.                                            12460000
+124700                                                                  12470000
+124800     MOVE ZEROES TO PV-DTL-INS-COUNT.                             12480000
+124900                                                                  12490000
+125000     EXEC SQL                                                     12500000
+125100        SELECT COUNT (*)                                          12510000
+125200          INTO :PV-DTL-INS-COUNT                                  12520000
+125300          FROM WST_DAT_XFER                                       12530000
+125400         WHERE TRN_TYP_CDE      = :DK-TRAN-TYPE                   12540000
+125500           AND PRC_GP_ID        = :WST00003-PRC-GP-ID             12550000
+125600           AND PRC_CNTL_TMST    = :WST00003-PRC-CNTL-TMST         12560000
+125700           AND RDM_PRC_TYP_CDE IN ('PKTDICRE        ',            12570000
+125800                                   'PKTDIMOD        ',            12580000
+125900                                   'PKTDIDEL        ')            12590000
+126000           AND SUBSTR(LOD_DAT_TXT,1,20)                           12600000
+126100                                = :PV-PKT-DTL-1-20                12610000
+126200     END-EXEC.                                                    12620000
+126300                                                                  12630000
+126400     EVALUATE TRUE                                                12640000
+126500       WHEN SQLCODE = ZERO                                        12650000
+126600           MOVE PV-DTL-INS-COUNT TO PV-DTLINS-CNT                 12660000
+126601                                    PV-INSTR-CNT                  12660199
+126700***        DISPLAY '  There are ' PV-DTLINS-CNT                   12670099
+126800***                ' Detail instructions for Line '               12680099
+126900***                PV-PKT-SEQ-NBR-X '.'                           12690099
+127000                                                                  12700000
+127100       WHEN OTHER                                                 12710000
+127200           MOVE '3231-COUNT-DTL-INSTR' TO PV-ABEND-PARAGRAPH      12720000
+127300           MOVE 'COUNT DTL INSTRUCTS'  TO PV-ABEND-OPERATION      12730000
+127400           MOVE 'WST_DAT_XFER'         TO PV-ABEND-TABLE-1        12740054
+127500           PERFORM 9900-DB2-ABEND                                 12750000
+127600     END-EVALUATE.                                                12760000
+127700                                                                  12770000
+127800******************************************************************12780000
+127900 3240-TABLE-INS-ROW.                                              12790000
+127910*    DISPLAY '3240-TABLE-INS-ROW  SEQ-NBR= ' WS003-PKT-SEQ-NBR.   12791099
+128000                                                                  12800000
+128100     IF WS003-PKT-SEQ-NBR = ZEROES                                12810000
+128200         ADD +1 TO M                                              12820000
+128300         MOVE WS003-SPL-INSTR-NBR  TO SpclInstrNbr                12830000
+128400                                   OF PickticketHdrInstruction (M)12840000
+128500         MOVE WS003-SPL-INSTR-TYPE TO SpclInstrType               12850000
+128600                                   OF PickticketHdrInstruction (M)12860000
+128700         MOVE WS003-SPL-INSTR-CODE TO SpclInstrCode               12870000
+128800                                   OF PickticketHdrInstruction (M)12880000
+128900                                                                  12890000
+129000         MOVE WS001-CREATE-DATE-TIME TO DateCreatex               12900000
+129100                                   OF PickticketHdrInstruction (M)12910000
+129200         MOVE WS003-SPL-INSTR-DESC TO SpclInstrDesc               12920000
+129300                                   OF PickticketHdrInstruction (M)12930000
+129400*        MOVE SPACES TO RecordExpansionField                      12940000
+129500*                                  OF PickticketHdrInstruction (M)12950000
+129600*        MOVE SPACES TO CustomRecExpansionField                   12960000
+129700*                                  OF PickticketHdrInstruction (M)12970000
+129800*        MOVE SPACES TO PktProfileID                              12980000
+129900*                                  OF PickticketHdrInstruction (M)12990000
+130000     ELSE                                                         13000000
+130100         ADD +1 TO N                                              13010000
+130200         MOVE WS003-PKT-SEQ-NBR    TO PktLineNb2                  13020000
+130300                                OF PickticketDtlInstruction (D N) 13030000
+130400         MOVE WS003-SPL-INSTR-NBR  TO SpclInstrNbr                13040000
+130500                                OF PickticketDtlInstruction (D N) 13050000
+130600         MOVE WS003-SPL-INSTR-TYPE TO SpclInstrType               13060000
+130700                                OF PickticketDtlInstruction (D N) 13070000
+130800         MOVE WS003-SPL-INSTR-CODE TO SpclInstrCode               13080000
+130900                                OF PickticketDtlInstruction (D N) 13090000
+131010         MOVE WS001-CREATE-DATE-TIME TO DateCreate1               13101099
+131100                                OF PickticketDtlInstruction (D N) 13110000
+131200         MOVE WS003-SPL-INSTR-DESC TO SpclInstrDesc               13120000
+131300                                OF PickticketDtlInstruction (D N) 13130000
+131400*        MOVE SPACES TO RecordExpansionFiel1                      13140000
+131500*                               OF PickticketDtlInstruction (D N) 13150000
+131600*        MOVE SPACES TO CustomRecExpansionFiel1                   13160000
+131700*                               OF PickticketDtlInstruction (D N) 13170000
+131800*        MOVE SPACES TO PktProfileI1                              13180000
+131900*                               OF PickticketDtlInstruction (D N) 13190000
+132000     END-IF.                                                      13200000
+132100                                                                  13210000
+132200******************************************************************13220000
+132300 3300-CLOSE-XFER-CURSOR.                                          13230000
+132400                                                                  13240000
+132500     EXEC SQL                                                     13250000
+132600         CLOSE XFER-CSR                                           13260099
+132700     END-EXEC.                                                    13270000
+132800                                                                  13280000
+132900     EVALUATE TRUE                                                13290000
+133000       WHEN SQLCODE = ZERO                                        13300000
+133100           CONTINUE                                               13310000
+133200                                                                  13320000
+133300       WHEN OTHER                                                 13330000
+133400           MOVE '3300-CLOSE-XFER-CURSOR' TO PV-ABEND-PARAGRAPH    13340000
+133500           MOVE 'CLOSE XFER-CSR'         TO PV-ABEND-OPERATION    13350099
+133600           MOVE 'WST_DAT_XFER'           TO PV-ABEND-TABLE-1      13360054
+133700           PERFORM 9900-DB2-ABEND                                 13370000
+133800     END-EVALUATE.                                                13380000
+133900                                                                  13390000
+134000*jpl**************************************************************13400000
+134100 3999-CLEAR-DTL-INSTRS.                                           13410000
+134200                                                                  13420055
+134300     PERFORM                                                      13430099
+134400       VARYING A FROM 1 BY 1                                      13440099
+134500         UNTIL A > 1000 OR PktLineNbr(A) NOT > 0                  13450099
+134600                                                                  13460099
+134700         PERFORM                                                  13470099
+134800           VARYING B FROM 1 BY 1 UNTIL B > 10                     13480099
+134900                                                                  13490099
+135000             IF PktLineNb2(A B) NOT > 0                           13500099
+135100                 MOVE SPACES     TO PickticketDtlInstruction(A B) 13510099
+135200             END-IF                                               13520099
+135300                                                                  13530099
+135400         END-PERFORM                                              13540099
+135500     END-PERFORM.                                                 13550099
+135600                                                                  13560000
+135700******************************************************************13570000
+135800 4000-CREATE-MSGS.                                                13580000
+135900                                                                  13590000
+136000     PERFORM 4100-GENERATE-XML.                                   13600000
+136100                                                                  13610000
+136200     MOVE 'PICKTICKET'               TO PV-MQC-PROCESS-TYPE.      13620000
+136300     MOVE PV-HOLD-GROUP-PROCESS-ID   TO PV-MQC-GROUP-ID.          13630000
+136400     MOVE PV-CURR-STR-NBR            TO PV-MQC-STR-NBR.           13640000
+136500     MOVE PV-XML-BANNER              TO PV-MSGBUFFER-banner.      13650000
+136600     MOVE PV-XML(1:XML-LENGTH)       TO PV-MSGBUFFER-data.        13660000
+136700     COMPUTE PV-MSG-LENGTH = XML-LENGTH                           13670000
+136800                           + LENGTH OF PV-XML-BANNER.             13680000
+136900     MOVE PV-MSG-LENGTH TO PV-MSG-LENGTH-DISPLAY.                 13690000
+137000     DISPLAY '  MQ MSG-LENGTH = ' PV-MSG-LENGTH-DISPLAY.          13700099
+137010     DISPLAY ' '.                                                 13701099
+137100     MOVE PV-MQC-CONTROL-RECORD      TO MQMD-APPLIDENTITYDATA.    13710000
+137200*    MOVE PV-HOLD-GROUP-PROCESS-ID   TO MQMD-CORRELID.            13720000
+137300                                                                  13730000
+137400     INITIALIZE PS-MQPUT-SUCCESSFUL-IND                           13740000
+137500                PC-MQPUT-RETRY-COUNTER.                           13750000
+137600*jpl - put to queue.                                              13760000
+137700     PERFORM 5000-MQ-PUT-TO-QUEUE                                 13770000
+137800       UNTIL PS-MQPUT-SUCCESSFUL.                                 13780000
+137900                                                                  13790000
+138000***************************************************************   13800000
+138100 4100-GENERATE-XML.                                               13810000
+138110*    DISPLAY '4100-GENERATE-XML'.                                 13811099
+138200                                                                  13820048
+138300     PERFORM 4115-LOW-VALUES-CHECK.                               13830099
+138400                                                                  13840048
+138500     MOVE SPACES TO PV-XML.                                       13850000
+138600                                                                  13860000
+138700     XML GENERATE PV-XML                                          13870000
+138800         FROM PickticketBridge                                    13880000
+138900         COUNT IN XML-LENGTH                                      13890000
+139000         ON EXCEPTION                                             13900000
+139100             PERFORM 4110-XML-ERROR                               13910000
+139200         NOT ON EXCEPTION                                         13920000
+139300             PERFORM 4200-REPLACE-XML                             13930000
+139400             PERFORM 4120-XML-SUCCESS                             13940000
+139500     END-XML.                                                     13950000
+139600                                                                  13960000
+139700***************************************************************   13970000
+139800 4110-XML-ERROR.                                                  13980000
+139810*    DISPLAY '4110-XML-ERROR'.                                    13981099
+139900                                                                  13990000
+140000     PERFORM 9000-EXPLAIN-XML-RESPONSE                            14000000
+140100     PERFORM  VARYING XML-LINE-IDX FROM 1 BY 1                    14010000
+140200                UNTIL XML-LINE-IDX > XML-RESPONSE-LINES           14020000
+140300*jpl     DISPLAY XML-MSG(XML-LINE-IDX)                            14030000
+140400     END-PERFORM.                                                 14040000
+140500     MOVE +4018         TO ABEND-CODE.                            14050000
+140600     CALL 'ILBOABN0' USING ABEND-CODE.                            14060000
+140700                                                                  14070000
+140800***************************************************************   14080048
+140900* NEWEST VERSION OF ENTERPRISE COBOL COMPILER CAN NOT HANDLE  *   14090048
+141000* LOW-VALUES WHEN DOING AN 'XML GENERATE'. A RETURN CODE OF   *   14100048
+141100* 4017 WILL BE SET.                                           *   14110048
+141200* THIS PARAGRAPH GOES THRU CHARACTER BY CHARACTER TO CHECK FOR*   14120048
+141300* LOW-VALUES IN THE PickticketHeaderfields.  IF ANY ARE FOUND,*   14130048
+141400* REPLACE IT WITH SPACES.                                     *   14140048
+141500***************************************************************   14150048
+141600 4115-LOW-VALUES-CHECK.                                           14160048
+141700                                                                  14170048
+141800     INITIALIZE PV-HOLD-HEADER.                                   14180048
+141900     MOVE PickticketHeaderfields TO PV-HOLD-HEADER.               14190048
+142000                                                                  14200048
+142100     PERFORM                                                      14210048
+142200       VARYING S FROM 1 BY 1                                      14220048
+142300         UNTIL S > PC-XML-LENGTH                                  14230048
+142400                                                                  14240048
+142500         IF PV-MASTER-CHAR (S) = LOW-VALUES                       14250048
+142600*           DISPLAY '** found a low-value '                       14260066
+142700*                   ' PV-MASTER-CHAR (S)=' PV-MASTER-CHAR (S)     14270066
+142800*                   '   S='  S  ' **'                             14280066
+142900            MOVE SPACES TO PV-MASTER-CHAR (S)                     14290048
+143000         END-IF                                                   14300048
+143100                                                                  14310048
+143200     END-PERFORM.                                                 14320048
+143300                                                                  14330048
+143400     MOVE PV-HOLD-HEADER   TO PickticketHeaderfields.             14340048
+143500                                                                  14350048
+143600***************************************************************   14360000
+143700 4120-XML-SUCCESS.                                                14370000
+143800                                                                  14380000
+143900     STRING '<PickticketDtlInstruction>' DELIMITED BY SIZE        14390038
+144000            '<hex.PktLineNbr>'           DELIMITED BY SIZE        14400038
+144100            '000000000000000000'         DELIMITED BY SIZE        14410038
+144200            '</hex.PktLineNbr>'          DELIMITED BY SIZE        14420038
+144300            '<hex.SpclInstrNbr>000000</hex.SpclInstrNbr>'         14430038
+144400                                         DELIMITED BY SIZE        14440038
+144500            '<hex.SpclInstrType>0000</hex.SpclInstrType>'         14450038
+144600                                         DELIMITED BY SIZE        14460038
+144700            '<hex.SpclInstrCode>0000</hex.SpclInstrCode>'         14470038
+144800                                         DELIMITED BY SIZE        14480038
+144900            '<PickticketInstrFields>'    DELIMITED BY SIZE        14490038
+145000            '<hex.DateCreated>'          DELIMITED BY SIZE        14500038
+145100                                    INTO PV-MY-OPTIONAL1.         14510038
+145200                                                                  14520038
+145300     STRING '00000000000000000000000000000000000000000000'        14530038
+145400                                         DELIMITED BY SIZE        14540038
+145500            '</hex.DateCreated>'         DELIMITED BY SIZE        14550038
+145600            '<hex.SpclInstrDesc>'        DELIMITED BY SIZE        14560038
+145700            '0000000000000000000000000'  DELIMITED BY SIZE        14570038
+145800            '0000000000000000000000000'  DELIMITED BY SIZE        14580038
+145900            '0000000000000000000000000'  DELIMITED BY SIZE        14590038
+146000            '0000000000000000000000000'  DELIMITED BY SIZE        14600038
+146100            '0000000000000000000000000'  DELIMITED BY SIZE        14610038
+146200            '0000000000000000000000000'  DELIMITED BY SIZE        14620038
+146300                                    INTO PV-MY-OPTIONAL2.         14630038
+146400                                                                  14640038
+146500     STRING '0000000000000000000000000'  DELIMITED BY SIZE        14650038
+146600            '0000000000000000000000000'  DELIMITED BY SIZE        14660038
+146700            '</hex.SpclInstrDesc>'       DELIMITED BY SIZE        14670038
+146800            '<hex.RecordExpansionField>' DELIMITED BY SIZE        14680038
+146900            '00</hex.RecordExpansionField>'                       14690038
+147000                                         DELIMITED BY SIZE        14700038
+147100            '<hex.CustomRecExpansionField>'                       14710038
+147200                                         DELIMITED BY SIZE        14720038
+147300            '00</hex.CustomRecExpansionField>'                    14730038
+147400                                         DELIMITED BY SIZE        14740038
+147500            '<hex.PktProfileID>'         DELIMITED BY SIZE        14750038
+147600            '00000000000000000000'       DELIMITED BY SIZE        14760038
+147700            '</hex.PktProfileID>'        DELIMITED BY SIZE        14770038
+147800                                    INTO PV-MY-OPTIONAL3.         14780038
+147900     STRING '</PickticketInstrFields>'   DELIMITED BY SIZE        14790038
+148000            '</PickticketDtlInstruction>'                         14800038
+148100                                         DELIMITED BY SIZE        14810038
+148200                                    INTO PV-MY-OPTIONAL4.         14820038
+148300                                                                  14830099
+148400*    display ' '.                                                 14840099
+148500*    display 'PV-MY-OPTIONAL = ' PV-MY-OPTIONAL.                  14850099
+148600*    display ' '.                                                 14860099
+148700                                                                  14870038
+148800     MOVE PV-MY-OPTIONAL TO IS012-EMPTY-TAG.                      14880038
+148900     COMPUTE IS012-EMPTY-TAG-LENGTH                               14890038
+149000           = FUNCTION LENGTH(PV-MY-OPTIONAL).                     14900038
+149100     PERFORM 9800-REMOVE-EMPTY-TAGS.                              14910038
+149200                                                                  14920038
+149300     PERFORM X100-RESET-TAGS.                                     14930038
+149400     PERFORM X200-FIX-DTL-INSTR.                                  14940038
+149500                                                                  14950000
+149600     DISPLAY '  XML document was successfully generated'.         14960099
+149700     DISPLAY '  The generated XML is ' XML-LENGTH                 14970099
+149800             ' characters long.'.                                 14980000
+149900***  DISPLAY ' '.                                                 14990099
+150000***  DISPLAY PV-XML-BANNER                                        15000084
+150100***          PV-XML(1:XML-LENGTH).                                15010084
+150200                                                                  15020000
+150300*jpl DISPLAY ' '.                                                 15030000
+150400*    DISPLAY 'FORMATTED:'.                                        15040084
+150500*    DISPLAY PV-XML-BANNER.                                       15050084
+150600*    MOVE PV-XML(1:XML-LENGTH) TO XML-UNFORMATTED-MSG             15060084
+150700*    PERFORM 9554-DISPLAY-FORMATTED-XML.                          15070099
+150800                                                                  15080099
+150900     COPY ISPD007.                                                15090000
+151000     COPY ISPD008.                                                15100000
+151100     COPY ISPD009.                                                15110000
+151200     COPY ISPD012.                                                15120000
+151300                                                                  15130000
+151400******************************************************************15140000
+151500 X100-RESET-TAGS.                                                 15150000
+151510*    DISPLAY 'X100-RESET-TAGS'.                                   15151099
+151600                                                                  15160000
+151700*RecordExpansionField (55)                                        15170038
+151800     STRING '<hex.RecordExpansionField>'    DELIMITED BY SIZE     15180038
+151900            '00</hex.RecordExpansionField>' DELIMITED BY SIZE     15190038
+152000                                       INTO PV-MY-OPT-TAG1.       15200038
+152100     MOVE PV-MY-OPT-TAG1 TO IS012-EMPTY-TAG.                      15210038
+152200     COMPUTE IS012-EMPTY-TAG-LENGTH                               15220038
+152300           = FUNCTION LENGTH(PV-MY-OPT-TAG1).                     15230038
+152400     PERFORM X110-RESET-TAG1.                                     15240038
+152500                                                                  15250038
+152600*CustomRecExpansionField (61)                                     15260038
+152700      STRING '<hex.CustomRecExpansionField>'    DELIMITED BY SIZE 15270038
+152800             '00</hex.CustomRecExpansionField>' DELIMITED BY SIZE 15280038
+152900                                           INTO PV-MY-OPT-TAG2.   15290038
+153000     MOVE PV-MY-OPT-TAG2 TO IS012-EMPTY-TAG.                      15300038
+153100     COMPUTE IS012-EMPTY-TAG-LENGTH                               15310038
+153200           = FUNCTION LENGTH(PV-MY-OPT-TAG2).                     15320038
+153300     PERFORM X120-RESET-TAG2.                                     15330038
+153400                                                                  15340038
+153500*PktProfileID (57)                                                15350038
+153600     STRING '<hex.PktProfileID>'   DELIMITED BY SIZE              15360038
+153700            '00000000000000000000' DELIMITED BY SIZE              15370038
+153800            '</hex.PktProfileID>'  DELIMITED BY SIZE              15380038
+153900                              INTO PV-MY-OPT-TAG3.                15390038
+154000     MOVE PV-MY-OPT-TAG3 TO IS012-EMPTY-TAG.                      15400000
+154100     COMPUTE IS012-EMPTY-TAG-LENGTH                               15410000
+154200           = FUNCTION LENGTH(PV-MY-OPT-TAG3).                     15420000
+154300     PERFORM X130-RESET-TAG3.                                     15430000
+154400                                                                  15440000
+154500******************************************************************15450000
+154600 X110-RESET-TAG1.                                                 15460000
+154700                                                                  15470000
+154800     UNSTRING PV-XML(1:XML-LENGTH)                                15480000
+154900       DELIMITED BY IS012-EMPTY-TAG(1:IS012-EMPTY-TAG-LENGTH)     15490000
+155000               INTO IS012-BEFORE COUNT IS012-BEFORE-CNT.          15500000
+155100                                                                  15510000
+155200     PERFORM                                                      15520000
+155300       UNTIL IS012-BEFORE-CNT = XML-LENGTH                        15530000
+155400         COMPUTE IS012-AFTER-CNT = IS012-BEFORE-CNT               15540000
+155500                                 + IS012-EMPTY-TAG-LENGTH + 1     15550000
+155600         MOVE PV-XML TO IS012-AFTER                               15560000
+155700         STRING IS012-BEFORE(1:IS012-BEFORE-CNT)                  15570000
+155800                '<RecordExpansionField/>'                         15580000
+155900                IS012-AFTER(IS012-AFTER-CNT:XML-LENGTH)           15590000
+156000                DELIMITED BY SIZE INTO PV-XML                     15600000
+156100         COMPUTE XML-LENGTH = XML-LENGTH                          15610000
+156200                            - IS012-EMPTY-TAG-LENGTH              15620000
+156300                            + 23                                  15630000
+156400                                                                  15640000
+156500         UNSTRING PV-XML(1:XML-LENGTH)                            15650000
+156600         DELIMITED BY IS012-EMPTY-TAG(1:IS012-EMPTY-TAG-LENGTH)   15660000
+156700                 INTO IS012-BEFORE COUNT IS012-BEFORE-CNT         15670000
+156800     END-PERFORM.                                                 15680000
+156900                                                                  15690000
+157000******************************************************************15700000
+157100 X120-RESET-TAG2.                                                 15710000
+157200                                                                  15720000
+157300     UNSTRING PV-XML(1:XML-LENGTH)                                15730000
+157400       DELIMITED BY IS012-EMPTY-TAG(1:IS012-EMPTY-TAG-LENGTH)     15740000
+157500               INTO IS012-BEFORE COUNT IS012-BEFORE-CNT.          15750000
+157600                                                                  15760000
+157700     PERFORM                                                      15770000
+157800       UNTIL IS012-BEFORE-CNT = XML-LENGTH                        15780000
+157900         COMPUTE IS012-AFTER-CNT = IS012-BEFORE-CNT               15790000
+158000                                 + IS012-EMPTY-TAG-LENGTH + 1     15800000
+158100         MOVE PV-XML TO IS012-AFTER                               15810000
+158200         STRING IS012-BEFORE(1:IS012-BEFORE-CNT)                  15820000
+158300                '<CustomRecExpansionField/>'                      15830000
+158400                IS012-AFTER(IS012-AFTER-CNT:XML-LENGTH)           15840000
+158500                DELIMITED BY SIZE INTO PV-XML                     15850000
+158600         COMPUTE XML-LENGTH = XML-LENGTH                          15860000
+158700                            - IS012-EMPTY-TAG-LENGTH              15870000
+158800                            + 26                                  15880000
+158900                                                                  15890000
+159000         UNSTRING PV-XML(1:XML-LENGTH)                            15900000
+159100         DELIMITED BY IS012-EMPTY-TAG(1:IS012-EMPTY-TAG-LENGTH)   15910000
+159200                 INTO IS012-BEFORE COUNT IS012-BEFORE-CNT         15920000
+159300     END-PERFORM.                                                 15930000
+159400                                                                  15940000
+159500******************************************************************15950000
+159600 X130-RESET-TAG3.                                                 15960000
+159700                                                                  15970000
+159800     UNSTRING PV-XML(1:XML-LENGTH)                                15980000
+159900       DELIMITED BY IS012-EMPTY-TAG(1:IS012-EMPTY-TAG-LENGTH)     15990000
+160000               INTO IS012-BEFORE COUNT IS012-BEFORE-CNT.          16000000
+160100                                                                  16010000
+160200     PERFORM                                                      16020000
+160300       UNTIL IS012-BEFORE-CNT = XML-LENGTH                        16030000
+160400         COMPUTE IS012-AFTER-CNT = IS012-BEFORE-CNT               16040000
+160500                                 + IS012-EMPTY-TAG-LENGTH + 1     16050000
+160600         MOVE PV-XML TO IS012-AFTER                               16060000
+160700         STRING IS012-BEFORE(1:IS012-BEFORE-CNT)                  16070000
+160800                '<PktProfileID/>'                                 16080000
+160900                IS012-AFTER(IS012-AFTER-CNT:XML-LENGTH)           16090000
+161000                DELIMITED BY SIZE INTO PV-XML                     16100000
+161100         COMPUTE XML-LENGTH = XML-LENGTH                          16110000
+161200                            - IS012-EMPTY-TAG-LENGTH              16120000
+161300                            + 15                                  16130000
+161400                                                                  16140000
+161500         UNSTRING PV-XML(1:XML-LENGTH)                            16150000
+161600         DELIMITED BY IS012-EMPTY-TAG(1:IS012-EMPTY-TAG-LENGTH)   16160000
+161700                 INTO IS012-BEFORE COUNT IS012-BEFORE-CNT         16170000
+161800     END-PERFORM.                                                 16180000
+161900                                                                  16190000
+162000******************************************************************16200000
+162100 X200-FIX-DTL-INSTR.                                              16210000
+162200                                                                  16220000
+162300     STRING '<PickticketDtlInstruction>' DELIMITED BY SIZE        16230039
+162400            '<hex.PktLineNbr>'           DELIMITED BY SIZE        16240039
+162500            '000000000000000000'         DELIMITED BY SIZE        16250039
+162600            '</hex.PktLineNbr>'          DELIMITED BY SIZE        16260039
+162700            '<SpclInstrNbr>0</SpclInstrNbr>'                      16270039
+162800                                         DELIMITED BY SIZE        16280039
+162900            '<SpclInstrType>00</SpclInstrType>'                   16290039
+163000                                         DELIMITED BY SIZE        16300039
+163100            '<SpclInstrCode>00</SpclInstrCode>'                   16310039
+163200                                         DELIMITED BY SIZE        16320039
+163300            '<PickticketInstrFields>'    DELIMITED BY SIZE        16330039
+163400            '<hex.DateCreated>'          DELIMITED BY SIZE        16340039
+163500                                    INTO PV-DTL-INSTR1.           16350039
+163600                                                                  16360039
+163700     STRING 'F0F00000000000000000000000000000000000000000'        16370039
+163800                                         DELIMITED BY SIZE        16380039
+163900            '</hex.DateCreated>'         DELIMITED BY SIZE        16390039
+164000            '<hex.SpclInstrDesc>'        DELIMITED BY SIZE        16400039
+164100            '0000000000000000000000000'  DELIMITED BY SIZE        16410039
+164200            '0000000000000000000000000'  DELIMITED BY SIZE        16420039
+164300            '0000000000000000000000000'  DELIMITED BY SIZE        16430039
+164400            '0000000000000000000000000'  DELIMITED BY SIZE        16440039
+164500            '0000000000000000000000000'  DELIMITED BY SIZE        16450039
+164600            '0000000000000000000000000'  DELIMITED BY SIZE        16460039
+164700                                    INTO PV-DTL-INSTR2.           16470039
+164800                                                                  16480039
+164900     STRING '0000000000000000000000000'  DELIMITED BY SIZE        16490039
+165000            '0000000000000000000000000'  DELIMITED BY SIZE        16500039
+165100            '</hex.SpclInstrDesc>'       DELIMITED BY SIZE        16510039
+165200            '<RecordExpansionField/>'    DELIMITED BY SIZE        16520039
+165300            '<CustomRecExpansionField/>' DELIMITED BY SIZE        16530039
+165400            '<PktProfileID/>'            DELIMITED BY SIZE        16540039
+165500            '</PickticketInstrFields>'   DELIMITED BY SIZE        16550039
+165600            '</PickticketDtlInstruction>'                         16560039
+165700                                         DELIMITED BY SIZE        16570039
+165800                                    INTO PV-DTL-INSTR3.           16580039
+165900                                                                  16590000
+166000     MOVE PV-NULL-DTL-INSTR TO IS012-EMPTY-TAG.                   16600000
+166100     COMPUTE IS012-EMPTY-TAG-LENGTH                               16610000
+166200           = FUNCTION LENGTH(PV-NULL-DTL-INSTR).                  16620000
+166300     PERFORM 9800-REMOVE-EMPTY-TAGS.                              16630000
+166400                                                                  16640000
+166500******************************************************************16650000
+166600 4200-REPLACE-XML.                                                16660000
+166710*jpl display '4200-REPLACE-XML'.                                  16671099
+166800                                                                  16680039
+166900*    DISPLAY ' '.                                                 16690099
+167000*    DISPLAY 'XML before REPLACING command:'.                     16700099
+167100*    MOVE PV-XML(1:XML-LENGTH) TO XML-UNFORMATTED-MSG             16710099
+167200*    PERFORM 9554-DISPLAY-FORMATTED-XML.                          16720099
+167300                                                                  16730000
+167400*INSPECT ... REPLACING command to change the tag.                 16740000
+167500     INSPECT PV-XML REPLACING ALL 'DateCreatex' by 'DateCreated'. 16750000
+167600     INSPECT PV-XML REPLACING ALL 'DateCreate1' by 'DateCreated'. 16760000
+167700     INSPECT PV-XML REPLACING ALL 'Companz' BY 'Company'.         16770000
+167800     INSPECT PV-XML REPLACING ALL 'Divisiox' BY 'Division'.       16780000
+167900     INSPECT PV-XML REPLACING ALL 'Divisioy' BY 'Division'.       16790000
+168000     INSPECT PV-XML REPLACING ALL 'PktLineNb2' BY 'PktLineNbr'.   16800000
+168100     INSPECT PV-XML REPLACING ALL 'RecordExpansionFiel1'          16810000
+168200                               BY 'RecordExpansionField'.         16820000
+168300     INSPECT PV-XML REPLACING ALL 'CustomRecExpansionFiel1'       16830000
+168400                               BY 'CustomRecExpansionField'.      16840000
+168500     INSPECT PV-XML REPLACING ALL 'PktProfileI1'                  16850000
+168600                               BY 'PktProfileID'.                 16860000
+168700                                                                  16870000
+168800******************************************************************16880000
+168900*                                                                *16890000
+169000*             5 0 0 0 - P U T   M Q   M E S S A G E              *16900000
+169100*                                                                *16910000
+169200******************************************************************16920000
+169300 5000-MQ-PUT-TO-QUEUE.                                            16930000
+169400***  DISPLAY '5000-MQ-PUT-TO-QUEUE'.                              16940097
+169500                                                                  16950000
+169600     MOVE MQMI-NONE    TO MQMD-MSGID.                             16960000
+169700     MOVE MQCI-NONE    TO MQMD-CORRELID.                          16970000
+169800     MOVE MQFMT-STRING TO MQMD-FORMAT.                            16980000
+169900                                                                  16990000
+170000     MOVE MQPER-PERSISTENT TO MQMD-PERSISTENCE.                   17000000
+170100     COMPUTE MQPMO-OPTIONS  = MQPMO-SYNCPOINT                     17010000
+170200                            + MQPMO-SET-IDENTITY-CONTEXT.         17020000
+170300     PERFORM 5010-LOW-VALUES-CHECK.                               17030082
+170400***  DISPLAY '  CORRELID = ' MQMD-CORRELID.                       17040048
+170500***  DISPLAY '  APPLIDENTITYDATA = ' MQMD-APPLIDENTITYDATA.       17050048
+170600                                                                  17060000
+171010     CALL PC-MQPUT USING PV-HCONN                                 17101088
+171020                         PV-PQ-HANDLE                             17102088
+171030                         MQM-MESSAGE-DESCRIPTOR                   17103088
+171040                         MQM-PUT-MESSAGE-OPTIONS                  17104088
+171100                         PV-MSG-LENGTH                            17110000
+171200                         PV-MSGBUFFER                             17120000
+171300                         PV-COMPLETION-CODE                       17130000
+171400                         PV-REASON.                               17140000
+171500                                                                  17150000
+171600*IF PUT FAILED THEN DISPLAY ERROR MESSAGE                         17160000
+171700     IF (PV-COMPLETION-CODE NOT = MQCC-OK)                        17170000
+171800         IF (PV-REASON NOT = MQRC-PAGESET-FULL                    17180000
+171900           AND PV-REASON NOT = MQRC-Q-FULL                        17190000
+172000           AND PV-REASON NOT = MQRC-Q-SPACE-NOT-AVAILABLE )       17200000
+172100             CALL PV-MQCHECK USING PV-REASON                      17210000
+172200                                   PV-MQ-REASON-TEXT              17220000
+172300             DISPLAY 'MQ MESSAGE = ' PV-MSGBUFFER                 17230000
+172400             MOVE '5000-MQ-PUT-TO-QUEUE'  TO PV-PARAGRAPH         17240000
+172500             MOVE 'MQPUT FAILED'          TO PV-ERROR-MESSAGE     17250000
+172600             MOVE PV-COMPLETION-CODE  TO PV-HOLD-COMPLETION-CODE  17260000
+172700                                         PE-MQ-COMPLETION-CODE    17270000
+172800             MOVE PV-REASON               TO PV-HOLD-REASON       17280000
+172900                                             PE-MQ-REASON-CODE    17290000
+173000             PERFORM 5100-BACK-OUT-MQ                             17300000
+173100             MOVE PV-HOLD-COMPLETION-CODE TO PV-COMPLETION-CODE   17310000
+173200             MOVE PV-HOLD-REASON          TO PV-REASON            17320000
+173300             PERFORM 9200-MQ-ABEND                                17330000
+173400         ELSE                                                     17340000
+173500             ADD 1 TO PC-MQPUT-RETRY-COUNTER                      17350000
+173600             IF PC-MQPUT-RETRY-COUNTER >= 60                      17360000
+173700                 DISPLAY 'MQ MESSAGE = ' PV-MSGBUFFER             17370000
+173800                 MOVE '5000-MQ-PUT-TO-QUEUE' TO PV-PARAGRAPH      17380000
+173900                 MOVE 'MQPUT ERROR- RETRY > 60 '                  17390000
+174000                      TO PV-ERROR-MESSAGE                         17400000
+174100                 MOVE PV-COMPLETION-CODE                          17410000
+174200                      TO PV-HOLD-COMPLETION-CODE                  17420000
+174300                 MOVE PV-REASON TO PV-HOLD-REASON                 17430000
+174400                 PERFORM 5100-BACK-OUT-MQ                         17440000
+174500                 MOVE PV-HOLD-COMPLETION-CODE                     17450000
+174600                      TO PV-COMPLETION-CODE                       17460000
+174700                 MOVE PV-HOLD-REASON TO PV-REASON                 17470000
+174800                 PERFORM 9200-MQ-ABEND                            17480000
+174900             ELSE                                                 17490000
+175000*WAIT FOR 30 SECONDS AND TRY AGAIN                                17500000
+175100                 CALL 'SYSWAIT' USING PC-DELAY-INTERVAL           17510000
+175200             END-IF                                               17520000
+175300         END-IF                                                   17530000
+175400     ELSE                                                         17540000
+175500         ADD 1 TO PA-TOTAL-MQ-MSGS-SENT                           17550000
+175600         SET PS-MQPUT-SUCCESSFUL TO TRUE                          17560000
+175700     END-IF.                                                      17570000
+175800                                                                  17580000
+175900******************************************************************17590000
+176000 5010-LOW-VALUES-CHECK.                                           17600082
+176010*    DISPLAY '5010-LOW-VALUES-CHECK  N=' N.                       17601099
+176100                                                                  17610000
+176200     MOVE PV-MSGBUFFER TO PV-HOLD-MSGBUFFER.                      17620000
+176300                                                                  17630000
+176400     PERFORM                                                      17640000
+176500       VARYING N FROM 1 BY 1                                      17650000
+176600         UNTIL N > PV-MSG-LENGTH                                  17660000
+176700                                                                  17670000
+176800         IF PV-MSGBUFFER-CHAR (N) = LOW-VALUES                    17680000
+176900             MOVE SPACES TO PV-MSGBUFFER-CHAR (N)                 17690000
+177000         END-IF                                                   17700000
+177100                                                                  17710000
+177200     END-PERFORM.                                                 17720000
+177300                                                                  17730000
+177400     MOVE PV-HOLD-MSGBUFFER TO PV-MSGBUFFER.                      17740000
+177500                                                                  17750000
+177600******************************************************************17760000
+177700* BACK OUT MQ PROCESSING SINCE THE POINT OF THE LAST COMMIT       17770000
+177800******************************************************************17780000
+177900 5100-BACK-OUT-MQ.                                                17790000
+178000                                                                  17800000
+178100     CALL PC-MQBACK USING PV-HCONN                                17810000
+178200                          PV-COMPLETION-CODE                      17820000
+178300                          PV-REASON.                              17830000
+178400                                                                  17840000
+178500     IF (PV-COMPLETION-CODE NOT = MQCC-OK)                        17850000
+178600        CALL PV-MQCHECK USING PV-REASON                           17860000
+178700                              PV-MQ-REASON-TEXT                   17870000
+178800        MOVE '5100-BACK-OUT-MQ'  TO PV-PARAGRAPH                  17880000
+178900        MOVE 'MQBACK ERROR'    TO PV-ERROR-MESSAGE                17890000
+179000        PERFORM 9200-MQ-ABEND                                     17900000
+179100     END-IF.                                                      17910000
+179200                                                                  17920000
+179300******************************************************************17930000
+179400** CALL RANDOM NUMBER GENERATOR USING TIMESTAMP                 **17940000
+179500** THIS IS USED TO CREATE A UNIQUE BATCH NUMBER FOR EACH        **17950000
+179600** XML SENT TO THE QUEUE                                        **17960000
+179700******************************************************************17970000
+179800 8000-GET-RANDOM-NBR.                                             17980000
+179900                                                                  17990000
+180000     CALL PC-RAND-PGM USING DP902-RANDNBR-ROUTINE-FIELDS.         18000000
+180100                                                                  18010000
+180200     IF DP902-SUCCESSFUL                                          18020000
+180300         CONTINUE                                                 18030000
+180400     ELSE                                                         18040000
+180500         DISPLAY '**************************************'         18050000
+180600         DISPLAY '** UNSUCCESSFUL CALL TO RAND NBR PGM**'         18060000
+180700         DISPLAY '**************************************'         18070000
+180800         DISPLAY '** ABEND                            **'         18080000
+180900         DISPLAY '** PROGRAM = DPKUT902               **'         18090000
+181000         DISPLAY '** PARA = 8000-GET-RANDOM-NBR       **'         18100000
+181100         DISPLAY '**************************************'         18110000
+181200         MOVE '8000-GET-RANDOM-NBR'    TO PV-ABEND-PARAGRAPH      18120000
+181300         MOVE 'GET RANDON NBR'         TO PV-ABEND-OPERATION      18130000
+181400         PERFORM 9900-DB2-ABEND                                   18140000
+181500     END-IF.                                                      18150000
+181600                                                                  18160000
+181700******************************************************************18170000
+181800* DISPLAY STATISTICS FOR THE PROGRAM                              18180000
+181900******************************************************************18190000
+182000 9000-EOJ-ROUTINE.                                                18200000
+182100                                                                  18210000
+182200     DISPLAY ' '                                                  18220000
+182300     DISPLAY ' ********************************************'      18230000
+182400     DISPLAY '     * WSKUP006 SUMMARY STATISTICS *         '      18240000
+182500     DISPLAY ' '                                                  18250000
+182600     DISPLAY '       ---------------------------           '      18260000
+182700     DISPLAY '          RDM DOWNLOADS VIA MQ               '      18270000
+182800     DISPLAY '       ---------------------------           '      18280000
+182900     DISPLAY ' '                                                  18290000
+183000     DISPLAY '   INPUT RECORDS READ:       '                      18300099
+183100                                    PA-INPUT-READ                 18310099
+183110     DISPLAY '   PROCESSING GROUPS READ:   '                      18311099
+183120                                    PA-CNTL-READ                  18312099
+183200     DISPLAY '   TRANSACTION RECORDS READ: '                      18320000
+183300                                    PA-XFER-READ                  18330000
+183400     DISPLAY ' '                                                  18340000
+183500     DISPLAY '   TOTAL MQ MESSAGES SENT:   '                      18350000
+183600                                    PA-TOTAL-MQ-MSGS-SENT         18360000
+183700     DISPLAY ' '                                                  18370000
+183800     DISPLAY ' ********************************************'.     18380000
+183900                                                                  18390000
+184000****************************************************************  18400000
+184100** PERFORM MQ-SERIES ABEND PROCESSING                             18410000
+184200****************************************************************  18420000
+184300 9200-MQ-ABEND.                                                   18430000
+184400                                                                  18440000
+184500     DISPLAY '****************** A B E N D ******************'.   18450000
+184600     DISPLAY '** MQSERIES ERROR **'.                              18460000
+184700     DISPLAY '** PROGRAM:    ', PC-CURRENT-PROGRAM-NAME.          18470000
+184800     DISPLAY '** ABEND CODE: ', PV-ABEND-CODE.                    18480000
+184900     DISPLAY '** PARAGRAPH:  ', PV-PARAGRAPH.                     18490000
+185000     DISPLAY '** MESSAGE:    ', PV-ERROR-MESSAGE.                 18500000
+185100     DISPLAY '** COMP CODE:  ', PE-MQ-COMPLETION-CODE.            18510000
+185200     DISPLAY '** RSN CODE:   ', PE-MQ-REASON-CODE.                18520000
+185300     DISPLAY '** RSN TEXT:   ', PV-MQ-REASON-TEXT.                18530000
+185400     DISPLAY '***********************************************'.   18540000
+185500     MOVE +4013 TO ABEND-CODE.                                    18550000
+185600     CALL 'ILBOABN0' USING PV-ABEND-CODE.                         18560000
+185700                                                                  18570000
+185800******************************************************************18580000
+185900* 9900-DB2-ABEND - PERFORMS THE ABEND FOR THE PROGRAM IN THE      18590000
+186000* EVENT THAT AN SQL ERROR OR WARNING CODE OCCURS.                 18600000
+186100******************************************************************18610000
+186200 9900-DB2-ABEND.                                                  18620000
+186300                                                                  18630000
+186400     MOVE SQLCODE    TO PV-SQLCODE.                               18640000
+186500     MOVE PV-SQLCODE TO PV-DISPLAY-SQLCODE.                       18650000
+186600     DISPLAY '*** DB2 ERROR ***'.                                 18660000
+186700     DISPLAY '*** SQLCODE   = ' PV-DISPLAY-SQLCODE.               18670000
+186800     DISPLAY '*** PROGRAM   = ' PV-ABEND-PROGRAM.                 18680000
+186900     DISPLAY '*** PARAGRAPH = ' PV-ABEND-PARAGRAPH.               18690000
+187000     DISPLAY '*** OPERATION = ' PV-ABEND-OPERATION.               18700000
+187100     DISPLAY '*** MESSAGE   = ' PV-DB2-OPERATION-MESSAGE-1.       18710000
+187200     DISPLAY '*** TABLE 1   = ' PV-ABEND-TABLE-1.                 18720054
+187300                                                                  18730000
+187400******************************************************************18740000
+187500* THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-    18750000
+187600* MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE         18760000
+187700* 'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE     18770000
+187800* FORMAT.                                                         18780000
+187900******************************************************************18790000
+188000     COPY DPPD004.                                                18800000
+188100                                                                  18810000
+188200     IF SQLCODE NOT = -911                                        18820000
+188300         EXEC SQL                                                 18830000
+188400             ROLLBACK                                             18840000
+188500         END-EXEC                                                 18850000
+188600     END-IF.                                                      18860000
+188700                                                                  18870000
+188800     MOVE +4013         TO PV-ABEND-CODE.                         18880000
+188900     CALL 'ILBOABN0' USING PV-ABEND-CODE.                         18890000
+189000******************************************************************18900000
+189100******************************************************************18910000

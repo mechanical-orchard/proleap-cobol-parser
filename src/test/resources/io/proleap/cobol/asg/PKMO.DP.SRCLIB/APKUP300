@@ -1,0 +1,1336 @@
+000100 IDENTIFICATION DIVISION.                                         00010005
+000200 PROGRAM-ID.     APKUP300.                                        00020005
+000300 AUTHOR.         MICHELE RINDFLEISCH.                             00030005
+000400*DATE-WRITTEN.   OCTOBER 31 2006.                                 00040005
+000500******************************************************************00050005
+000600*    COBOL 2 WITH SQL                                            *00060005
+000700*                                                                *00070005
+000800*    UNDO PAY RELEASE PROGRAM.                                   *00080005
+000900*    BATCH PROGRAM TO UNDO THE PAY RELEASE OF A REQUESTED        *00090005
+001000*    PO/STORE, OR LIST OF PO/STORES.  THE PURPOSE OF THIS        *00100005
+001100*    PROGRAM IS TO REVERSE ALL OF THE INSERTS AND UPDATES        *00110005
+001200*    THAT TAKE PLACE ON THE VARIOUS DATABASES WHEN A PO          *00120005
+001210*    IS RELEASED FOR PAYMENT.                                    *00121005
+001220*                                                                *00122005
+001230* DB2 TABLES:                                                    *00123005
+001240*    1) INVOICE TABLE                      (TINVOIC)             *00124005
+001250*    3) PAYMENT REQUEST ITEM TABLE         (TPREQIT)             *00125005
+001260*    4) RECEIVERS TABLE                    (TRECEIV)             *00126005
+001270*    5) RECEIVING DISTRIBUTION TABLE       (TRECDIS)             *00127005
+001280*    6) NON-INVOICED RECEIPT TABLE         (TNINREC)             *00128005
+001290*    7) PRICE CLAIM ADJUSTMENTS TABLE      (TPRCCLM)             *00129005
+001300*    8) RELEASED PO/STORES TABLE           (TPOSTRR)             *00130005
+001400*                                                                *00140005
+001401* INPUT:                                                         *00140105
+001402*    1) CONTROL CARD FILE CONTAINING PO'S TO BE UNRELEASED       *00140205
+001403******************************************************************00140305
+001404* CHANGE LOG:                                                    *00140405
+001405*                                                                *00140505
+001406*    DATE  10/31/2006                                            *00140605
+001407*        CHANGE MADE: INITIAL IMPLEMENTATION.                    *00140705
+001408*        MADE BY: MICHELE RINDFLEISCH     WR/IR #: WR31056       *00140805
+001409*                                                                *00140905
+001410*    DATE  12/19/2006                                            *00141005
+001411*        CHANGE MADE: REVISED LOGIC TO ALLOW MULTIPLE CONTROL    *00141105
+001412*        CARDS AS INPUT.  ENHANCED TO ALLOW UN-RELEASE OF POS    *00141205
+001413*        THAT WERE NOT RELEASED CURRENT DAY, TO PROCESS IMPORT   *00141305
+001414*        POS AND TO PROCESS ALL POSSIBLE TABLES USING PO/INVC    *00141405
+001415*        INSTEAD OF PAYT_REQ_SEQ_NBR.  THESE CHANGES WERE MADE   *00141505
+001416*        SO THE PROGRAM WOULD BE MORE FLEXIBLE TO ALLOW ITS USE  *00141605
+001417*        IN SETTING UP TEST DATA FOR THE MBDC SYSTEM TEST.       *00141705
+001418*        MADE BY: NANCY EILBES            WR/IR #: WR21578       *00141805
+001419*                                                                *00141905
+001420*    DATE  01/24/2007                                            *00142005
+001421*        CHANGE MADE: MODIFIED LOGIC TO INCLUDE THE NEEDED       *00142105
+001422*        PROCESSING FOR MATCH BY DC. THIS INCLUDES SPECIFIC      *00142205
+001423*        LOGIC BASED ON THE VALUE OF THE MTCH-LVL-CDE: D = DC    *00142305
+001424*        LEVEL, S = STORE LEVEL, P = BULK.  THE MATCH LEVEL      *00142405
+001425*        DETERMINES WHAT STORE # AND DC # ARE TO BE USED WHEN:   *00142505
+001426*          MTCH LVL = 'D'                                        *00142605
+001427*            MIN-STR-NBR = 0, MAX-STR-NBR = 9999                 *00142705
+001428*            MIN-DC-NBR  = LOCATION #, MAX-DC-NBR = LOCATION #   *00142805
+001429*                                                                *00142905
+001430*          MTCH LVL = 'S'                                        *00143005
+001431*            MIN-STR-NBR = LOCATION #, MAX-STR-NBR = LOCATION #  *00143105
+001432*            MIN-DC-NBR = 0, MAX-DC-NBR = 9999                   *00143205
+001433*                                                                *00143305
+001434*          MTCH LVL = 'P'                                        *00143405
+001435*            MIN-STR-NBR = 0, MAX-STR-NBR = 9999                 *00143505
+001436*            MIN-DC-NBR  = 0, MAX-DC-NBR = 9999                  *00143605
+001437*        ALSO REMOVED ALL REFERENCE TO THE PAY REQUEST TABLE.    *00143705
+001438*        MODIFIED CONTROL CARD TO RENAME STR-NBR TO LOC-NBR AND  *00143805
+001439*        TO ADD MATCH LEVEL CODE.                                *00143905
+001440*        MADE BY: MICHELE RINDFLEISCH     WR/IR #: WR21578       *00144005
+001419*                                                                *00144106
+001420*    DATE  01/15/2021                                            *00144206
+001421*        CHANGE MADE: FIX BUG WITH DOUBLE COUNTING               *00144306
+001421*                     PV-TRECEIV-COUNT.                          *00144406
+001440*        MADE BY: JEAN KURK               CHG0252998             *00144507
+001419*                                                                *00144608
+001420*    DATE  05/11/2021                                            *00144711
+001421*        CHANGE MADE: ADD LOGIC FOR SEPHORA @ KOHLS              *00144808
+001440*        MADE BY: JEAN KURK               CHG0256545             *00145011
+001441******************************************************************00145106
+001442                                                                  00145206
+001443 ENVIRONMENT DIVISION.                                            00145306
+001444                                                                  00145406
+001445 INPUT-OUTPUT SECTION.                                            00145506
+001446                                                                  00145606
+001447 FILE-CONTROL.                                                    00145706
+001448                                                                  00145806
+001449     SELECT CONTROL-CARD-FILE                                     00145906
+001450         ASSIGN TO INP01.                                         00146006
+001451                                                                  00146106
+001452 DATA DIVISION.                                                   00146206
+001453                                                                  00146306
+001454 FILE SECTION.                                                    00146406
+001455                                                                  00146506
+001456 FD  CONTROL-CARD-FILE                                            00146606
+001457     RECORDING MODE IS F                                          00146706
+001458     BLOCK CONTAINS 0 RECORDS.                                    00146806
+001459 01  CC-RECORD                       PIC X(80).                   00146906
+001460*                                                                 00147006
+001470/                                                                 00147105
+001480 WORKING-STORAGE SECTION.                                         00148005
+001490                                                                  00149005
+001500 01  FILLER                        PIC X(25) VALUE                00150005
+001600                             'WS FOR APKUP300 BEGINS==>'.         00160005
+001700 01  ABEND-CODE                    PIC S9(4) COMP SYNC            00170005
+001800                                             VALUE ZEROS.         00180005
+001900     88 AC-BAD-DATA                VALUE +4003.                   00190005
+002000     88 AP-EMPTY-FILE              VALUE +4005.                   00200005
+002100     88 AP-DB2-ERROR               VALUE +4013.                   00210005
+002200     88 AC-DATE-ERROR              VALUE +4019.                   00220005
+002300                                                                  00230005
+002400 01  PV-PROGRAM-VARIABLES.                                        00240005
+002500     05  PV-MTCH-LVL-CDE           PIC X(01) VALUE SPACES.        00250005
+002600     05  MIN-DC-NBR                PIC S9(04) COMP VALUE ZEROS.   00260005
+002700     05  MAX-DC-NBR                PIC S9(04) COMP VALUE ZEROS.   00270005
+002800     05  MIN-STR-NBR               PIC S9(04) COMP VALUE ZEROS.   00280005
+002900     05  MAX-STR-NBR               PIC S9(04) COMP VALUE ZEROS.   00290005
+003000     05  PV-LOC-NBR                PIC S9(04) COMP VALUE ZEROS.   00300005
+003100     05  PV-PURCH-ORDER            PIC S9(09) COMP VALUE ZEROS.   00310005
+003200     05  PV-TRECEIV-COUNT          PIC S9(5) VALUE ZERO COMP-3.   00320005
+003300     05  PV-TNINREC-COUNT          PIC S9(5) VALUE ZERO COMP-3.   00330005
+003400     05  PV-TRECDIS-COUNT          PIC S9(5) VALUE ZERO COMP-3.   00340005
+003500     05  PV-NIR-DEL-COUNT          PIC S9(5) VALUE ZERO COMP-3.   00350005
+003600     05  PV-TPREQIT-COUNT          PIC S9(5) VALUE ZERO COMP-3.   00360005
+003700     05  PV-RI-DELETE-COUNT        PIC S9(5) VALUE ZERO COMP-3.   00370005
+003800     05  PV-PRCCLM-COUNT           PIC S9(5) VALUE ZERO COMP-3.   00380005
+003900     05  PV-RINEW-COUNT            PIC S9(5) VALUE ZERO COMP-3.   00390005
+004000     05  PV-TINVOIC-UPDT-COUNT     PIC S9(5) VALUE ZERO COMP-3.   00400005
+004100     05  PV-EXP-UPDT-COUNT         PIC S9(5) VALUE ZERO COMP-3.   00410005
+004200     05  PV-TPOSTRR-DEL-CNT        PIC S9(5) VALUE ZEROS COMP-3.  00420005
+004300     05  TOT-TRECEIV-COUNT         PIC S9(5) VALUE ZERO COMP-3.   00430005
+004400     05  TOT-TNINREC-COUNT         PIC S9(5) VALUE ZERO COMP-3.   00440005
+004500     05  TOT-TRECDIS-COUNT         PIC S9(5) VALUE ZERO COMP-3.   00450005
+004600     05  TOT-NIR-DEL-COUNT         PIC S9(5) VALUE ZERO COMP-3.   00460005
+004700     05  TOT-TPREQIT-COUNT         PIC S9(5) VALUE ZERO COMP-3.   00470005
+004800     05  TOT-RI-DELETE-COUNT       PIC S9(5) VALUE ZERO COMP-3.   00480005
+004900     05  TOT-PRCCLM-COUNT          PIC S9(5) VALUE ZERO COMP-3.   00490005
+005000     05  TOT-RINEW-COUNT           PIC S9(5) VALUE ZERO COMP-3.   00500005
+005100     05  TOT-TINVOIC-UPDT-COUNT    PIC S9(5) VALUE ZERO COMP-3.   00510005
+005200     05  TOT-EXP-UPDT-COUNT        PIC S9(5) VALUE ZERO COMP-3.   00520005
+005300     05  TOT-TPOSTRR-DEL-CNT       PIC S9(5) VALUE ZEROS COMP-3.  00530005
+005400                                                                  00540005
+005500 01  WS-SWITCH-AREA.                                              00550005
+005600     05  WS-PO-LIST-SW             PIC X   VALUE 'N'.             00560005
+005700         88  END-OF-PO-LIST                VALUE 'Y'.             00570005
+005800     05  WS-TRECEIV-FOUND-SW       PIC X   VALUE 'N'.             00580005
+005900         88  WS-TRECEIV-FOUND              VALUE 'Y'.             00590005
+006000     05  WS-TNINREC-FOUND-SW       PIC X   VALUE 'N'.             00600005
+006100         88  WS-TNINREC-FOUND              VALUE 'Y'.             00610005
+006200     05  WS-TRECDIS-FOUND-SW       PIC X   VALUE 'N'.             00620005
+006300         88  WS-TRECDIS-FOUND              VALUE 'Y'.             00630005
+006400     05  WS-NIRNEW-FOUND-SW        PIC X   VALUE 'N'.             00640005
+006500         88  WS-NIRNEW-FOUND               VALUE 'Y'.             00650005
+006600     05  END-OF-RELEASED-CSR-SW    PIC X   VALUE 'N'.             00660005
+006610         88  END-OF-RELEASED-CSR           VALUE 'Y'.             00661005
+006620     05  END-OF-NEWRI-CSR-SW       PIC X   VALUE 'N'.             00662005
+006630         88  END-OF-NEWRI-CSR              VALUE 'Y'.             00663005
+006640     05  END-OF-EXP-CSR-SW         PIC X   VALUE 'N'.             00664005
+006650         88  END-OF-EXP-CSR                VALUE 'Y'.             00665005
+006651     05  END-OF-RCVSEQ-CSR-SW      PIC X   VALUE 'N'.             00665105
+006652         88  END-OF-RCVSEQ-CSR             VALUE 'Y'.             00665205
+006653     05  WS-PRCLMNEW-FOUND-SW      PIC X   VALUE 'N'.             00665305
+006654         88  WS-PRCLMNEW-FOUND             VALUE 'Y'.             00665405
+006655                                                                  00665505
+006656 01  WS-ABEND-FIELDS.                                             00665605
+006657     05  WS-ABEND-PROGRAM             PIC X(8)  VALUE 'APKUP300'. 00665705
+006658     05  WS-ABEND-PARAGRAPH           PIC X(50) VALUE SPACES.     00665805
+006659     05  WS-ABEND-OPERATION           PIC X(50) VALUE SPACES.     00665905
+006660     05  WS-ABEND-STRUCTURE-1         PIC X(8)  VALUE SPACES.     00666005
+006670     05  WS-ABEND-STRUCTURE-2         PIC X(8)  VALUE SPACES.     00667005
+006680     05  WS-ABEND-STATUS              PIC XX    VALUE SPACES.     00668005
+006690                                                                  00669005
+006700*                                                                 00670005
+006800 01  CONTROL-CARD-RECORD.                                         00680005
+006900     05  CC-PURCH-ORDER              PIC 9(09).                   00690005
+007000     05  FILLER                      PIC X(01).                   00700005
+007100     05  CC-LOC-NBR                  PIC 9(04).                   00710005
+007200     05  FILLER                      PIC X(01).                   00720005
+007300     05  CC-RELEASE-DATE             PIC X(10).                   00730005
+007400     05  FILLER                      PIC X.                       00740005
+007500     05  CC-AP-PRC-CDE               PIC X.                       00750005
+007600     05  FILLER                      PIC X.                       00760005
+007700     05  CC-MTCH-LVL-CDE             PIC X.                       00770005
+007800     05  FILLER                      PIC X.                       00780005
+007900     05  CC-IMPORT-IND               PIC X.                       00790005
+008000     05  FILLER                      PIC X.                       00800010
+007900     05  CC-PO-ENT-ID                PIC 9(09).                   00801010
+008000     05  FILLER                      PIC X.                       00802010
+007900     05  CC-PO-DEPT-NBR              PIC X(03).                   00802110
+008000     05  FILLER                      PIC X(35).                   00802210
+008000*    05  FILLER                      PIC X(49).                   00803009
+008100                                                                  00810005
+008200*----------------------------------------------------------------*00820005
+008300* WORKING STORAGE FOR DATE ROUTINE                                00830005
+008400*----------------------------------------------------------------*00840005
+008500     COPY DPWS500.                                                00850005
+008600                                                                  00860005
+008700                                                                  00870005
+008800*----------------------------------------------------------------*00880005
+008900     COPY DPWS004.                                                00890005
+009000                                                                  00900005
+009100 01  FILLER                      PIC X(35)  VALUE                 00910005
+009200     'END OF AP WORK RECORD AREA       **'.                       00920005
+009300                                                                  00930005
+009400                                                                  00940005
+009500*---------------------------------------------------------------* 00950005
+009600*  COMMUNICATIONS AREA2 FOR DB2                                   00960005
+009700*---------------------------------------------------------------* 00970005
+009800     COPY SQLCA2.                                                 00980005
+009900                                                                  00990005
+010000*---------------------------------------------------------------* 01000005
+010100*    DB2 AREA FOR INVOICE TABLE                                 * 01010005
+010200*---------------------------------------------------------------* 01020005
+010300     EXEC SQL                                                     01030005
+010400          INCLUDE TINVOIC                                         01040005
+010500     END-EXEC.                                                    01050005
+010600                                                                  01060005
+010700*---------------------------------------------------------------* 01070005
+010800*    DB2 AREA FOR PAYMENT REQUEST ITEM TABLE                    * 01080005
+010900*---------------------------------------------------------------* 01090005
+011000     EXEC SQL                                                     01100005
+011100          INCLUDE TPREQIT                                         01110005
+011200     END-EXEC.                                                    01120005
+011300                                                                  01130005
+011400*---------------------------------------------------------------* 01140005
+011500*    DB2 AREA FOR RECEIVERS TABLE                               * 01150005
+011600*---------------------------------------------------------------* 01160005
+011700     EXEC SQL                                                     01170005
+011800          INCLUDE TRECEIV                                         01180005
+011900     END-EXEC.                                                    01190005
+012000                                                                  01200005
+012100*---------------------------------------------------------------* 01210005
+012200*    DB2 AREA FOR RECEIVING DISTRIBUTION TABLE                  * 01220005
+012300*---------------------------------------------------------------* 01230005
+012400     EXEC SQL                                                     01240005
+012500          INCLUDE TRECDIS                                         01250005
+012600     END-EXEC.                                                    01260005
+012700                                                                  01270005
+012800*---------------------------------------------------------------* 01280005
+012900*    DB2 AREA FOR NON-INVOICED RECEIPT TABLE                    * 01290005
+013000*---------------------------------------------------------------* 01300005
+013100     EXEC SQL                                                     01310005
+013200          INCLUDE TNINREC                                         01320005
+013300     END-EXEC.                                                    01330005
+013400                                                                  01340005
+013500*---------------------------------------------------------------* 01350005
+013600*    DB2 AREA FOR PRICE CLAIM ADJUSTMENTS TABLE                 * 01360005
+013700*---------------------------------------------------------------* 01370005
+013800     EXEC SQL                                                     01380005
+013900          INCLUDE TPRCCLM                                         01390005
+014000     END-EXEC.                                                    01400005
+014100                                                                  01410005
+014200*---------------------------------------------------------------* 01420005
+014300*    DB2 AREA FOR RELEASED PO/STORES TABLE                      * 01430005
+014400*---------------------------------------------------------------* 01440005
+014500     EXEC SQL                                                     01450005
+014600          INCLUDE TPOSTRR                                         01460005
+014700     END-EXEC.                                                    01470005
+014800                                                                  01480005
+014200*---------------------------------------------------------------* 01481008
+014300*    DB2 AREA FOR VENDOR CAPABILITY TABLE                       * 01482008
+014400*---------------------------------------------------------------* 01483008
+014500     EXEC SQL                                                     01484008
+014600          INCLUDE VNT00001                                        01485008
+014700     END-EXEC.                                                    01486008
+014800                                                                  01487008
+014200*---------------------------------------------------------------* 01488008
+014300*    DB2 AREA FOR MERCHANDISE AREA TABLE                        * 01489008
+014400*---------------------------------------------------------------* 01489108
+014500     EXEC SQL                                                     01489208
+014600          INCLUDE TMDSEAR                                         01489308
+014700     END-EXEC.                                                    01489408
+014800                                                                  01489508
+014900*----------------------------------------------------------------*01490005
+015000* SELECT ALL INVOICES THAT WERE INCLUDED IN THE PAY-RELEASE       01500005
+015100*----------------------------------------------------------------*01510005
+015200     EXEC SQL                                                     01520005
+015300       DECLARE RELEASED_CSR CURSOR FOR                            01530005
+015400           SELECT PO_NBR                                          01540005
+015500                 ,INVC_ID                                         01550005
+015600            FROM TINVOIC                                          01560005
+015700           WHERE PO_NBR        = :PV-PURCH-ORDER                  01570005
+015800             AND STR_NBR BETWEEN :MIN-STR-NBR                     01580005
+015900                             AND :MAX-STR-NBR                     01590005
+016000             AND DC_NBR  BETWEEN :MIN-DC-NBR                      01600005
+016100                             AND :MAX-DC-NBR                      01610005
+016200             AND MTCH_LVL_CDE  = :CC-MTCH-LVL-CDE                 01620005
+016300             AND DATE(PAYT_RLSE_TMST) = :CC-RELEASE-DATE          01630005
+016400           ORDER BY PO_NBR                                        01640005
+016500                   ,INVC_ID                                       01650005
+016600      END-EXEC.                                                   01660005
+016700                                                                  01670005
+016800 EJECT                                                            01680005
+016900                                                                  01690005
+017000*----------------------------------------------------------------*01700005
+017100* SELECT ALL REMAINDER INVOICES CREATED FROM OR AFTER THE RELEASE 01710005
+017200*----------------------------------------------------------------*01720005
+017300     EXEC SQL                                                     01730005
+017400       DECLARE NEWRI_CSR CURSOR FOR                               01740005
+017500         SELECT PO_NBR                                            01750005
+017600              , INVC_ID                                           01760005
+017700              , PAYT_REQ_SEQ_NBR                                  01770005
+017800           FROM TINVOIC                                           01780005
+017900          WHERE PO_NBR        = :PV-PURCH-ORDER                   01790005
+018000            AND STR_NBR       = :PV-LOC-NBR                       01800005
+018100            AND INVC_TYP_CDE  = 'RI'                              01810005
+018200            AND CRE_DTE       = :CC-RELEASE-DATE                  01820005
+018300     END-EXEC.                                                    01830005
+018400 EJECT                                                            01840005
+018500*----------------------------------------------------------------*01850005
+018600* SELECT ALL EXPENSE INVOICES FOR AN IMPORT PO BEING UNRELEASED   01860005
+018700*----------------------------------------------------------------*01870005
+018800     EXEC SQL                                                     01880005
+018900       DECLARE EXP_INVC_CSR CURSOR FOR                            01890005
+019000         SELECT PO_NBR                                            01900005
+019100              , INVC_ID                                           01910005
+019200           FROM TINVOIC                                           01920005
+019300          WHERE PO_NBR        = :PV-PURCH-ORDER                   01930005
+019400            AND INVC_TYP_CDE  = 'EI'                              01940005
+019500            AND AP_PRC_DTE    = :CC-RELEASE-DATE                  01950005
+019600     END-EXEC.                                                    01960005
+019700 EJECT                                                            01970005
+019800*----------------------------------------------------------------*01980005
+019900* SELECT RECEIVER SEQUENCE NUMBERS FOR TRECDIS BEING UPDATED      01990005
+020000*----------------------------------------------------------------*02000005
+020100     EXEC SQL                                                     02010005
+020200       DECLARE RCV_SEQ_CSR CURSOR FOR                             02020005
+020300         SELECT DISTINCT REC_SEQ_NBR                              02030005
+020400           FROM TRECDIS                                           02040005
+020500          WHERE ORD_NBR     = :PV-PURCH-ORDER                     02050005
+020600            AND STR_NBR     BETWEEN :MIN-STR-NBR                  02060005
+020700                                AND :MAX-STR-NBR                  02070005
+020800            AND OPER_UNT_ID BETWEEN :MIN-DC-NBR                   02080005
+020900                                AND :MAX-DC-NBR                   02090005
+020910            AND AP_PRC_CDE  = :CC-AP-PRC-CDE                      02091005
+020920            AND AP_PRC_DTE  = :CC-RELEASE-DATE                    02092005
+020930     END-EXEC.                                                    02093005
+020940*---------------------------------------------------------------* 02093108
+020950*    WORKING STORAGE FOR SEPHORA @ KOHLS VENDORS                * 02093208
+020960*---------------------------------------------------------------* 02093308
+008500     COPY APWS021.                                                02093408
+020940*---------------------------------------------------------------* 02094005
+020950*    DB2 AREA FOR COMMUNICATIONS                                * 02095005
+020960*---------------------------------------------------------------* 02096005
+020970     EXEC SQL                                                     02097005
+020980          INCLUDE SQLCA                                           02098005
+020990     END-EXEC.                                                    02099005
+021000                                                                  02100005
+021100 01  FILLER                        PIC X(25) VALUE                02110005
+021200          '<====WS FOR APKUP300 ENDS'.                            02120005
+021300 PROCEDURE DIVISION.                                              02130005
+021400 A100-MAIN.                                                       02140005
+021500                                                                  02150005
+021600     PERFORM B100-INITIALIZATION.                                 02160005
+021700                                                                  02170005
+021800     PERFORM B200-UNRELEASE                                       02180005
+021810       UNTIL END-OF-PO-LIST.                                      02181005
+021820                                                                  02182005
+021830     PERFORM B300-END-OF-JOB.                                     02183005
+021840                                                                  02184005
+021850     GOBACK.                                                      02185005
+021860 EJECT                                                            02186005
+021870*---------------------------------------------------------------* 02187005
+021880*    PERFORM ALL OF THE DATE AND FILE OPENING ROUTINES          * 02188005
+021890*---------------------------------------------------------------* 02189005
+021900 B100-INITIALIZATION.                                             02190005
+022000                                                                  02200005
+022100     DISPLAY '*************** PROGRAM: APKUP300 **************'   02210005
+022200                                                                  02220005
+022300     OPEN  INPUT   CONTROL-CARD-FILE.                             02230005
+022400                                                                  02240005
+022500     INITIALIZE DCLTINVOIC                                        02250005
+022600                DCLTPREQIT                                        02260005
+022700                DCLTRECEIV                                        02270005
+022800                DCLTRECDIS                                        02280005
+022900                DCLTNINREC                                        02290005
+023000                DCLTPRCCLM                                        02300005
+023100                DCLTPOSTRR.                                       02310005
+023200                                                                  02320005
+023300     PERFORM R100-READ-CONTROL-CARD.                              02330005
+023400                                                                  02340005
+023500     IF  END-OF-PO-LIST                                           02350005
+023600         DISPLAY '** APKUP300 ABEND **'                           02360005
+023700         DISPLAY '** CONTROL CARD FILE IS EMPTY **'               02370005
+023800         SET AP-EMPTY-FILE TO TRUE                                02380005
+023900         PERFORM Z999-ABEND                                       02390005
+024000     END-IF.                                                      02400005
+024100                                                                  02410008
+024100     MOVE WS-ABEND-PROGRAM     TO     SA-PROGRAM-NAME.            02411008
+024100     PERFORM S100-GET-SEPHORA-DEPT.                               02412008
+024100                                                                  02415008
+024200 EJECT                                                            02420005
+024300*----------------------------------------------------------------*02430005
+024400*  SET THE MIN AND MAX STORE NUMBERS AND DC NUMBERS BASED ON THE *02440005
+024500*  MATCH LEVEL CODE IN THE CONTROL CARD.                         *02450005
+024600*                                                                *02460005
+024700*  WORK THROUGH EACH TABLE THAT MAY HAVE HAD UPDATES OR INSERTS  *02470005
+024800*  TO DETERMINE NUMBER OF ROWS THAT NEED TO BE UPDATED BACK TO   *02480005
+024900*  THEIR ORIGINAL VALUES OR DELETED.  SINCE EACH RELEASE CAN     *02490005
+025000*  AFFECT DIFFERENT TABLES IN DIFFERENT WAYS, WE DO NOT ABEND    *02500005
+025100*  FOR A NOT FOUND CONDITION.                                    *02510005
+025200*----------------------------------------------------------------*02520005
+025300 B200-UNRELEASE.                                                  02530005
+025400                                                                  02540005
+025500     EVALUATE TRUE                                                02550005
+025600        WHEN CC-MTCH-LVL-CDE = 'D'                                02560005
+025700            MOVE +0         TO MIN-STR-NBR                        02570005
+025800            MOVE +9999      TO MAX-STR-NBR                        02580005
+025900            MOVE PV-LOC-NBR TO MIN-DC-NBR                         02590005
+026000                               MAX-DC-NBR                         02600005
+026100        WHEN CC-MTCH-LVL-CDE = 'S'                                02610005
+026200            MOVE PV-LOC-NBR TO MIN-STR-NBR                        02620005
+026300                               MAX-STR-NBR                        02630005
+026400            MOVE +0         TO MIN-DC-NBR                         02640005
+026500            MOVE +9999      TO MAX-DC-NBR                         02650005
+026600        WHEN CC-MTCH-LVL-CDE = 'P'                                02660005
+026700            MOVE +0         TO MIN-STR-NBR                        02670005
+026800                               MIN-DC-NBR                         02680005
+026900            MOVE +9999      TO MAX-STR-NBR                        02690005
+027000                               MAX-DC-NBR                         02700005
+027100        WHEN OTHER                                                02710005
+027200            SET AC-BAD-DATA TO TRUE                               02720005
+027300            MOVE 'INVALID MATCH LEVEL' TO WS-ABEND-OPERATION      02730005
+027400            PERFORM Z999-ABEND                                    02740005
+027500     END-EVALUATE.                                                02750005
+027600                                                                  02760005
+027610     IF  CC-MTCH-LVL-CDE = 'S'                                    02761005
+027620         CONTINUE                                                 02762005
+027630     ELSE                                                         02763005
+027631         PERFORM S100-COUNT-TRECEIV                               02763105
+027632         IF  PV-TRECEIV-COUNT > 0                                 02763205
+027633             PERFORM U100-UPDATE-TRECEIV                          02763305
+027634         END-IF                                                   02763405
+027635     END-IF.                                                      02763505
+027636                                                                  02763605
+027637     PERFORM S200-COUNT-TRECDIS.                                  02763705
+027638     IF PV-TRECDIS-COUNT > 0                                      02763805
+027639         PERFORM Y700-OPEN-RCV-SEQ-CURSOR                         02763905
+027640         PERFORM S950-FETCH-RCV-SEQ-CSR                           02764005
+027650         PERFORM UNTIL END-OF-RCVSEQ-CSR                          02765005
+027660            PERFORM U150-UPDATE-TRECEIV                           02766005
+027661            PERFORM S950-FETCH-RCV-SEQ-CSR                        02766105
+027662         END-PERFORM                                              02766205
+027663         PERFORM Y800-CLOSE-RCV-SEQ-CURSOR                        02766305
+027664         PERFORM U200-UPDATE-TRECDIS                              02766405
+027665     END-IF.                                                      02766505
+027666                                                                  02766605
+027667     PERFORM S300-COUNT-TNINREC.                                  02766705
+027668     IF  PV-TNINREC-COUNT > 0                                     02766805
+027669         PERFORM U300-UPDATE-TNINREC                              02766905
+027670     END-IF.                                                      02767005
+027680                                                                  02768005
+027690     PERFORM S400-COUNT-NEW-TNINREC.                              02769005
+027700     IF PV-NIR-DEL-COUNT > 0                                      02770005
+027800        PERFORM U400-DELETE-TNINREC                               02780005
+027900     END-IF.                                                      02790005
+028000                                                                  02800005
+028100     PERFORM Y300-OPEN-NEW-RI-CURSOR.                             02810005
+028200     PERFORM S500-FETCH-NEW-RI.                                   02820005
+028300     PERFORM UNTIL END-OF-NEWRI-CSR                               02830005
+028400         PERFORM S600-COUNT-TPREQIT                               02840005
+028500         PERFORM U500-DELETE-NEW-RI                               02850005
+028600         PERFORM S500-FETCH-NEW-RI                                02860005
+028700     END-PERFORM.                                                 02870005
+028800     PERFORM Y400-CLOSE-NEW-RI-CURSOR.                            02880005
+028900                                                                  02890005
+029000     PERFORM Y100-OPEN-RELEASED-CURSOR.                           02900005
+029100     PERFORM S700-FETCH-RELEASED-CSR.                             02910005
+029200     PERFORM UNTIL END-OF-RELEASED-CSR                            02920005
+029300         MOVE CC-PO-ENT-ID        TO PV-ENT-ID                    02930010
+029300         MOVE CC-PO-DEPT-NBR      TO PV-DEPT-NBR                  02930110
+029300         PERFORM S500-CHECK-FOR-SEPHORA                           02930209
+029300         PERFORM U600-UPDATE-TINVOIC                              02931009
+029400         PERFORM S700-FETCH-RELEASED-CSR                          02940005
+029500     END-PERFORM.                                                 02950005
+029600     PERFORM Y200-CLOSE-RELEASED-CURSOR.                          02960005
+029700                                                                  02970005
+029800     IF  CC-IMPORT-IND = 'Y'                                      02980005
+029900         PERFORM Y500-OPEN-EXP-INVC-CURSOR                        02990005
+030000         PERFORM S900-FETCH-EXP-INVC-CSR                          03000005
+030100         PERFORM UNTIL END-OF-EXP-CSR                             03010005
+030200             PERFORM U950-UPDATE-EXP-INVOIC                       03020005
+030300             PERFORM S900-FETCH-EXP-INVC-CSR                      03030005
+030400         END-PERFORM                                              03040005
+030500         PERFORM Y600-CLOSE-EXP-INVC-CURSOR                       03050005
+030600     END-IF.                                                      03060005
+030700                                                                  03070005
+030800     PERFORM S800-COUNT-TPRCCLM.                                  03080005
+030900     IF PV-PRCCLM-COUNT > 0                                       03090005
+031000       PERFORM U800-DELETE-TPRCCLM                                03100005
+031100     END-IF.                                                      03110005
+031200                                                                  03120005
+031300     PERFORM U900-DELETE-TPOSTRR.                                 03130005
+031400                                                                  03140005
+031500     ADD PV-TRECEIV-COUNT      TO TOT-TRECEIV-COUNT.              03150005
+031600     ADD PV-TRECDIS-COUNT      TO TOT-TRECDIS-COUNT.              03160005
+031700     ADD PV-TNINREC-COUNT      TO TOT-TNINREC-COUNT.              03170005
+031800     ADD PV-NIR-DEL-COUNT      TO TOT-NIR-DEL-COUNT.              03180005
+031900     ADD PV-RI-DELETE-COUNT    TO TOT-RI-DELETE-COUNT.            03190005
+032000     ADD PV-TPREQIT-COUNT      TO TOT-TPREQIT-COUNT.              03200005
+032100     ADD PV-PRCCLM-COUNT       TO TOT-PRCCLM-COUNT.               03210005
+032200     ADD PV-TINVOIC-UPDT-COUNT TO TOT-TINVOIC-UPDT-COUNT.         03220005
+032300     ADD PV-EXP-UPDT-COUNT     TO TOT-EXP-UPDT-COUNT.             03230005
+032400     ADD PV-TPOSTRR-DEL-CNT    TO TOT-TPOSTRR-DEL-CNT.            03240005
+032500                                                                  03250005
+032600     MOVE ZERO TO PV-TRECEIV-COUNT                                03260005
+032700                  PV-TRECDIS-COUNT                                03270005
+032800                  PV-TNINREC-COUNT                                03280005
+032900                  PV-NIR-DEL-COUNT                                03290005
+033000                  PV-RI-DELETE-COUNT                              03300005
+033100                  PV-TPREQIT-COUNT                                03310005
+033200                  PV-PRCCLM-COUNT                                 03320005
+033300                  PV-TINVOIC-UPDT-COUNT                           03330005
+033400                  PV-EXP-UPDT-COUNT                               03340005
+033500                  PV-TPOSTRR-DEL-CNT.                             03350005
+033600                                                                  03360005
+033700     MOVE 'N'  TO WS-TRECEIV-FOUND-SW                             03370005
+033800                  WS-TNINREC-FOUND-SW                             03380005
+033900                  WS-TRECDIS-FOUND-SW                             03390005
+034000                  WS-NIRNEW-FOUND-SW                              03400005
+034100                  END-OF-RELEASED-CSR-SW                          03410005
+034200                  END-OF-NEWRI-CSR-SW                             03420005
+034300                  END-OF-EXP-CSR-SW                               03430005
+034400                  END-OF-RCVSEQ-CSR-SW                            03440005
+034500                  WS-PRCLMNEW-FOUND-SW.                           03450005
+034600                                                                  03460005
+034700     PERFORM R100-READ-CONTROL-CARD.                              03470005
+034800  EJECT                                                           03480005
+034900*----------------------------------------------------------------*03490005
+035000*     FINISH THE PROCESS, DISPLAY PROGRAM COUNTERS                03500005
+035100*     AND CLOSE ALL FILES                                         03510005
+035200*----------------------------------------------------------------*03520005
+035300 B300-END-OF-JOB.                                                 03530005
+035400                                                                  03540005
+035500     CLOSE CONTROL-CARD-FILE.                                     03550005
+035600                                                                  03560005
+035700     DISPLAY '*****************************************'.         03570005
+035800     DISPLAY 'TRECEIV UPDATE COUNT = ' TOT-TRECEIV-COUNT.         03580005
+035900     DISPLAY 'TRECDIS UPDATE COUNT = ' TOT-TRECDIS-COUNT.         03590005
+036000     DISPLAY 'TNINREC UPDATE COUNT = ' TOT-TNINREC-COUNT.         03600005
+036100     DISPLAY 'TNINREC DELETE COUNT = ' TOT-NIR-DEL-COUNT.         03610005
+036200     DISPLAY 'NEW RI  DELETE COUNT = ' TOT-RI-DELETE-COUNT.       03620005
+036300     DISPLAY 'TPREQIT DELETE COUNT = ' TOT-TPREQIT-COUNT.         03630005
+036400     DISPLAY 'TPRCCLM DELETE COUNT = ' TOT-PRCCLM-COUNT.          03640005
+036500     DISPLAY 'TINVOIC UPDATE COUNT = ' TOT-TINVOIC-UPDT-COUNT.    03650005
+036600     DISPLAY 'EXPENSE UPDATE COUNT = ' TOT-EXP-UPDT-COUNT.        03660005
+036700     DISPLAY 'TPOSTRR DELETE COUNT = ' TOT-TPOSTRR-DEL-CNT.       03670005
+036800     DISPLAY '*****************************************'.         03680005
+036900  EJECT                                                           03690005
+037000*----------------------------------------------------------------*03700005
+037100* R100-READ-CONTROL-CARD                                          03710005
+037200*----------------------------------------------------------------*03720005
+037300 R100-READ-CONTROL-CARD.                                          03730005
+037400                                                                  03740005
+037500     READ CONTROL-CARD-FILE INTO CONTROL-CARD-RECORD              03750005
+037600        AT END                                                    03760005
+037700          SET END-OF-PO-LIST TO TRUE.                             03770005
+037800                                                                  03780005
+037900     IF NOT END-OF-PO-LIST                                        03790005
+038000        DISPLAY 'PO NBR: '       CC-PURCH-ORDER                   03800005
+038100        DISPLAY 'LOCATION NBR: ' CC-LOC-NBR                       03810005
+038200        DISPLAY 'RELEASE DATE: ' CC-RELEASE-DATE                  03820005
+038300        DISPLAY 'AP PRC CODE: '  CC-AP-PRC-CDE                    03830005
+038400        DISPLAY 'IMPORT IND: '   CC-IMPORT-IND                    03840005
+038500        DISPLAY 'MTCH LVL CDE: ' CC-MTCH-LVL-CDE                  03850005
+038600                                                                  03860005
+038700        MOVE CC-PURCH-ORDER     TO PV-PURCH-ORDER                 03870005
+038800        MOVE CC-LOC-NBR         TO PV-LOC-NBR                     03880005
+038900     END-IF.                                                      03890005
+039000 EJECT.                                                           03900005
+039100*----------------------------------------------------------------*03910005
+039200* DETERMINE IF ANY RECEIVERS WERE MATCHED BY THE RELEASE          03920005
+039300*----------------------------------------------------------------*03930005
+039400 S100-COUNT-TRECEIV.                                              03940005
+039500                                                                  03950005
+039600     EXEC SQL                                                     03960005
+039700         SELECT COUNT(*)                                          03970005
+039800           INTO :PV-TRECEIV-COUNT                                 03980005
+039900           FROM TRECEIV RV                                        03990005
+040000         WHERE RV.STATUS_CDE = 'VE'                               04000005
+040100           AND ORD_NBR       = :PV-PURCH-ORDER                    04010005
+040200           AND AP_PRC_CDE    = :CC-AP-PRC-CDE                     04020005
+040300           AND AP_PRC_DTE    = :CC-RELEASE-DATE                   04030005
+040400           AND OPER_UNT_ID   BETWEEN :MIN-DC-NBR                  04040005
+040500                                 AND :MAX-DC-NBR                  04050005
+040600     END-EXEC.                                                    04060005
+040700                                                                  04070005
+040800     EVALUATE TRUE                                                04080005
+040900        WHEN SQLCODE = ZERO                                       04090005
+041000        WHEN SQLCODE = +100                                       04100005
+041100          CONTINUE                                                04110005
+041200        WHEN SQLWARN0 NOT = SPACES                                04120005
+041300        WHEN SQLCODE  NOT = ZERO                                  04130005
+041400            MOVE 'S100-COUNT-TRECEIV'  TO WS-ABEND-PARAGRAPH      04140005
+041500            MOVE 'UNSUCCESSFUL SELECT' TO WS-ABEND-OPERATION      04150005
+041600            MOVE 'TRECEIV'             TO WS-ABEND-STRUCTURE-1    04160005
+041700            PERFORM Z999-SQL-ERROR                                04170005
+041800     END-EVALUATE.                                                04180005
+041900                                                                  04190005
+042000  EJECT                                                           04200005
+042100*----------------------------------------------------------------*04210005
+042200* DETERMINE IF ANY TRECDIS ROWS WERE MATCHED BY THE RELEASE       04220005
+042300*----------------------------------------------------------------*04230005
+042400 S200-COUNT-TRECDIS.                                              04240005
+042500                                                                  04250005
+042600     EXEC SQL                                                     04260005
+042700       SELECT COUNT(*)                                            04270005
+042800         INTO :PV-TRECDIS-COUNT                                   04280005
+042900         FROM TRECDIS                                             04290005
+043000        WHERE ORD_NBR     = :PV-PURCH-ORDER                       04300005
+043100          AND STR_NBR     BETWEEN :MIN-STR-NBR                    04310005
+043200                              AND :MAX-STR-NBR                    04320005
+043300          AND OPER_UNT_ID BETWEEN :MIN-DC-NBR                     04330005
+043400                              AND :MAX-DC-NBR                     04340005
+043500          AND AP_PRC_CDE  = :CC-AP-PRC-CDE                        04350005
+043600          AND AP_PRC_DTE  = :CC-RELEASE-DATE                      04360005
+043700     END-EXEC.                                                    04370005
+043800                                                                  04380005
+043900     EVALUATE TRUE                                                04390005
+044000        WHEN SQLCODE = ZERO                                       04400005
+044100        WHEN SQLCODE = +100                                       04410005
+044200          CONTINUE                                                04420005
+044300        WHEN SQLWARN0 NOT = SPACES                                04430005
+044400        WHEN SQLCODE  NOT = ZERO                                  04440005
+044500            MOVE 'S200-COUNT-TRECDIS' TO WS-ABEND-PARAGRAPH       04450005
+044600            MOVE 'UNSUCCESSFUL SELECT' TO WS-ABEND-OPERATION      04460005
+044700            MOVE 'TRECDIS'      TO WS-ABEND-STRUCTURE-1           04470005
+044800            PERFORM Z999-SQL-ERROR                                04480005
+044900     END-EVALUATE.                                                04490005
+045000                                                                  04500005
+045100  EJECT                                                           04510005
+045200*----------------------------------------------------------------*04520005
+045300* DETERMINE IF ANY NON-INVOICED RECEIPTS WERE MATCHED IN THE      04530005
+045400* RELEASE.                                                        04540005
+045500*----------------------------------------------------------------*04550005
+045600 S300-COUNT-TNINREC.                                              04560005
+045700                                                                  04570005
+045800     EXEC SQL                                                     04580005
+045900       SELECT COUNT(*)                                            04590005
+046000         INTO :PV-TNINREC-COUNT                                   04600005
+046100         FROM TNINREC                                             04610005
+046200        WHERE PO_NBR               = :PV-PURCH-ORDER              04620005
+046300          AND STR_NBR        BETWEEN :MIN-STR-NBR                 04630005
+046400                                 AND :MAX-STR-NBR                 04640005
+046500          AND DC_NBR         BETWEEN :MIN-DC-NBR                  04650005
+046600                                 AND :MAX-DC-NBR                  04660005
+046700          AND STATUS_CDE           = :CC-AP-PRC-CDE               04670005
+046800          AND DATE(PAYT_RLSE_TMST) = :CC-RELEASE-DATE             04680005
+046900     END-EXEC.                                                    04690005
+047000                                                                  04700005
+047100     EVALUATE TRUE                                                04710005
+047200        WHEN SQLCODE = ZERO                                       04720005
+047300        WHEN SQLCODE = +100                                       04730005
+047400          CONTINUE                                                04740005
+047500        WHEN SQLWARN0 NOT = SPACES                                04750005
+047600        WHEN SQLCODE  NOT = ZERO                                  04760005
+047700            MOVE 'S300-COUNT-TNINREC' TO WS-ABEND-PARAGRAPH       04770005
+047800            MOVE 'UNSUCCESSFUL SELECT' TO WS-ABEND-OPERATION      04780005
+047900            MOVE 'TNINREC'      TO WS-ABEND-STRUCTURE-1           04790005
+048000            MOVE SPACES         TO WS-ABEND-STRUCTURE-2           04800005
+048100            PERFORM Z999-SQL-ERROR                                04810005
+048200     END-EVALUATE.                                                04820005
+048300                                                                  04830005
+048400  EJECT                                                           04840005
+048500*----------------------------------------------------------------*04850005
+048600* DETERMINE IF ANY NON-INVOICED RECEIPTS WERE CREATED BY THE      04860005
+048700* RELEASE.                                                        04870005
+048800*----------------------------------------------------------------*04880005
+048900 S400-COUNT-NEW-TNINREC.                                          04890005
+049000                                                                  04900005
+049100     EXEC SQL                                                     04910005
+049200       SELECT COUNT(*)                                            04920005
+049300         INTO :PV-NIR-DEL-COUNT                                   04930005
+049400         FROM TNINREC                                             04940005
+049500        WHERE PO_NBR         = :PV-PURCH-ORDER                    04950005
+049600          AND STR_NBR        = :PV-LOC-NBR                        04960005
+049700          AND DATE(REC_TMST) = :CC-RELEASE-DATE                   04970005
+049800     END-EXEC                                                     04980005
+049900                                                                  04990005
+049910     EVALUATE TRUE                                                04991005
+049920        WHEN SQLCODE = ZERO                                       04992005
+049930        WHEN SQLCODE = +100                                       04993005
+049940          CONTINUE                                                04994005
+049950        WHEN SQLWARN0 NOT = SPACES                                04995005
+049960        WHEN SQLCODE  NOT = ZERO                                  04996005
+049970            MOVE 'S400-COUNT-NEW-TNINREC' TO WS-ABEND-PARAGRAPH   04997005
+049980            MOVE 'UNSUCCESSFUL SELECT' TO WS-ABEND-OPERATION      04998005
+049990            MOVE 'TNINREC'      TO WS-ABEND-STRUCTURE-1           04999005
+050000            PERFORM Z999-SQL-ERROR                                05000005
+050100     END-EVALUATE.                                                05010005
+050200                                                                  05020005
+050300  EJECT                                                           05030005
+050400*----------------------------------------------------------------*05040005
+050500* DETERMINE IF THERE ARE REMAINDER INVOICES TO DELETE             05050005
+050600*----------------------------------------------------------------*05060005
+050700 S500-FETCH-NEW-RI.                                               05070005
+050800                                                                  05080005
+050900     EXEC SQL                                                     05090005
+051000         FETCH NEWRI_CSR                                          05100005
+051100           INTO :INVOIC-PO-NBR                                    05110005
+051200              , :INVOIC-INVC-ID                                   05120005
+051300              , :INVOIC-PAYT-REQ-SEQ-NBR                          05130005
+051400     END-EXEC.                                                    05140005
+051500                                                                  05150005
+051600     EVALUATE TRUE                                                05160005
+051700        WHEN SQLCODE = ZERO                                       05170005
+051800             ADD +1 TO PV-RI-DELETE-COUNT                         05180005
+051900        WHEN SQLCODE = +100                                       05190005
+052000             SET END-OF-NEWRI-CSR TO TRUE                         05200005
+052100        WHEN SQLWARN0 NOT = SPACES                                05210005
+052200        WHEN SQLCODE  NOT = ZERO                                  05220005
+052300            MOVE 'S500-FETCH-NEW-RI' TO WS-ABEND-PARAGRAPH        05230005
+052400            MOVE 'UNSUCCESSFUL FETCH' TO WS-ABEND-OPERATION       05240005
+052500            MOVE 'TINVOIC'      TO WS-ABEND-STRUCTURE-1           05250005
+052600            PERFORM Z999-SQL-ERROR                                05260005
+052700     END-EVALUATE.                                                05270005
+052800                                                                  05280005
+052900  EJECT                                                           05290005
+053000*----------------------------------------------------------------*05300005
+053100* COUNT THE NUMBER OF LINE ITEMS TO BE DELETED FOR THE NEW RI.    05310005
+053200*----------------------------------------------------------------*05320005
+053300 S600-COUNT-TPREQIT.                                              05330005
+053400                                                                  05340005
+053500     EXEC SQL                                                     05350005
+053600       SELECT COUNT(*)                                            05360005
+053700         INTO :PV-TPREQIT-COUNT                                   05370005
+053800         FROM TPREQIT                                             05380005
+053900        WHERE PAYT_REQ_SEQ_NBR = :INVOIC-PAYT-REQ-SEQ-NBR         05390005
+054000     END-EXEC.                                                    05400005
+054100                                                                  05410005
+054200     EVALUATE TRUE                                                05420005
+054300        WHEN SQLCODE = ZERO                                       05430005
+054400            CONTINUE                                              05440005
+054500        WHEN SQLWARN0 NOT = SPACES                                05450005
+054600        WHEN SQLCODE  NOT = ZERO                                  05460005
+054700            MOVE 'S600-COUNT-TPREQIT   ' TO WS-ABEND-PARAGRAPH    05470005
+054800            MOVE 'UNSUCCESSFUL SELECT' TO WS-ABEND-OPERATION      05480005
+054900            MOVE 'TPREQIT'      TO WS-ABEND-STRUCTURE-1           05490005
+055000            PERFORM Z999-SQL-ERROR                                05500005
+055100     END-EVALUATE.                                                05510005
+055200                                                                  05520005
+055300  EJECT                                                           05530005
+055400                                                                  05540005
+055500*----------------------------------------------------------------*05550005
+055600* DETERMINE IF THERE ARE ANY INVOICES FOR THE PO/STORE            05560005
+055700* THAT HAVE A RELEASED STATUS ('RL')                              05570005
+055800*----------------------------------------------------------------*05580005
+055900 S700-FETCH-RELEASED-CSR.                                         05590005
+056000                                                                  05600005
+056100     EXEC SQL                                                     05610005
+056200         FETCH RELEASED_CSR                                       05620005
+056300          INTO :INVOIC-PO-NBR                                     05630005
+056400              ,:INVOIC-INVC-ID                                    05640005
+056500     END-EXEC.                                                    05650005
+056600                                                                  05660005
+056700     EVALUATE TRUE                                                05670005
+056800        WHEN SQLCODE = ZERO                                       05680005
+056900             CONTINUE                                             05690005
+057000        WHEN SQLCODE = +100                                       05700005
+057100             MOVE 'Y' TO END-OF-RELEASED-CSR-SW                   05710005
+057200        WHEN SQLWARN0 NOT = SPACES                                05720005
+057300        WHEN SQLCODE  NOT = ZERO                                  05730005
+057400            MOVE 'S700-FETCH-RELEASED-CSR' TO WS-ABEND-PARAGRAPH  05740005
+057500            MOVE 'UNSUCCESSFUL SELECT' TO WS-ABEND-OPERATION      05750005
+057600            MOVE 'TINVOIC'      TO WS-ABEND-STRUCTURE-1           05760005
+057700            PERFORM Z999-SQL-ERROR                                05770005
+057800     END-EVALUATE.                                                05780005
+057900                                                                  05790005
+058000 EJECT                                                            05800005
+058100*----------------------------------------------------------------*05810005
+058200* DETERMINE IF ANY PRICE CLAIMS WERE CREATED BY THE RELEASE       05820005
+058300*----------------------------------------------------------------*05830005
+058400 S800-COUNT-TPRCCLM.                                              05840005
+058500                                                                  05850005
+058600     EXEC SQL                                                     05860005
+058700       SELECT COUNT(*)                                            05870005
+058800         INTO :PV-PRCCLM-COUNT                                    05880005
+058900         FROM TPRCCLM                                             05890005
+059000        WHERE PO_NBR  =  :PV-PURCH-ORDER                          05900005
+059100          AND STR_NBR =  :PV-LOC-NBR                              05910005
+059200     END-EXEC.                                                    05920005
+059300                                                                  05930005
+059400     EVALUATE TRUE                                                05940005
+059500        WHEN SQLCODE = ZERO                                       05950005
+059600        WHEN SQLCODE = +100                                       05960005
+059700          CONTINUE                                                05970005
+059800        WHEN SQLWARN0 NOT = SPACES                                05980005
+059900        WHEN SQLCODE  NOT = ZERO                                  05990005
+060000            MOVE 'S800-COUNT-TPRCCLM' TO WS-ABEND-PARAGRAPH       06000005
+060100            MOVE 'UNSUCCESSFUL SELECT' TO WS-ABEND-OPERATION      06010005
+060200            MOVE 'TPRCCLM'      TO WS-ABEND-STRUCTURE-1           06020005
+060300            PERFORM Z999-SQL-ERROR                                06030005
+060400     END-EVALUATE.                                                06040005
+060500 EJECT                                                            06050005
+060600*----------------------------------------------------------------*06060005
+060700* DETERMINE IF THERE ARE ANY EXPENSE INVOICES FOR THE PO/STORE    06070005
+060800* THAT NEED TO BE RESET.                                          06080005
+060900*----------------------------------------------------------------*06090005
+061000 S900-FETCH-EXP-INVC-CSR.                                         06100005
+061100                                                                  06110005
+061200     EXEC SQL                                                     06120005
+061300         FETCH EXP_INVC_CSR                                       06130005
+061400          INTO :INVOIC-PO-NBR                                     06140005
+061500              ,:INVOIC-INVC-ID                                    06150005
+061600     END-EXEC.                                                    06160005
+061700                                                                  06170005
+061800     EVALUATE TRUE                                                06180005
+061900        WHEN SQLCODE = ZERO                                       06190005
+062000             CONTINUE                                             06200005
+062100        WHEN SQLCODE = +100                                       06210005
+062200             MOVE 'Y' TO END-OF-EXP-CSR-SW                        06220005
+062300        WHEN SQLWARN0 NOT = SPACES                                06230005
+062400        WHEN SQLCODE  NOT = ZERO                                  06240005
+062500            MOVE 'S900-FETCH-EXP-INVC-CSR' TO WS-ABEND-PARAGRAPH  06250005
+062600            MOVE 'UNSUCCESSFUL FETCH' TO WS-ABEND-OPERATION       06260005
+062700            MOVE 'TINVOIC'      TO WS-ABEND-STRUCTURE-1           06270005
+062800            PERFORM Z999-SQL-ERROR                                06280005
+062900     END-EVALUATE.                                                06290005
+063000                                                                  06300005
+063100 EJECT                                                            06310005
+063200*----------------------------------------------------------------*06320005
+063300* RETRIEVE RECEIVING SEQUENCE NUMBERS FOR TRECDIS ROWS THAT WILL  06330005
+063400* BE UPDATED.                                                     06340005
+063500*----------------------------------------------------------------*06350005
+063600 S950-FETCH-RCV-SEQ-CSR.                                          06360005
+063610                                                                  06361005
+063620     EXEC SQL                                                     06362005
+063630         FETCH RCV_SEQ_CSR                                        06363005
+063640          INTO :RECDIS-REC-SEQ-NBR                                06364005
+063650     END-EXEC.                                                    06365005
+063660                                                                  06366005
+063670     EVALUATE TRUE                                                06367005
+063680        WHEN SQLCODE = ZERO                                       06368005
+063690             CONTINUE                                             06369005
+063691        WHEN SQLCODE = +100                                       06369105
+063692             MOVE 'Y' TO END-OF-RCVSEQ-CSR-SW                     06369205
+063693        WHEN SQLWARN0 NOT = SPACES                                06369305
+063694        WHEN SQLCODE  NOT = ZERO                                  06369405
+063695            MOVE 'S950-FETCH-RCV-SEQ-CSR' TO WS-ABEND-PARAGRAPH   06369505
+063696            MOVE 'UNSUCCESSFUL FETCH' TO WS-ABEND-OPERATION       06369605
+063697            MOVE 'TRECDIS'      TO WS-ABEND-STRUCTURE-1           06369705
+063698            PERFORM Z999-SQL-ERROR                                06369805
+063699     END-EVALUATE.                                                06369905
+063700                                                                  06370005
+063701 EJECT                                                            06370105
+063702*----------------------------------------------------------------*06370205
+063703* RESET THE RECEIVERS THAT WERE MATCHED BACK TO UNMATCHED         06370305
+063704*----------------------------------------------------------------*06370405
+063705 U100-UPDATE-TRECEIV.                                             06370505
+063706                                                                  06370605
+063707     EXEC SQL                                                     06370705
+063708       UPDATE TRECEIV                                             06370805
+063709          SET AP_PRC_CDE    = ' '                                 06370905
+063710            , AP_PRC_DTE    = '9999-09-09'                        06371005
+063720          WHERE ORD_NBR     = :PV-PURCH-ORDER                     06372005
+063730            AND AP_PRC_CDE  = :CC-AP-PRC-CDE                      06373005
+063740            AND AP_PRC_DTE  = :CC-RELEASE-DATE                    06374005
+063750            AND OPER_UNT_ID BETWEEN :MIN-DC-NBR                   06375005
+063760                                AND :MAX-DC-NBR                   06376005
+063770     END-EXEC.                                                    06377005
+063780                                                                  06378005
+063790     EVALUATE TRUE                                                06379005
+063800        WHEN SQLCODE = ZERO                                       06380005
+063900        WHEN SQLCODE = +100                                       06390005
+064000            CONTINUE                                              06400005
+064100        WHEN SQLWARN0 NOT = SPACES                                06410005
+064200        WHEN SQLCODE  NOT = ZERO                                  06420005
+064300            MOVE 'U100-UPDATE-TRECEIV' TO WS-ABEND-PARAGRAPH      06430005
+064400            MOVE 'UNSUCCESSFUL UPDATE' TO WS-ABEND-OPERATION      06440005
+064500            MOVE 'TRECEIV'      TO WS-ABEND-STRUCTURE-1           06450005
+064600            PERFORM Z999-SQL-ERROR                                06460005
+064700     END-EVALUATE.                                                06470005
+064800                                                                  06480005
+064900 EJECT                                                            06490005
+065000*----------------------------------------------------------------*06500005
+065100* RESET THE RECEIVERS BACK TO UNMATCHED FOR TRECDIS THAT ARE      06510005
+065200* GOING TO BE UPDATED.                                            06520005
+065300*----------------------------------------------------------------*06530005
+065400 U150-UPDATE-TRECEIV.                                             06540005
+065500                                                                  06550005
+065600     EXEC SQL                                                     06560005
+065700       UPDATE TRECEIV                                             06570005
+065800          SET AP_PRC_CDE    = ' '                                 06580005
+065900            , AP_PRC_DTE    = '9999-09-09'                        06590005
+066000          WHERE ORD_NBR     = :PV-PURCH-ORDER                     06600005
+066100            AND REC_SEQ_NBR = :RECDIS-REC-SEQ-NBR                 06610005
+066200     END-EXEC.                                                    06620005
+066300                                                                  06630005
+066310     EVALUATE TRUE                                                06631005
+066320        WHEN SQLCODE = ZERO                                       06632005
+066330            CONTINUE                                              06633006
+066330*           ADD +1 TO PV-TRECEIV-COUNT                            06633106
+066340        WHEN SQLWARN0 NOT = SPACES                                06634005
+066350        WHEN SQLCODE  NOT = ZERO                                  06635005
+066360            MOVE 'U150-UPDATE-TRECEIV' TO WS-ABEND-PARAGRAPH      06636005
+066370            MOVE 'UNSUCCESSFUL UPDATE' TO WS-ABEND-OPERATION      06637005
+066380            MOVE 'TRECEIV'      TO WS-ABEND-STRUCTURE-1           06638005
+066390            PERFORM Z999-SQL-ERROR                                06639005
+066400     END-EVALUATE.                                                06640005
+066401                                                                  06640105
+066402 EJECT                                                            06640205
+066403*----------------------------------------------------------------*06640305
+066404* UPDATE THE MATCHED NINREC TO SET BACK TO UNMATCHED              06640405
+066405*----------------------------------------------------------------*06640505
+066406 U300-UPDATE-TNINREC.                                             06640605
+066407                                                                  06640705
+066408     EXEC SQL                                                     06640805
+066409        UPDATE TNINREC                                            06640905
+066410           SET STATUS_CDE = ' '                                   06641005
+066420             , PAYT_RLSE_TMST = '9999-09-09-09.09.09.999999'      06642005
+066430        WHERE PO_NBR               = :PV-PURCH-ORDER              06643005
+066440          AND STR_NBR        BETWEEN :MIN-STR-NBR                 06644005
+066450                                 AND :MAX-STR-NBR                 06645005
+066460          AND DC_NBR         BETWEEN :MIN-DC-NBR                  06646005
+066470                                 AND :MAX-DC-NBR                  06647005
+066480          AND STATUS_CDE           = :CC-AP-PRC-CDE               06648005
+066490          AND DATE(PAYT_RLSE_TMST) = :CC-RELEASE-DATE             06649005
+066500     END-EXEC.                                                    06650005
+066600                                                                  06660005
+066700     EVALUATE TRUE                                                06670005
+066800        WHEN SQLCODE = ZERO                                       06680005
+066900        WHEN SQLCODE = +100                                       06690005
+067000            CONTINUE                                              06700005
+067100        WHEN SQLWARN0 NOT = SPACES                                06710005
+067200        WHEN SQLCODE  NOT = ZERO                                  06720005
+067300            MOVE 'U300-UPDATE-TNINREC' TO WS-ABEND-PARAGRAPH      06730005
+067400            MOVE 'UNSUCCESSFUL UPDATE' TO WS-ABEND-OPERATION      06740005
+067500            MOVE 'TNINREC'      TO WS-ABEND-STRUCTURE-1           06750005
+067600            PERFORM Z999-SQL-ERROR                                06760005
+067700     END-EVALUATE.                                                06770005
+067800 EJECT                                                            06780005
+067900*----------------------------------------------------------------*06790005
+068000* RESET THE RECEIVERS THAT WERE MATCHED BACK TO UNMATCHED         06800005
+068100*----------------------------------------------------------------*06810005
+068200 U200-UPDATE-TRECDIS.                                             06820005
+068300                                                                  06830005
+068400     EXEC SQL                                                     06840005
+068500       UPDATE TRECDIS                                             06850005
+068600          SET AP_PRC_CDE  = ' '                                   06860005
+068700            , AP_PRC_DTE  = '9999-09-09'                          06870005
+068800        WHERE ORD_NBR     = :PV-PURCH-ORDER                       06880005
+068900          AND STR_NBR     BETWEEN :MIN-STR-NBR                    06890005
+069000                              AND :MAX-STR-NBR                    06900005
+069100          AND OPER_UNT_ID BETWEEN :MIN-DC-NBR                     06910005
+069200                              AND :MAX-DC-NBR                     06920005
+069300          AND AP_PRC_CDE  = :CC-AP-PRC-CDE                        06930005
+069400          AND AP_PRC_DTE  = :CC-RELEASE-DATE                      06940005
+069500     END-EXEC.                                                    06950005
+069600                                                                  06960005
+069700      EVALUATE TRUE                                               06970005
+069800         WHEN SQLCODE = ZERO                                      06980005
+069900         WHEN SQLCODE = +100                                      06990005
+070000             CONTINUE                                             07000005
+070100         WHEN SQLWARN0 NOT = SPACES                               07010005
+070200         WHEN SQLCODE  NOT = ZERO                                 07020005
+070300             MOVE 'U200-UPDATE-TRECDIS' TO WS-ABEND-PARAGRAPH     07030005
+070400             MOVE 'UNSUCCESSFUL UPDATE' TO WS-ABEND-OPERATION     07040005
+070500             MOVE 'TRECDIS'      TO WS-ABEND-STRUCTURE-1          07050005
+070600             PERFORM Z999-SQL-ERROR                               07060005
+070700      END-EVALUATE.                                               07070005
+070800 EJECT                                                            07080005
+070900*----------------------------------------------------------------*07090005
+071000* DELETE ANY NEW NON-INVOICED RECEIPTS THAT WERE CREATED          07100005
+071100*----------------------------------------------------------------*07110005
+071200 U400-DELETE-TNINREC.                                             07120005
+071300                                                                  07130005
+071400     EXEC SQL                                                     07140005
+071500        DELETE FROM TNINREC                                       07150005
+071600        WHERE PO_NBR         = :PV-PURCH-ORDER                    07160005
+071700          AND STR_NBR        = :PV-LOC-NBR                        07170005
+071800          AND DATE(REC_TMST) = :CC-RELEASE-DATE                   07180005
+071900     END-EXEC.                                                    07190005
+072000                                                                  07200005
+072100      EVALUATE TRUE                                               07210005
+072200         WHEN SQLCODE = ZERO                                      07220005
+072300         WHEN SQLCODE = +100                                      07230005
+072400             CONTINUE                                             07240005
+072500         WHEN SQLWARN0 NOT = SPACES                               07250005
+072600         WHEN SQLCODE  NOT = ZERO                                 07260005
+072700             MOVE 'U400-DELETE-TNINREC' TO WS-ABEND-PARAGRAPH     07270005
+072800             MOVE 'UNSUCCESSFUL DELETE' TO WS-ABEND-OPERATION     07280005
+072900             MOVE 'TNINREC'      TO WS-ABEND-STRUCTURE-1          07290005
+073000             PERFORM Z999-SQL-ERROR                               07300005
+073100      END-EVALUATE.                                               07310005
+073200 EJECT                                                            07320005
+073300*----------------------------------------------------------------*07330005
+073400* DELETE ANY NEW REMAINDER INVOICES THAT WERE CREATED BY THE      07340005
+073500* RELEASE                                                         07350005
+073600*  NOTE:  THERE IS A FOREIGN KEY BETWEEN TPREQIT, TMIITEM &       07360005
+073700*  TVNDINV WITH DELETE CASCADE. THE FOLLOWING DELETE STATEMENT    07370005
+073800*  WILL ALSO DELETE ROWS FROM TMIITEM AND TVNDINV.                07380005
+073900*----------------------------------------------------------------*07390005
+074000 U500-DELETE-NEW-RI.                                              07400005
+074100                                                                  07410005
+074200     EXEC SQL                                                     07420005
+074300       DELETE FROM TPREQIT                                        07430005
+074400       WHERE PAYT_REQ_SEQ_NBR = :INVOIC-PAYT-REQ-SEQ-NBR          07440005
+074500     END-EXEC.                                                    07450005
+074600                                                                  07460005
+074700     EVALUATE TRUE                                                07470005
+074800        WHEN SQLCODE = ZERO                                       07480005
+074900        WHEN SQLCODE = +100                                       07490005
+075000            CONTINUE                                              07500005
+075100        WHEN SQLWARN0 NOT = SPACES                                07510005
+075200        WHEN SQLCODE  NOT = ZERO                                  07520005
+075300            MOVE 'U500-DELETE-NEW-RI' TO WS-ABEND-PARAGRAPH       07530005
+075400            MOVE 'UNSUCCESSFUL DELETE' TO WS-ABEND-OPERATION      07540005
+075500            MOVE 'TPREQIT'      TO WS-ABEND-STRUCTURE-1           07550005
+075600            PERFORM Z999-SQL-ERROR                                07560005
+075700     END-EVALUATE.                                                07570005
+075800                                                                  07580005
+075900     EXEC SQL                                                     07590005
+076000       DELETE FROM TINVOIC                                        07600005
+076100       WHERE PO_NBR  = :INVOIC-PO-NBR                             07610005
+076200         AND INVC_ID = :INVOIC-INVC-ID                            07620005
+076300     END-EXEC.                                                    07630005
+076400                                                                  07640005
+076500     EVALUATE TRUE                                                07650005
+076600        WHEN SQLCODE = ZERO                                       07660005
+076700        WHEN SQLCODE = +100                                       07670005
+076800            CONTINUE                                              07680005
+076900        WHEN SQLWARN0 NOT = SPACES                                07690005
+077000        WHEN SQLCODE  NOT = ZERO                                  07700005
+077100            MOVE 'U500-DELETE-NEW-RI' TO WS-ABEND-PARAGRAPH       07710005
+077200            MOVE 'UNSUCCESSFUL DELETE' TO WS-ABEND-OPERATION      07720005
+077300            MOVE 'TINVOIC'      TO WS-ABEND-STRUCTURE-1           07730005
+077400            PERFORM Z999-SQL-ERROR                                07740005
+077500     END-EVALUATE.                                                07750005
+077600 EJECT                                                            07760005
+077700*----------------------------------------------------------------*07770005
+077800* UPDATE THE STATUS ON RELEASED INVOICES TO 'EN' (OR 'PJ' FOR     07780005
+077900* IMPORTS AND SEPHORA @ KOHLS), AND THE RELEASE TIMESTAMP AND     07801009
+078000* THE AP PROCESS FIELDS BACK TO THEIR DEFAULT VALUES.             07802009
+078100* THE PREPAID REVERSAL INDICATOR IS ONLY CHANGED ON IMPORTS, BUT  07810005
+078200* IT WILL BE SET TO 'N' FOR ALL INVOICES FOR EASE OF CODING.      07820005
+078300*----------------------------------------------------------------*07830005
+078400 U600-UPDATE-TINVOIC.                                             07840005
+078500                                                                  07850005
+078600     IF  CC-IMPORT-IND = 'Y'                                      07860005
+078600     OR  PS-SEPHORA-AT-KOHLS                                      07861009
+078700         MOVE 'PJ' TO INVOIC-STATUS-CDE                           07870005
+078800     ELSE                                                         07880005
+078900         MOVE 'EN' TO INVOIC-STATUS-CDE                           07890005
+079000     END-IF.                                                      07900005
+079100                                                                  07910005
+079200     EXEC SQL                                                     07920005
+079300       UPDATE TINVOIC                                             07930005
+079400          SET STATUS_CDE     = :INVOIC-STATUS-CDE                 07940005
+079500            , PAYT_RLSE_TMST = '9999-09-09-09.09.09.999999'       07950005
+079600            , AP_PRC_CDE     = ' '                                07960005
+079700            , AP_PRC_DTE     = '9999-09-09'                       07970005
+079800            , PPD_RVRSL_IND  = 'N'                                07980005
+079900       WHERE PO_NBR  =  :INVOIC-PO-NBR                            07990005
+080000         AND INVC_ID =  :INVOIC-INVC-ID                           08000005
+080100     END-EXEC.                                                    08010005
+080200                                                                  08020005
+080300     EVALUATE TRUE                                                08030005
+080400        WHEN SQLCODE = ZERO                                       08040005
+080500          ADD +1 TO PV-TINVOIC-UPDT-COUNT                         08050005
+080600        WHEN SQLCODE = +100                                       08060005
+080700            CONTINUE                                              08070005
+080800        WHEN SQLWARN0 NOT = SPACES                                08080005
+080900        WHEN SQLCODE  NOT = ZERO                                  08090005
+081000            MOVE 'U600-UPDATE-TINVOIC' TO WS-ABEND-PARAGRAPH      08100005
+081100            MOVE 'UNSUCCESSFUL UPDATE' TO WS-ABEND-OPERATION      08110005
+081200            MOVE 'TINVOIC'             TO WS-ABEND-STRUCTURE-1    08120005
+081300            PERFORM Z999-SQL-ERROR                                08130005
+081400     END-EVALUATE.                                                08140005
+081500                                                                  08150005
+081600 EJECT                                                            08160005
+081700*----------------------------------------------------------------*08170005
+081800* DELETE ANY PRICE CLAIMS THAT WERE CREATED BY THE RELEASE        08180005
+081900*----------------------------------------------------------------*08190005
+082000 U800-DELETE-TPRCCLM.                                             08200005
+082100                                                                  08210005
+082200     EXEC SQL                                                     08220005
+082300       DELETE FROM TPRCCLM                                        08230005
+082400        WHERE PO_NBR  = :PV-PURCH-ORDER                           08240005
+082500          AND STR_NBR = :PV-LOC-NBR                               08250005
+082600     END-EXEC.                                                    08260005
+082700                                                                  08270005
+082800     EVALUATE TRUE                                                08280005
+082900        WHEN SQLCODE = ZERO                                       08290005
+083000        WHEN SQLCODE = +100                                       08300005
+083100            CONTINUE                                              08310005
+083200        WHEN SQLWARN0 NOT = SPACES                                08320005
+083300        WHEN SQLCODE  NOT = ZERO                                  08330005
+083400            MOVE 'U800-DELETE-TPRCCLM' TO WS-ABEND-PARAGRAPH      08340005
+083500            MOVE 'UNSUCCESSFUL DELETE' TO WS-ABEND-OPERATION      08350005
+083600            MOVE 'TPRCCLM'             TO WS-ABEND-STRUCTURE-1    08360005
+083700            PERFORM Z999-SQL-ERROR                                08370005
+083800     END-EVALUATE.                                                08380005
+083900                                                                  08390005
+084000 EJECT                                                            08400005
+084100*----------------------------------------------------------------*08410005
+084200* DELETE THE TPOSTRR ROW FOR PO/STORE THAT WAS RELEASED           08420005
+084300*----------------------------------------------------------------*08430005
+084400 U900-DELETE-TPOSTRR.                                             08440005
+084500                                                                  08450005
+084600     EXEC SQL                                                     08460005
+084700       DELETE FROM TPOSTRR                                        08470005
+084800        WHERE PO_NBR    = :PV-PURCH-ORDER                         08480005
+084900          AND STR_NBR   = :PV-LOC-NBR                             08490005
+085000     END-EXEC                                                     08500005
+085100                                                                  08510005
+085200     EVALUATE TRUE                                                08520005
+085300        WHEN SQLCODE = ZERO                                       08530005
+085400          ADD +1 TO PV-TPOSTRR-DEL-CNT                            08540005
+085500        WHEN SQLCODE = +100                                       08550005
+085600            CONTINUE                                              08560005
+085700        WHEN SQLWARN0 NOT = SPACES                                08570005
+085800        WHEN SQLCODE  NOT = ZERO                                  08580005
+085900            MOVE 'U900-DELETE-TPOSTRR' TO WS-ABEND-PARAGRAPH      08590005
+086000            MOVE 'UNSUCCESSFUL DELETE' TO WS-ABEND-OPERATION      08600005
+086100            MOVE 'TPOSTRR'      TO WS-ABEND-STRUCTURE-1           08610005
+086200            PERFORM Z999-SQL-ERROR                                08620005
+086300     END-EVALUATE.                                                08630005
+086400 EJECT                                                            08640005
+086500*----------------------------------------------------------------*08650005
+086600* UPDATE THE AP PROCESS INFO AND THE PPD REVERSAL INFO FOR        08660005
+086700* EXPENSE INVOICES WHEN UNRELEASING AN IMPORT PO.                 08670005
+086800*----------------------------------------------------------------*08680005
+086900 U950-UPDATE-EXP-INVOIC.                                          08690005
+087000                                                                  08700005
+087100     EXEC SQL                                                     08710005
+087200       UPDATE TINVOIC                                             08720005
+087300          SET PPD_RVRSL_IND  = 'N'                                08730005
+087400             ,AP_PRC_CDE     = ' '                                08740005
+087500             ,AP_PRC_DTE     = '9999-09-09'                       08750005
+087600       WHERE PO_NBR  =  :INVOIC-PO-NBR                            08760005
+087700         AND INVC_ID =  :INVOIC-INVC-ID                           08770005
+087800     END-EXEC.                                                    08780005
+087900                                                                  08790005
+088000     EVALUATE TRUE                                                08800005
+088100        WHEN SQLCODE = ZERO                                       08810005
+088200          ADD +1 TO PV-EXP-UPDT-COUNT                             08820005
+088300        WHEN SQLCODE = +100                                       08830005
+088400            CONTINUE                                              08840005
+088500        WHEN SQLWARN0 NOT = SPACES                                08850005
+088600        WHEN SQLCODE  NOT = ZERO                                  08860005
+088700            MOVE 'U950-UPDATE-EXP-INVOIC' TO WS-ABEND-PARAGRAPH   08870005
+088800            MOVE 'UNSUCCESSFUL UPDATE'    TO WS-ABEND-OPERATION   08880005
+088900            MOVE 'TINVOIC'                TO WS-ABEND-STRUCTURE-1 08890005
+089000            PERFORM Z999-SQL-ERROR                                08900005
+089100     END-EVALUATE.                                                08910005
+089200                                                                  08920005
+089300 EJECT                                                            08930005
+089400*----------------------------------------------------------------*08940005
+089500* Y100-OPEN-RELEASED-CURSOR                                       08950005
+089600*----------------------------------------------------------------*08960005
+089700 Y100-OPEN-RELEASED-CURSOR.                                       08970005
+089800                                                                  08980005
+089900     EXEC SQL                                                     08990005
+090000       OPEN RELEASED_CSR                                          09000005
+090100     END-EXEC.                                                    09010005
+090200                                                                  09020005
+090300     EVALUATE TRUE                                                09030005
+090400        WHEN SQLCODE = ZERO                                       09040005
+090500          CONTINUE                                                09050005
+090600        WHEN SQLWARN0 NOT = SPACES                                09060005
+090700        WHEN SQLCODE  NOT = ZERO                                  09070005
+090800            MOVE 'Y100-OPEN-RELEASED-CURSOR' TO WS-ABEND-PARAGRAPH09080005
+090900            MOVE 'UNSUCCESSFUL OPEN'         TO WS-ABEND-OPERATION09090005
+091000            MOVE 'TINVOIC'                 TO WS-ABEND-STRUCTURE-109100005
+091100            PERFORM Z999-SQL-ERROR                                09110005
+091200     END-EVALUATE.                                                09120005
+091300                                                                  09130005
+091400 EJECT.                                                           09140005
+091500*----------------------------------------------------------------*09150005
+091600* Y200-CLOSE-RELEASED-CURSOR                                      09160005
+091700*----------------------------------------------------------------*09170005
+091800 Y200-CLOSE-RELEASED-CURSOR.                                      09180005
+091900                                                                  09190005
+092000     EXEC SQL                                                     09200005
+092100       CLOSE RELEASED_CSR                                         09210005
+092200     END-EXEC.                                                    09220005
+092300                                                                  09230005
+092400     EVALUATE TRUE                                                09240005
+092500        WHEN SQLCODE = ZERO                                       09250005
+092600          CONTINUE                                                09260005
+092700        WHEN SQLWARN0 NOT = SPACES                                09270005
+092800        WHEN SQLCODE  NOT = ZERO                                  09280005
+092900          MOVE 'Y200-CLOSE-RELEASED-CSR' TO WS-ABEND-PARAGRAPH    09290005
+093000          MOVE 'UNSUCCESSFUL CLOSE' TO WS-ABEND-OPERATION         09300005
+093100          MOVE 'TINVOIC'      TO WS-ABEND-STRUCTURE-1             09310005
+093200          PERFORM Z999-SQL-ERROR                                  09320005
+093300     END-EVALUATE.                                                09330005
+093400 EJECT                                                            09340005
+093500*----------------------------------------------------------------*09350005
+093600* Y300 OPEN-NEWRI-CURSOR                                          09360005
+093700*----------------------------------------------------------------*09370005
+093800 Y300-OPEN-NEW-RI-CURSOR.                                         09380005
+093900                                                                  09390005
+094000     EXEC SQL                                                     09400005
+094100       OPEN NEWRI_CSR                                             09410005
+094200     END-EXEC.                                                    09420005
+094300                                                                  09430005
+094400     EVALUATE TRUE                                                09440005
+094500        WHEN SQLCODE = ZERO                                       09450005
+094600          CONTINUE                                                09460005
+094700        WHEN SQLWARN0 NOT = SPACES                                09470005
+094800        WHEN SQLCODE  NOT = ZERO                                  09480005
+094900            MOVE 'Y300-OPEN-NEW-RI-CURSOR' TO WS-ABEND-PARAGRAPH  09490005
+095000            MOVE 'UNSUCCESSFUL OPEN' TO WS-ABEND-OPERATION        09500005
+095100            MOVE 'TINVOIC'      TO WS-ABEND-STRUCTURE-1           09510005
+095200            PERFORM Z999-SQL-ERROR                                09520005
+095300     END-EVALUATE.                                                09530005
+095400                                                                  09540005
+095500 EJECT.                                                           09550005
+095600*----------------------------------------------------------------*09560005
+095700* Y400 CLOSE NEW RI CURSOR                                        09570005
+095800*----------------------------------------------------------------*09580005
+095900 Y400-CLOSE-NEW-RI-CURSOR.                                        09590005
+096000                                                                  09600005
+096100     EXEC SQL                                                     09610005
+096200       CLOSE NEWRI_CSR                                            09620005
+096300     END-EXEC.                                                    09630005
+096400                                                                  09640005
+096500     EVALUATE TRUE                                                09650005
+096600        WHEN SQLCODE = ZERO                                       09660005
+096700          CONTINUE                                                09670005
+096800        WHEN SQLWARN0 NOT = SPACES                                09680005
+096900        WHEN SQLCODE  NOT = ZERO                                  09690005
+097000          MOVE 'Y400-CLOSE-NEW-RI-CSR' TO WS-ABEND-PARAGRAPH      09700005
+097100          MOVE 'UNSUCCESSFUL CLOSE' TO WS-ABEND-OPERATION         09710005
+097200          MOVE 'TINVOIC'      TO WS-ABEND-STRUCTURE-1             09720005
+097300          PERFORM Z999-SQL-ERROR                                  09730005
+097400     END-EVALUATE.                                                09740005
+097500 EJECT                                                            09750005
+097600*----------------------------------------------------------------*09760005
+097700* Y500 OPEN EXPENSE INVOICE CURSOR                                09770005
+097800*----------------------------------------------------------------*09780005
+097900 Y500-OPEN-EXP-INVC-CURSOR.                                       09790005
+098000                                                                  09800005
+098100     EXEC SQL                                                     09810005
+098200       OPEN EXP_INVC_CSR                                          09820005
+098300     END-EXEC.                                                    09830005
+098400                                                                  09840005
+098500     EVALUATE TRUE                                                09850005
+098600        WHEN SQLCODE = ZERO                                       09860005
+098700          CONTINUE                                                09870005
+098710        WHEN SQLWARN0 NOT = SPACES                                09871005
+098720        WHEN SQLCODE  NOT = ZERO                                  09872005
+098730            MOVE 'Y500-OPEN-EXP-INVC-CURSOR' TO WS-ABEND-PARAGRAPH09873005
+098731            MOVE 'UNSUCCESSFUL OPEN' TO WS-ABEND-OPERATION        09873105
+098732            MOVE 'TINVOIC'      TO WS-ABEND-STRUCTURE-1           09873205
+098733            PERFORM Z999-SQL-ERROR                                09873305
+098734     END-EVALUATE.                                                09873405
+098735                                                                  09873505
+098736 EJECT.                                                           09873605
+098737*----------------------------------------------------------------*09873705
+098738* Y600 CLOSE EXPENSE INVOICE CURSOR                               09873805
+098739*----------------------------------------------------------------*09873905
+098740 Y600-CLOSE-EXP-INVC-CURSOR.                                      09874005
+098750                                                                  09875005
+098760     EXEC SQL                                                     09876005
+098770       CLOSE EXP_INVC_CSR                                         09877005
+098780     END-EXEC.                                                    09878005
+098790                                                                  09879005
+098800     EVALUATE TRUE                                                09880005
+098900        WHEN SQLCODE = ZERO                                       09890005
+099000          CONTINUE                                                09900005
+099100        WHEN SQLWARN0 NOT = SPACES                                09910005
+099200        WHEN SQLCODE  NOT = ZERO                                  09920005
+099300          MOVE 'Y600-CLOSE-EXP-INVC-CURSOR' TO WS-ABEND-PARAGRAPH 09930005
+099400          MOVE 'UNSUCCESSFUL CLOSE' TO WS-ABEND-OPERATION         09940005
+099410          MOVE 'TINVOIC'      TO WS-ABEND-STRUCTURE-1             09941005
+099420          PERFORM Z999-SQL-ERROR                                  09942005
+099430     END-EVALUATE.                                                09943005
+099431 EJECT                                                            09943105
+099432*----------------------------------------------------------------*09943205
+099433* Y700 OPEN RECEIVING SEQUENCE CURSOR                             09943305
+099434*----------------------------------------------------------------*09943405
+099435 Y700-OPEN-RCV-SEQ-CURSOR.                                        09943505
+099436                                                                  09943605
+099437     EXEC SQL                                                     09943705
+099438       OPEN RCV_SEQ_CSR                                           09943805
+099439     END-EXEC.                                                    09943905
+099440                                                                  09944005
+099441     EVALUATE TRUE                                                09944105
+099442        WHEN SQLCODE = ZERO                                       09944205
+099443          CONTINUE                                                09944305
+099444        WHEN SQLWARN0 NOT = SPACES                                09944405
+099445        WHEN SQLCODE  NOT = ZERO                                  09944505
+099446            MOVE 'Y700-OPEN-RCV-SEQ-CURSOR' TO WS-ABEND-PARAGRAPH 09944605
+099447            MOVE 'UNSUCCESSFUL OPEN' TO WS-ABEND-OPERATION        09944705
+099448            MOVE 'TRECDIS'      TO WS-ABEND-STRUCTURE-1           09944805
+099449            PERFORM Z999-SQL-ERROR                                09944905
+099450     END-EVALUATE.                                                09945005
+099451                                                                  09945105
+099452 EJECT.                                                           09945205
+099453*----------------------------------------------------------------*09945305
+099454* Y800 CLOSE RECEIVING SEQUENCE CURSOR                            09945405
+099455*----------------------------------------------------------------*09945505
+099456 Y800-CLOSE-RCV-SEQ-CURSOR.                                       09945605
+099457                                                                  09945705
+099458     EXEC SQL                                                     09945805
+099459       CLOSE RCV_SEQ_CSR                                          09945905
+099460     END-EXEC.                                                    09946005
+099461                                                                  09946105
+099462     EVALUATE TRUE                                                09946205
+099463        WHEN SQLCODE = ZERO                                       09946305
+099464          CONTINUE                                                09946405
+099465        WHEN SQLWARN0 NOT = SPACES                                09946505
+099466        WHEN SQLCODE  NOT = ZERO                                  09946605
+099467          MOVE 'Y800-CLOSE-RCV-SEQ-CURSOR' TO WS-ABEND-PARAGRAPH  09946705
+099468          MOVE 'UNSUCCESSFUL CLOSE' TO WS-ABEND-OPERATION         09946805
+099469          MOVE 'TRECDIS'      TO WS-ABEND-STRUCTURE-1             09946905
+099470          PERFORM Z999-SQL-ERROR                                  09947005
+099471     END-EVALUATE.                                                09947105
+099472 EJECT                                                            09947205
+099473*----------------------------------------------------------------*09947305
+099474*    GENERIC ABEND ROUTINE                                       *09947405
+099475*----------------------------------------------------------------*09947505
+099476 Z999-ABEND.                                                      09947605
+099477                                                                  09947705
+099478     DISPLAY '****** ABEND'.                                      09947805
+099479     DISPLAY '*** PROGRAM   = ' WS-ABEND-PROGRAM.                 09947905
+099480     DISPLAY '*** PARAGRAPH = ' WS-ABEND-PARAGRAPH.               09948005
+099481     DISPLAY '*** OPERATION = ' WS-ABEND-OPERATION.               09948105
+099482                                                                  09948205
+099483     CALL 'ILBOABN0' USING ABEND-CODE.                            09948305
+099484                                                                  09948405
+099485*----------------------------------------------------------------*09948505
+099486*     PROCESS DB2 ABENDS                                          09948605
+099487*----------------------------------------------------------------*09948705
+099488 Z999-SQL-ERROR.                                                  09948805
+099489                                                                  09948905
+099490     DISPLAY '*** DB2 ERROR '.                                    09949005
+099491     DISPLAY '*** PROGRAM   = ' WS-ABEND-PROGRAM.                 09949105
+099492     DISPLAY '*** PARAGRAPH = ' WS-ABEND-PARAGRAPH.               09949205
+099493     DISPLAY '*** OPERATION = ' WS-ABEND-OPERATION.               09949305
+099494     DISPLAY '*** TABLE 1   = ' WS-ABEND-STRUCTURE-1.             09949405
+099495                                                                  09949505
+099496     MOVE +4013                    TO ABEND-CODE.                 09949605
+099497                                                                  09949705
+099498     COPY DPPD004.                                                09949805
+099499     CALL 'ILBOABN0' USING ABEND-CODE.                            09949905
+099500                                                                  09950005
+099485*----------------------------------------------------------------*09960008
+099486*     PROCESSING FOR SEPHORA @ KOHLS VENDORS                      09970008
+099487*----------------------------------------------------------------*09980008
+099498     COPY APPD021.                                                09990008

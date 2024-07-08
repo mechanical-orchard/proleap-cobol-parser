@@ -1,0 +1,969 @@
+       IDENTIFICATION DIVISION.                                                 
+                                                                                
+       PROGRAM-ID.    IMKUP052.                                                 
+       AUTHOR.        CHUCK ALBERTY -- EXACTA.                                  
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+       DATE-WRITTEN.  07/26/91.                                                 
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *    THIS PROGRAM IS A COPY OF FSKUP010.  IT WAS RENAMED WHEN             
+      *    OWNERSHIP WAS CHANGED FROM FS TO IM.                                 
+      ******************************************************************        
+      *        WEEKLY SKU STATUS CODE UPDATE PROGRAM                            
+      *                                                                         
+      *  THE PURPOSE OF THIS PROGRAM IS TO UPDATE THE STATUS CODE FOR           
+      *  ROWS IN THE SKU TABLE (TSK) FROM '10' (NEW) TO '20' (ACTIVE).          
+      *  THIS PROGRAM WILL BE RUN ON A WEEKLY BASIS AND WILL UPDATE             
+      *  THE STATUS CODE ONLY FOR SKUS THAT HAVE PASSED A SPECIFIED             
+      *  LENGTH OF TIME.  THE CUTOFF DATE IS DETERMINED BY COMPARING            
+      *  THE CURRENT DATE TO THE FIRST RECEIPT DATE + XX CALENDAR DAYS.         
+      *                                                                         
+      *  A CURSOR IS USED TO RETRIEVE DISTINCT DEPT/CLASS COMBINATIONS          
+      *  AND LOAD THEM TO A TABLE IN WORKING STORAGE.  ANOTHER CURSOR           
+      *  IS USED TO SELECT VALID ROWS IN EACH DEPT/CLASS THAT WILL              
+      *  HAVE THE STATUS CODE UPDATED.                                          
+      *                                                                         
+      *  CHANGED 02/95 BY M. DEERING - THE CALL TO THE OLD DATE ROUTINE         
+      *                                (DPKUT105) WAS REPLACED WITH A           
+      *                                CALL TO THE NEW DATE ROUTINE             
+      *                                (DPKUT500).                              
+      *                                                                         
+      *  09/12/96  CHANGED TYPE OF CALENDAR ROUTINE DPKUT500                    
+      *            FROM AO TO F4                                                
+      *            DMITRIY BOBROV                                               
+      *                                                                         
+      *  03/18/98  REMOVED FIRST RECEIVED DATE CUTOFF DATE CHECK FROM           
+      *            STORE CURSOR AND PLACED IT IN THE PROGRAM LOGIC IN           
+      *            ORDER TO APPLY Y2K WINDOWING LOGIC FOR THE CENTURY.          
+      *            CHANGED TYPE OF CALENDAR ROUTINE DPKUT500 TO F4.             
+      *            PAUL KEBER - STRATAGEM     WR#6041                           
+      *                                                                         
+      *  09/02/98  REPLACED DP060 DATE ROUTINE WITH DPKUT500 DATE ROUTINE       
+      *            SCOTT SWESSEL              WR99999                           
+      *                                                                         
+      * 04/30/99  ROLLIN KRING - REMOVED REFERENCE TO DPG51-SYSTEM-DATE*        
+      *       WHICH IS NO LONGER SUPPORTED BY THE CALENDAR ROUTINE.    *        
+      *                                           (WR# 10647)          *        
+      *                                                                *        
+      * 11/15/99  CRAIG FAHEY - ADDED LOGIC TO END THE CURRENT ROW     *        
+      *    AND ADD A NEW ROW WITH AN UPDATED STATUS.     WR# 10760     *        
+      *                                                                         
+JP1010* 10/10/00  JOHN PRICE   - ADDED LOGIC TO UPDATE THE "TSKXREF"   *        
+JP1010*           WR # 99999     TABLE AT THE SAME TIME THE TSK AND    *        
+JP1010*                          TUPCPLS TABLES ARE UPDATED            *        
+JP1010*                                                                *        
+      *  06/10/02  CHANGED LOGIC TO WRITE LOG RECORD TO TSKULOG TABLE   E       
+      *            INSTEAD OF THE MERCH SYSTEM LOG VSAM FILE                    
+      *            TIA JOHNSTON               WR# 23885                         
+      *                                                                         
+      ******************************************************************        
+      *  11/29/02  REMOVE ALL DEPT/CLS PROCESSING INCLUDING DEPT/CLS    E       
+      *  CURSOR AND WORKING STORAGE TABLE.  CHANGE JOIN OF TSK/TSKST            
+      *  TO JOIN OF TSKXREF/TSKST SELECTING BOTH SKU AND INTERNAL               
+      *  UPC ID FOR TSKULOG ORDERING BY ITEM.  CHANGE TSK UPDATE FROM           
+      *  DEPT/CLS/SEQ TO ITEM. CHANGE SELECT AND UPDATE OF TUPCPLS              
+      *  FROM ITEM TO UPC ID.  CHANGE UPDATE OF TSKXREF FROM DEPT/              
+      *  CLS/SEQ TO ITEM NBR.  CHANGE TSKULOG INSERT TO REFLECT                 
+      *  TABLE COLUMN CHANGES.  WR24363                                         
+      ******************************************************************        
+      *  03/01/05  STORE EXPANSION CHANGES.  WR28439.                   E       
+      ******************************************************************        
+      *  06/02/05  PRICE OPTIMIZATION CHANGES.  WR28048.                E       
+      ******************************************************************        
+      *  07/05/06  REMOVE TSKXREF SKU STAT CODE NOT IN '00' CHECK.      E       
+      *            WR30723.                                             E       
+      ******************************************************************        
+                                                                                
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+                                                                                
+       CONFIGURATION SECTION.                                                   
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+       FILE-CONTROL.                                                            
+                                                                                
+      *****************************************************************         
+       DATA DIVISION.                                                           
+      *****************************************************************         
+                                                                                
+       FILE SECTION.                                                            
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  PV-PROGRAM-VARIABLES.                                                
+           05  PV-RETRY-CNT                PIC S9(04)    VALUE 0                
+                                                         COMP SYNC.             
+           05  PV-MAX-RETRIES              PIC S9(04)    VALUE +2               
+                                                         COMP SYNC.             
+           05  PV-UNT-COST-NULL-IND        PIC S9(04)    VALUE +0               
+                                                         COMP.                  
+                                                                                
+       01  WS-SWITCHES.                                                         
+           05  WS-SKU-DATE-OK-SW           PIC  X(01)    VALUE SPACE.           
+               88  WS-SKU-DATE-OK                        VALUE 'Y'.             
+               88  WS-SKU-DATE-NOT-OK                    VALUE 'N'.             
+      *                                                                         
+       01  PS-PROGRAM-SWITCHES.                                            CL**1
+           05  PS-END-OF-SKU-ROWS-SW       PIC X(01)     VALUE 'N'.        CL**1
+               88  PS-END-OF-SKU-ROWS                    VALUE 'Y'.        CL**1
+      *                                                                         
+       01  PA-PROGRAM-ACCUMULATORS.                                        CL*15
+           05  PA-COMMIT-COUNT                 PIC 9(09)  VALUE 0.              
+           05  PA-UPDATE-CTR                   PIC 9(09)  VALUE ZERO.           
+           05  PA-CUM-UPD-CTR                  PIC 9(09)  VALUE ZERO.      CL*16
+      *                                                                         
+       01  WS-LITERALS.                                                         
+           05  WS-LIT-PROGRAM-NAME         PIC  X(08)    VALUE                  
+               'IMKUP052'.                                                      
+           05  WS-LIT-LOG-MSG-TXT-LEN  PIC  S9(4)        VALUE +33              
+                                                         COMP.                  
+           05  PC-COMMIT-INTERVAL              PIC 9(03)   VALUE 500.           
+      *                                                                         
+      *                                                                         
+       01  WS-MISC-FIELDS.                                                      
+           05  WS-ABEND-CODE               PIC S9(04)    VALUE ZERO             
+                                                         COMP SYNC.             
+           05  WS-ABEND-PARAGRAPH          PIC  X(30)    VALUE SPACES.          
+           05  WS-DB2-OPERATION-ATTEMPTED  PIC  X(30)    VALUE SPACES.          
+                                                                                
+           05  WS-CUTOFF-DATE.                                                  
+               10  WS-CUTOFF-DATE-CCYY     PIC  9(04)    VALUE 0.               
+               10  WS-CUTOFF-DATE-MM       PIC  9(02)    VALUE 0.               
+               10  WS-CUTOFF-DATE-DD       PIC  9(02)    VALUE 0.               
+                                                                                
+           05  WS-RCVD-DATE-ISO.                                                
+               10  WS-RCVD-CC              PIC  9(02)    VALUE ZERO.            
+               10  WS-RCVD-DATE            PIC  9(06)    VALUE ZERO.            
+               10  FILLER REDEFINES WS-RCVD-DATE.                               
+                   15  WS-RCVD-YY          PIC  9(02).                          
+                   15  WS-RCVD-MM          PIC  9(02).                          
+                   15  WS-RCVD-DD          PIC  9(02).                          
+                                                                                
+                                                                                
+           05  WS-STAT-CHANGED-DATE        PIC S9(07)    VALUE ZERO             
+                                                         COMP-3.                
+                                                                                
+           05  WS-TODAYS-DATE.                                                  
+               10  WS-TODAYS-DATE-YY       PIC  9(02)    VALUE ZERO.            
+               10  WS-TODAYS-DATE-MM       PIC  9(02)    VALUE ZERO.            
+               10  WS-TODAYS-DATE-DD       PIC  9(02)    VALUE ZERO.            
+           05  WS-TODAYS-DATE-RDF REDEFINES WS-TODAYS-DATE                      
+                                           PIC  9(06).                          
+                                                                                
+W10760     05  WS-TODAYS-DB2-DATE          PIC  X(10).                          
+W10760     05  FILLER REDEFINES WS-TODAYS-DB2-DATE.                             
+W10760         10  WS-TODAYS-DB2-DATE-CC   PIC  9(02).                          
+W10760         10  WS-TODAYS-DB2-DATE-YY   PIC  9(02).                          
+W10760         10  FILLER                  PIC  X(01).                          
+W10760         10  WS-TODAYS-DB2-DATE-MM   PIC  9(02).                          
+W10760         10  FILLER                  PIC  X(01).                          
+W10760         10  WS-TODAYS-DB2-DATE-DD   PIC  9(02).                          
+                                                                                
+      *MD 2/95                                                                  
+           05  WS-DATE2.                                                        
+               10  WS-DATE2-MM             PIC 9(2)      VALUE ZERO.            
+               10  WS-DATE2-DD             PIC 9(2)      VALUE ZERO.            
+               10  WS-DATE2-YY             PIC 9(2)      VALUE ZERO.            
+      *                                                                         
+       01  CM-CHANGE-MESSAGE-LOG-AREA.                                          
+           05  CM-CHANGE-TSK-MSG-1.                                             
+               10  FILLER                  PIC  X(33)    VALUE                  
+                   'STATUS CODE:  OLD=(10)   NEW=(20)'.                         
+      *                                                                         
+       01  WS-PROGRAM-ERROR-MESSAGES.                                           
+           05  PE-MSG-4                    PIC  X(30)    VALUE                  
+               'OPEN SKU-CSR CURSOR           '.                                
+           05  PE-MSG-5                    PIC  X(30)    VALUE                  
+               'FETCH OF SKU-CSR              '.                                
+           05  PE-MSG-6                    PIC  X(30)    VALUE                  
+               'CLOSE SKU-CSR CURSOR          '.                                
+           05  PE-MSG-7                    PIC  X(30)    VALUE                  
+               'UPDATE TSK TABLE              '.                                
+           05  PE-MSG-8                    PIC  X(30)    VALUE                  
+               'CONTROL CARD DAYS NOT NUMERIC '.                                
+JP1010     05  PE-MSG-14                   PIC  X(30)    VALUE                  
+JP1010         'UPDATE SKU-STAT-CDE ON TSKXREF'.                                
+      *                                                                         
+       01  WS-CONTROL-CARD.                                                     
+           05  CC-DAYS-BEFORE-OPEN         PIC 9(3)       VALUE ZERO.           
+           05  CC-DAYS-BEFORE-OPEN-X REDEFINES CC-DAYS-BEFORE-OPEN              
+                                           PIC X(3).                            
+           05  FILLER                      PIC X(77)      VALUE SPACES.         
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      ***  WORK FIELDS FOR DATE CONVERSION SUBROUTINE                           
+      ******************************************************************        
+           COPY DPWS500.                                                        
+      *                                                                         
+      ******************************************************************        
+      ***  SQL RELATED INCLUDE STATEMENTS AND DCLGENS                           
+      ******************************************************************        
+           COPY DPWS004.                                                        
+                                                                                
+           EXEC SQL                                                             
+                INCLUDE SQLCA                                                   
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+                INCLUDE TSK                                                     
+           END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+                INCLUDE TSKST                                                   
+           END-EXEC.                                                            
+JP1010                                                                          
+JP1010     EXEC SQL                                                             
+JP1010          INCLUDE TSKXREF                                                 
+JP1010     END-EXEC.                                                            
+                                                                                
+W10760     EXEC SQL                                                             
+W10760          INCLUDE TUPCPLS                                                 
+W10760     END-EXEC.                                                            
+                                                                                
+W10760     EXEC SQL                                                             
+W10760          INCLUDE TUPC                                                    
+W10760     END-EXEC.                                                            
+                                                                                
+W10760     EXEC SQL                                                             
+W10760          INCLUDE TVSRSVN                                                 
+W10760     END-EXEC.                                                            
+                                                                                
+           EXEC SQL                                                             
+                INCLUDE TSKULOG                                                 
+           END-EXEC.                                                            
+                                                                                
+      *                                                                         
+      ******************************************************************        
+      **  CURSOR USED TO RETRIEVE SKU AND SKU/STORE COLUMNS                     
+      ******************************************************************        
+           EXEC SQL                                                             
+              DECLARE SKU_CSR CURSOR WITH HOLD FOR                              
+               SELECT A.INTR_UPC_ID                                             
+                     ,A.SKU                                                     
+                     ,B.ITEM_NMBR                                               
+                     ,B.FIRST_RCVD_DATE                                         
+               FROM TSKXREF A                                                   
+                   ,TSKST B                                                     
+               WHERE A.ITM_NBR = B.ITEM_NMBR                                    
+                 AND A.SKU_STAT_CDE = '10'                                      
+                 AND B.LOC_NBR      = SMALLINT(0)                               
+                 AND B.FIRST_RCVD_DATE  > 0                                     
+               ORDER BY B.ITEM_NMBR                                             
+           END-EXEC.                                                            
+                                                                                
+       PROCEDURE DIVISION.                                                      
+                                                                                
+      ******************************************************************        
+      *  CONTROLS THE MAIN PROCESSING OF THE PROGRAM.                           
+      ******************************************************************        
+       0000-PROGRAM-MAINLINE.                                                   
+           PERFORM 1000-INITIAL-PROCESS.                                        
+      *                                                                         
+           PERFORM 3000-PROCESS-LOOP                                            
+               UNTIL PS-END-OF-SKU-ROWS.                                        
+      *                                                                         
+           PERFORM 8000-EOJ-ROUTINE.                                            
+      *                                                                         
+           GOBACK.                                                              
+      *                                                                         
+      ******************************************************************        
+      *  DO FIRST TIME PROGRAM INITIALIZATION TASKS.                            
+      *    -- VALIDATE CONTROL CARD                                             
+      *    -- DETERMINE CUTOFF DATE (ACCEPT DATE)                               
+      *    -- OPEN SKU CURSOR, FETCH 1ST ROW                                    
+      *  THIS PROGRAM REQUIRES A CONTROL CARD WHICH CONTAINS THE NUMBER         
+      *  OF DAYS AFTER THE FIRST RECEIPT DATE FOR THE SKU THAT THE SKU          
+      *  WILL HAVE THE STATUS CODE CHANGE FROM 10 (NEW) TO 20 (ACTIVE).         
+      ******************************************************************        
+       1000-INITIAL-PROCESS.                                                    
+                                                                                
+           EXEC SQL                                                             
+              SET :WS-TODAYS-DB2-DATE = CURRENT DATE                            
+           END-EXEC.                                                            
+                                                                                
+           MOVE WS-TODAYS-DB2-DATE-MM  TO WS-TODAYS-DATE-MM.                    
+           MOVE WS-TODAYS-DB2-DATE-DD  TO WS-TODAYS-DATE-DD.                    
+           MOVE WS-TODAYS-DB2-DATE-YY  TO WS-TODAYS-DATE-YY.                    
+      *MD                                                                       
+           MOVE WS-TODAYS-DATE-MM      TO WS-DATE2-MM.                          
+           MOVE WS-TODAYS-DATE-DD      TO WS-DATE2-DD.                          
+           MOVE WS-TODAYS-DATE-YY      TO WS-DATE2-YY.                          
+      *MD                                                                       
+           MOVE WS-TODAYS-DATE-RDF     TO WS-STAT-CHANGED-DATE.                 
+      *                                                                         
+      *                                                                         
+           ACCEPT WS-CONTROL-CARD.                                              
+                                                                                
+           IF  CC-DAYS-BEFORE-OPEN-X NUMERIC                                    
+               DISPLAY 'CONTROL CARD DAYS: ' CC-DAYS-BEFORE-OPEN-X              
+           ELSE                                                                 
+               DISPLAY PE-MSG-8                                                 
+               DISPLAY CC-DAYS-BEFORE-OPEN-X                                    
+               MOVE '1000-INITIAL-PROCESS'                                      
+                                       TO WS-ABEND-PARAGRAPH                    
+               MOVE +4003              TO WS-ABEND-CODE                         
+               PERFORM 9000-ABEND                                               
+           END-IF.                                                              
+                                                                                
+      *MD 2/95                                                                  
+           INITIALIZE DPG51                                                     
+                      DPG52                                                     
+                      DPG53                                                     
+                      DPG54                                                     
+                      DPG55                                                     
+                      DPG56.                                                    
+      *                                                                         
+      *    --> TODAY'S DATE WILL BE DECREMENTED BY THE NUMBER FOUND             
+      *    --> IN CC-DAYS-BEFORE-OPEN AND THE RESULT WILL BE MOVED TO           
+      *    --> WS-CUTOFF-DATE.  THE DPKUT500 DATE ROUTINE WILL BE CALLED        
+      *    --> TO PROCESS THIS REQUEST.                                         
+      *                                                                         
+           MOVE CC-DAYS-BEFORE-OPEN        TO DPG51-INCR-DECR-DAYS-9.           
+           MOVE WS-DATE2                   TO DPG52-LK-DATE-INPUT.              
+      *                                                                         
+           SET DPG51-ACTUAL-CALENDAR-ONLY                                       
+               DPG51-DECREMENT-DATE                                             
+               DPG52-LK-DTE-GREG           TO TRUE.                             
+      *                                                                         
+           CALL DP500-KOHLS-CALENDAR-ROUTINE USING DPG51                        
+                                                   DPG52                        
+                                                   DPG53                        
+                                                   DPG54                        
+                                                   DPG55                        
+                                                   DPG56.                       
+      *                                                                         
+           IF  DPG54-SEVERE-ERROR                                               
+            OR DPG54-DATE-INVALID                                               
+               DISPLAY '** IMKUP052 ABEND **'                                   
+               DISPLAY '** FISCAL DATE SUBROUTINE ERROR; MESSAGE = '            
+                       DPG54-ERROR-MESSAGE                                      
+               MOVE +4013                  TO WS-ABEND-CODE                     
+               PERFORM 9000-ABEND                                               
+           ELSE                                                                 
+               IF  DPG54-WARNING-ERROR                                          
+                   DISPLAY '** IMKUP052 ADVISORY **'                            
+                   DISPLAY '** FISCAL DATE ROUTINE WARNING = '                  
+                           DPG54-ERROR-MESSAGE                                  
+               END-IF                                                           
+           END-IF.                                                              
+                                                                                
+           MOVE DPG55-DB2-ISO-DATE-YR  TO WS-CUTOFF-DATE-CCYY.                  
+           MOVE DPG55-DB2-ISO-DATE-MO  TO WS-CUTOFF-DATE-MM.                    
+           MOVE DPG55-DB2-ISO-DATE-DY  TO WS-CUTOFF-DATE-DD.                    
+           DISPLAY 'CUTOFF DATE      : ' WS-CUTOFF-DATE.                        
+                                                                                
+      *                                                                         
+           PERFORM 3900-OPEN-SKU-CSR.                                           
+           PERFORM 3910-FETCH-SKU-CSR.                                          
+      *                                                                         
+      ******************************************************************        
+      *  THIS PARAGRAPH LOOPS THROUGH THE ROWS RETRIEVED BY THE SKU             
+      *  CURSOR AND UPDATES THE STATUS CODE IF THE RECEIVE DATE IS VALID        
+      ******************************************************************        
+       3000-PROCESS-LOOP.                                                       
+      *                                                                         
+           IF PS-END-OF-SKU-ROWS-SW = 'N'                                       
+               PERFORM 3120-SKU-STORE-DATE-CHECK                                
+               IF WS-SKU-DATE-OK                                                
+                   PERFORM 3130-UPDATE-ALL                                      
+                   IF PA-UPDATE-CTR > PC-COMMIT-INTERVAL                        
+                       PERFORM 3999-COMMIT                                      
+                       MOVE 0 TO PA-UPDATE-CTR                                  
+                   END-IF                                                       
+               END-IF                                                           
+               PERFORM 3910-FETCH-SKU-CSR                                       
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      *  PERFORM THE UPDATE FUNCTION TO UPDATE THE STATUS CODE                  
+      ******************************************************************        
+       3110-UPDATE-STATUS.                                                      
+           MOVE TSKST-ITEM-NMBR TO TSK-ITEM-NMBR.                               
+                                                                                
+           INITIALIZE PV-RETRY-CNT.                                             
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+                   UNTIL ((SQLCODE = ZERO)                                      
+                                OR                                              
+                          (SQLCODE = +100)                                      
+                                OR                                              
+                          (PV-RETRY-CNT > PV-MAX-RETRIES))                      
+               EXEC SQL                                                         
+                    UPDATE TSK                                                  
+                       SET STATUS_CODE     = 20                                 
+                          ,STAT_CHNGD_DATE = :WS-STAT-CHANGED-DATE              
+                     WHERE ITEM_NMBR       = :TSK-ITEM-NMBR                     
+               END-EXEC                                                         
+      *                                                                         
+             EVALUATE TRUE                                                      
+               WHEN SQLCODE = ZERO                                              
+                   CONTINUE                                                     
+               WHEN SQLCODE = -913                                              
+                   ADD +1      TO PV-RETRY-CNT                                  
+               WHEN OTHER                                                       
+                   MOVE 'UPDATING TSK'                                          
+                               TO WS-DB2-OPERATION-ATTEMPTED                    
+                   PERFORM 9200-SQL-ABEND                                       
+             END-EVALUATE                                                       
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-CNT > PV-MAX-RETRIES                                     
+               MOVE 'UPDATING TSK'                                              
+                                   TO WS-DB2-OPERATION-ATTEMPTED                
+               PERFORM 9200-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      *  WRITES LOG RECORDS TO TSKULOG TABLE                                    
+      ******************************************************************        
+       3111-WRITE-SKU-LOG.                                                      
+           MOVE 'C'                    TO SKULOG-FUNC-CDE.                      
+           MOVE 4                      TO SKULOG-MSG-SEQ-NBR.                   
+           MOVE WS-LIT-LOG-MSG-TXT-LEN TO SKULOG-MSG-TXT-LEN.                   
+           MOVE CM-CHANGE-TSK-MSG-1    TO SKULOG-MSG-TXT-TEXT.                  
+           MOVE SKXREF-INTR-UPC-ID     TO SKULOG-INTR-UPC-ID.                   
+      *                                                                         
+           PERFORM 3145-INSERT-TSKULOG.                                         
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      *  CHECK IF THE LAST RECEIVED DATE IS LESS THAN OR EQUAL TO THE           
+      *  CUTOFF DATE.                                                           
+      ******************************************************************        
+       3120-SKU-STORE-DATE-CHECK.                                               
+           MOVE TSKST-FIRST-RCVD-DATE TO WS-RCVD-DATE.                          
+           IF WS-RCVD-YY > 80                                                   
+               MOVE 19 TO WS-RCVD-CC                                            
+           ELSE                                                                 
+               MOVE 20 TO WS-RCVD-CC                                            
+           END-IF.                                                              
+      *                                                                         
+           IF WS-RCVD-DATE-ISO <= WS-CUTOFF-DATE                                
+               SET WS-SKU-DATE-OK TO TRUE                                       
+           ELSE                                                                 
+               SET WS-SKU-DATE-NOT-OK TO TRUE                                   
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * MAKE STYLE RESERVATION, UPDATE TSK, TUPCPLS, TSKXREF, INSERT            
+      *  INTO TSKULOG AND DELETE STYLE RESERVATION.                             
+      ******************************************************************        
+       3130-UPDATE-ALL.                                                         
+           PERFORM 3131-INSERT-VSM-RESERVATION.                                 
+           PERFORM 3110-UPDATE-STATUS.                                          
+           PERFORM 3132-SELECT-CURRENT-TUPCPLS.                                 
+           PERFORM 3133-INACTIVATE-TUPCPLS.                                     
+           PERFORM 3134-INSERT-TUPCPLS.                                         
+JP1010     PERFORM 3140-UPDATE-TSKXREF.                                         
+           PERFORM 3111-WRITE-SKU-LOG.                                          
+           PERFORM 3135-DELETE-VSM-RESERVATION.                                 
+           ADD +1 TO PA-UPDATE-CTR                                         CL*15
+                     PA-CUM-UPD-CTR.                                       CL*16
+      ******************************************************************        
+      * INSERT A RESERVATION INTO TVSRSVN FOR VSM USERS                         
+      ******************************************************************        
+       3131-INSERT-VSM-RESERVATION.                                             
+           MOVE '3131-INSERT-VSM-RESERVATION' TO WS-ABEND-PARAGRAPH.            
+                                                                                
+           INITIALIZE PV-RETRY-CNT.                                             
+                                                                                
+           PERFORM  WITH TEST AFTER                                             
+               UNTIL SQLCODE = ZERO                                             
+                 OR                                                             
+                   PV-RETRY-CNT > PV-MAX-RETRIES                                
+                                                                                
+             EXEC SQL                                                           
+               INSERT INTO TVSRSVN                                              
+                 (ENT_ID                                                        
+                 ,VS_NBR                                                        
+                 ,VS_ID                                                         
+                 ,RSRV_TYP_CDE                                                  
+                 ,SKU_STRGY_CDE                                                 
+                 ,DEPT_MDSEAR_ID                                                
+                 ,MAJ_CL_MDSEAR_ID                                              
+                 ,SUB_CL_MDSEAR_ID                                              
+                 ,RSRV_BY_USR_ID                                                
+                 ,RSRV_TMST)                                                    
+               SELECT A.ENT_ID                                                  
+                 ,A.LONG_VENDOR_STYLE                                           
+                 ,B.VS_ID                                                       
+                 ,'M'                                                           
+                 ,' '                                                           
+                 ,0.0                                                           
+                 ,0.0                                                           
+                 ,0.0                                                           
+                 ,'IMKUP052'                                                    
+                 ,CURRENT TIMESTAMP                                             
+               FROM  TSK A,                                                     
+                     TUPC B,                                                    
+                     TUPCPLS C                                                  
+               WHERE A.ITEM_NMBR = :TSKST-ITEM-NMBR                             
+               AND   A.ITEM_NMBR = C.ITM_NBR                                    
+               AND   C.UPC_ID    = B.UPC_ID                                     
+               AND   B.EFF_END_DTE IS NULL                                      
+               AND   C.STR_NBR   = SMALLINT(0)                                  
+               AND   C.EFF_BEG_TMST <= CURRENT TIMESTAMP                        
+               AND  (C.EFF_END_TMST IS NULL OR                                  
+                     C.EFF_END_TMST > CURRENT TIMESTAMP)                        
+             END-EXEC                                                           
+                                                                                
+             EVALUATE TRUE                                                      
+               WHEN SQLCODE = ZERO                                              
+                   CONTINUE                                                     
+               WHEN SQLCODE = -913                                              
+                   ADD +1      TO PV-RETRY-CNT                                  
+               WHEN OTHER                                                       
+                   MOVE 'INSERTING RESERVATION'                                 
+                               TO WS-DB2-OPERATION-ATTEMPTED                    
+                   PERFORM 9200-SQL-ABEND                                       
+             END-EVALUATE                                                       
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-CNT > PV-MAX-RETRIES                                     
+               MOVE 'INSERTING RESERVATION'                                     
+                                   TO WS-DB2-OPERATION-ATTEMPTED                
+               PERFORM 9200-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * SELECTS INFORMATION FROM THE CURRENT TUPCPLS ROW               *        
+      ******************************************************************        
+       3132-SELECT-CURRENT-TUPCPLS.                                             
+                                                                                
+           MOVE '3132-SELECT-CURRENT-TUPCPLS'                                   
+                                   TO WS-ABEND-PARAGRAPH.                       
+           MOVE SKXREF-INTR-UPC-ID TO UPCPLS-UPC-ID.                            
+           INITIALIZE PV-RETRY-CNT.                                             
+                                                                                
+           PERFORM  WITH TEST AFTER                                             
+                   UNTIL ((SQLCODE = ZERO)                                      
+                                OR                                              
+                          (SQLCODE = +100)                                      
+                                OR                                              
+                          (PV-RETRY-CNT > PV-MAX-RETRIES))                      
+               EXEC SQL                                                         
+                    SELECT UPC_ID                                               
+                         , OPERCO_NBR                                           
+                         , STR_NBR                                              
+                         , EFF_BEG_TMST                                         
+                         , UPC_STAT_CDE                                         
+                         , UNT_COST_AMT                                         
+                         , UNT_RTL_AMT                                          
+                         , MEITGP_NBR                                           
+                         , CRE_BY_USR_ID                                        
+                         , CRE_TMST                                             
+                         , ITM_NBR                                              
+                         , PLU_IND                                              
+                         , UPC_STAT_CHG_DTE                                     
+                         , UNT_RTL_CHG_DTE                                      
+                     INTO :UPCPLS-UPC-ID                                        
+                         ,:UPCPLS-OPERCO-NBR                                    
+                         ,:UPCPLS-STR-NBR                                       
+                         ,:UPCPLS-EFF-BEG-TMST                                  
+                         ,:UPCPLS-UPC-STAT-CDE                                  
+                         ,:UPCPLS-UNT-COST-AMT :PV-UNT-COST-NULL-IND            
+                         ,:UPCPLS-UNT-RTL-AMT                                   
+                         ,:UPCPLS-MEITGP-NBR                                    
+                         ,:UPCPLS-CRE-BY-USR-ID                                 
+                         ,:UPCPLS-CRE-TMST                                      
+                         ,:UPCPLS-ITM-NBR                                       
+                         ,:UPCPLS-PLU-IND                                       
+                         ,:UPCPLS-UPC-STAT-CHG-DTE                              
+                         ,:UPCPLS-UNT-RTL-CHG-DTE                               
+                      FROM TUPCPLS                                              
+                     WHERE UPC_ID      = :UPCPLS-UPC-ID                         
+                       AND OPERCO_NBR  = '03'                                   
+                       AND STR_NBR     = SMALLINT(0)                            
+                       AND EFF_BEG_TMST <= CURRENT TIMESTAMP                    
+                       AND (EFF_END_TMST IS NULL OR                             
+                            EFF_END_TMST > CURRENT TIMESTAMP)                   
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = -913                                          
+                       ADD +1      TO PV-RETRY-CNT                              
+                   WHEN OTHER                                                   
+                       MOVE 'SELECT TUPCPLS TABLE '                             
+                                   TO WS-DB2-OPERATION-ATTEMPTED                
+                       PERFORM 9200-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-CNT > PV-MAX-RETRIES                                     
+               MOVE 'READ TUPCPLS TABLE '                                       
+                                   TO WS-DB2-OPERATION-ATTEMPTED                
+               PERFORM 9200-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * INACTIVATE ALL ROWS FOR AN ITM NBR FROM THE TUPCPLS TABLE      *        
+      ******************************************************************        
+       3133-INACTIVATE-TUPCPLS.                                                 
+           MOVE '3133-INACTIVATE-TUPCPLS' TO WS-ABEND-PARAGRAPH.                
+                                                                                
+           INITIALIZE PV-RETRY-CNT.                                             
+                                                                                
+           PERFORM  WITH TEST AFTER                                             
+                   UNTIL ((SQLCODE = ZERO)                                      
+                                OR                                              
+                          (SQLCODE = +100)                                      
+                                OR                                              
+                          (PV-RETRY-CNT > PV-MAX-RETRIES))                      
+                                                                                
+             EXEC SQL                                                           
+                UPDATE TUPCPLS                                                  
+                  SET EFF_END_TMST  = CURRENT TIMESTAMP                         
+                  WHERE UPC_ID      = :UPCPLS-UPC-ID                            
+                    AND OPERCO_NBR  = '03'                                      
+                    AND STR_NBR     = SMALLINT(0)                               
+                    AND EFF_BEG_TMST <= CURRENT TIMESTAMP                       
+                    AND (EFF_END_TMST IS NULL OR                                
+                         EFF_END_TMST > CURRENT TIMESTAMP)                      
+             END-EXEC                                                           
+                                                                                
+             EVALUATE TRUE                                                      
+                 WHEN SQLCODE = ZERO                                            
+                     CONTINUE                                                   
+                 WHEN SQLCODE = -913                                            
+                     ADD +1      TO PV-RETRY-CNT                                
+                 WHEN OTHER                                                     
+                     MOVE 'INACTIVATE TUPCPLS ROW'                              
+                                 TO WS-DB2-OPERATION-ATTEMPTED                  
+                     PERFORM 9200-SQL-ABEND                                     
+             END-EVALUATE                                                       
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-CNT > PV-MAX-RETRIES                                     
+               MOVE 'INACTIVATE TUPCPLS ROW'                                    
+                                 TO WS-DB2-OPERATION-ATTEMPTED                  
+               PERFORM 9200-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *      INSERT A NEW STORE 0 ROW FOR AN ITM NBR BECAUSE THE TSKST *        
+      *      STORE 000 LEVEL ROW STATUS WAS UPDATED. THIS ROW NEEDS    *        
+      *      TO REFLECT THAT.                                          *        
+      ******************************************************************        
+       3134-INSERT-TUPCPLS.                                                     
+           MOVE '3134-INSERT-TUPCPLS' TO WS-ABEND-PARAGRAPH.                    
+                                                                                
+           INITIALIZE PV-RETRY-CNT.                                             
+                                                                                
+           PERFORM  WITH TEST AFTER                                             
+             UNTIL SQLCODE = ZERO                                               
+               OR PV-RETRY-CNT > PV-MAX-RETRIES                                 
+                                                                                
+               EXEC SQL                                                         
+                   INSERT INTO TUPCPLS                                          
+                          (UPC_ID,                                              
+                           OPERCO_NBR,                                          
+                           STR_NBR,                                             
+                           EFF_BEG_TMST,                                        
+                           EFF_END_TMST,                                        
+                           UPC_STAT_CDE,                                        
+                           UNT_COST_AMT,                                        
+                           UNT_RTL_AMT,                                         
+                           MEITGP_NBR,                                          
+                           CRE_BY_USR_ID,                                       
+                           CRE_TMST,                                            
+                           ITM_NBR,                                             
+                           PLU_IND,                                             
+                           UPC_STAT_CHG_DTE,                                    
+                           UNT_RTL_CHG_DTE)                                     
+                   VALUES (:UPCPLS-UPC-ID,                                      
+                           :UPCPLS-OPERCO-NBR,                                  
+                           :UPCPLS-STR-NBR,                                     
+                           CURRENT TIMESTAMP,                                   
+                           NULL,                                                
+                           '20',                                                
+                           :UPCPLS-UNT-COST-AMT,                                
+                           :UPCPLS-UNT-RTL-AMT,                                 
+                           :UPCPLS-MEITGP-NBR,                                  
+                           :WS-LIT-PROGRAM-NAME,                                
+                           CURRENT TIMESTAMP,                                   
+                           :UPCPLS-ITM-NBR,                                     
+                           :UPCPLS-PLU-IND,                                     
+                           CURRENT DATE,                                        
+                           :UPCPLS-UNT-RTL-CHG-DTE)                             
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = -913                                          
+                       ADD +1      TO PV-RETRY-CNT                              
+                   WHEN OTHER                                                   
+                       MOVE 'INSERT INTO TUPCPLS'                               
+                                   TO WS-DB2-OPERATION-ATTEMPTED                
+                       PERFORM 9200-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-CNT > PV-MAX-RETRIES                                     
+               MOVE 'INSERT INTO TUPCPLS'                                       
+                                   TO WS-DB2-OPERATION-ATTEMPTED                
+               PERFORM 9200-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+       3135-DELETE-VSM-RESERVATION.                                             
+      ******************************************************************        
+           MOVE '3135-DELETE-VSM-RESERVATION' TO WS-ABEND-PARAGRAPH.            
+                                                                                
+           INITIALIZE PV-RETRY-CNT.                                             
+                                                                                
+           PERFORM  WITH TEST AFTER                                             
+                   UNTIL ((SQLCODE = ZERO)                                      
+                                OR                                              
+                          (SQLCODE = +100)                                      
+                                OR                                              
+                          (PV-RETRY-CNT > PV-MAX-RETRIES))                      
+                                                                                
+               EXEC SQL                                                         
+                  DELETE FROM TVSRSVN                                           
+                  WHERE  RSRV_BY_USR_ID = 'IMKUP052'                            
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = -913                                          
+                       ADD +1      TO PV-RETRY-CNT                              
+                   WHEN OTHER                                                   
+                       MOVE 'DELETE RESERVATION'                                
+                                   TO WS-DB2-OPERATION-ATTEMPTED                
+                       PERFORM 9200-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-CNT > PV-MAX-RETRIES                                     
+               MOVE 'DELETE RESERVATION'                                        
+                                   TO WS-DB2-OPERATION-ATTEMPTED                
+               PERFORM 9200-SQL-ABEND                                           
+           END-IF.                                                              
+JP1010                                                                          
+JP1010******************************************************************        
+JP1010* UPDATE THE SKU_STAT_CDE ON THE TSKXREF TABLE BASED ON THE               
+JP1010* ITEM NUMBER                                                             
+JP1010******************************************************************        
+JP1010 3140-UPDATE-TSKXREF.                                                     
+           MOVE TSKST-ITEM-NMBR TO SKXREF-ITM-NBR.                              
+           INITIALIZE PV-RETRY-CNT.                                             
+                                                                                
+           PERFORM  WITH TEST AFTER                                             
+                   UNTIL ((SQLCODE = ZERO)                                      
+                                OR                                              
+                          (SQLCODE = +100)                                      
+                                OR                                              
+                          (PV-RETRY-CNT > PV-MAX-RETRIES))                      
+               EXEC SQL                                                         
+                    UPDATE TSKXREF                                              
+                       SET SKU_STAT_CDE     = '20'                              
+                     WHERE ITM_NBR          = :SKXREF-ITM-NBR                   
+               END-EXEC                                                         
+JP1010                                                                          
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = -913                                          
+                       ADD +1      TO PV-RETRY-CNT                              
+                   WHEN OTHER                                                   
+                       MOVE 'UPDATE TSKXREF'                                    
+                                   TO WS-DB2-OPERATION-ATTEMPTED                
+                       PERFORM 9200-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-CNT > PV-MAX-RETRIES                                     
+               MOVE 'UPDATE TSKXREF'                                            
+                                   TO WS-DB2-OPERATION-ATTEMPTED                
+               PERFORM 9200-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *      INSERT A LOG RECORD INTO TSKULOG.                         *        
+      ******************************************************************        
+       3145-INSERT-TSKULOG.                                                     
+           MOVE '3145-INSERT-TSKULOG' TO WS-ABEND-PARAGRAPH.                    
+           INITIALIZE PV-RETRY-CNT.                                             
+                                                                                
+           PERFORM  WITH TEST AFTER                                             
+             UNTIL SQLCODE = ZERO                                               
+               OR PV-RETRY-CNT > PV-MAX-RETRIES                                 
+                                                                                
+               EXEC SQL                                                         
+                   INSERT INTO TSKULOG                                          
+                           (TRN_TMST                                            
+                           ,INTR_UPC_ID                                         
+                           ,FUNC_CDE                                            
+                           ,MSG_SEQ_NBR                                         
+                           ,MSG_TXT)                                            
+                   VALUES (CURRENT TIMESTAMP                                    
+                          ,:SKULOG-INTR-UPC-ID                                  
+                          ,:SKULOG-FUNC-CDE                                     
+                          ,:SKULOG-MSG-SEQ-NBR                                  
+                          ,:SKULOG-MSG-TXT)                                     
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+                   WHEN SQLCODE = -913                                          
+                       ADD +1      TO PV-RETRY-CNT                              
+                   WHEN OTHER                                                   
+                       MOVE 'INSERT INTO TSKULOG'                               
+                                   TO WS-DB2-OPERATION-ATTEMPTED                
+                       PERFORM 9200-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF PV-RETRY-CNT > PV-MAX-RETRIES                                     
+               MOVE 'INSERT INTO TSKULOG'                                       
+                                   TO WS-DB2-OPERATION-ATTEMPTED                
+               PERFORM 9200-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  OPEN THE SKU_CSR                                                       
+      ******************************************************************        
+       3900-OPEN-SKU-CSR.                                                       
+      *                                                                         
+           EXEC SQL                                                             
+                OPEN SKU_CSR                                                    
+           END-EXEC.                                                            
+      *                                                                         
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = +000                                              
+                    CONTINUE                                                    
+               WHEN OTHER                                                       
+                    MOVE '3900-OPEN-SKU-CSR'                                    
+                                       TO WS-ABEND-PARAGRAPH                    
+                    MOVE PE-MSG-4      TO WS-DB2-OPERATION-ATTEMPTED            
+                    PERFORM 9200-SQL-ABEND                                      
+           END-EVALUATE.                                                        
+      *                                                                         
+      ******************************************************************        
+      *  FETCH THE NEXT SKU                                                     
+      ******************************************************************        
+       3910-FETCH-SKU-CSR.                                                      
+           INITIALIZE PV-RETRY-CNT.                                             
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+                   UNTIL ((SQLCODE = ZERO)                                      
+                                OR                                              
+                          (SQLCODE = +100)                                      
+                                OR                                              
+                          (PV-RETRY-CNT > PV-MAX-RETRIES))                      
+             EXEC SQL                                                           
+                FETCH SKU_CSR                                                   
+                 INTO :SKXREF-INTR-UPC-ID                                       
+                     ,:SKXREF-SKU                                               
+                     ,:TSKST-ITEM-NMBR                                          
+                     ,:TSKST-FIRST-RCVD-DATE                                    
+             END-EXEC                                                           
+                                                                                
+             EVALUATE TRUE                                                      
+                 WHEN SQLCODE = 0                                               
+                      CONTINUE                                                  
+                 WHEN SQLCODE = +100                                            
+                      SET PS-END-OF-SKU-ROWS TO TRUE                            
+                 WHEN SQLCODE = -911                                            
+                 WHEN SQLCODE = -913                                            
+                      ADD +1 TO PV-RETRY-CNT                                    
+                 WHEN SQLWARN0 NOT = SPACES                                     
+                 WHEN SQLCODE < ZERO                                            
+                 WHEN SQLCODE > ZERO                                            
+                    MOVE '3910-FETCH-SKU-CSR'                                   
+                                       TO WS-ABEND-PARAGRAPH                    
+                    MOVE PE-MSG-4      TO WS-DB2-OPERATION-ATTEMPTED            
+                    PERFORM 9200-SQL-ABEND                                      
+             END-EVALUATE                                                       
+           END-PERFORM.                                                         
+                                                                                
+           IF  SQLCODE = -911                                                   
+            OR SQLCODE = -913                                                   
+               MOVE '3910-FETCH-SKU-CSR'                                        
+                                  TO WS-ABEND-PARAGRAPH                         
+               MOVE PE-MSG-4      TO WS-DB2-OPERATION-ATTEMPTED                 
+               PERFORM 9200-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      *                                                                         
+      ******************************************************************        
+      *  CLOSE THE SKU_CSR                                                      
+      ******************************************************************        
+       3920-CLOSE-SKU-CSR.                                                      
+           EXEC SQL                                                             
+                CLOSE SKU_CSR                                                   
+           END-EXEC.                                                            
+                                                                                
+           IF  SQLCODE = +000                                                   
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE '3920-CLOSE-SKU-CSR'                                        
+                                       TO WS-ABEND-PARAGRAPH                    
+               MOVE PE-MSG-6           TO WS-DB2-OPERATION-ATTEMPTED            
+               PERFORM 9200-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      *  COMMIT THE CHANGES MADE                                                
+      ******************************************************************        
+       3999-COMMIT.                                                             
+           EXEC SQL                                                             
+                COMMIT                                                          
+           END-EXEC.                                                            
+                                                                                
+           ADD  1 TO PA-COMMIT-COUNT.                                           
+      *                                                                         
+       8000-EOJ-ROUTINE.                                                   CL**1
+                                                                           CL**1
+           PERFORM 3920-CLOSE-SKU-CSR.                                          
+           PERFORM 3999-COMMIT.                                                 
+           DISPLAY '** IMKUP052 TOTALS **************'.                    CL*16
+           DISPLAY '** # OF SKU ROWS UPDATED : '                           CL*16
+                    PA-CUM-UPD-CTR.                                        CL*16
+           DISPLAY '* COMMITS PERFORMED     : ' PA-COMMIT-COUNT.                
+           DISPLAY '** END OF IMKUP052 TOTALS *******'.                    CL*16
+                                                                           CL**1
+      ******************************************************************        
+      *  PERFORMS A NON-SQL ABEND FOR THE PROGRAM                               
+      ******************************************************************        
+       9000-ABEND.                                                              
+           DISPLAY '***************************'.                               
+           DISPLAY '**       ABEND           **'.                               
+           DISPLAY '**  IN PROGRAM IMKUP052  **'.                               
+           DISPLAY '***************************'.                               
+           DISPLAY '** PARAGRAPH ** = ' WS-ABEND-PARAGRAPH.                     
+           DISPLAY '***************************'.                               
+                                                                                
+           CALL 'ILBOABN0' USING WS-ABEND-CODE.                                 
+      *                                                                         
+      ******************************************************************        
+      *  PERFORMS THE ABEND FOR THE PROGRAM IN THE EVENT THAT AN SQL            
+      *  ERROR OR WARNING CODE OCCURS.                                          
+      ******************************************************************        
+       9200-SQL-ABEND.                                                          
+           DISPLAY '***************************'.                               
+           DISPLAY '**       ABEND           **'.                               
+           DISPLAY '**  IN PROGRAM IMKUP052  **'.                               
+           DISPLAY '***************************'.                               
+           DISPLAY '** PARAGRAPH ** = ' WS-ABEND-PARAGRAPH.                     
+           DISPLAY '** OPERATION ** = ' WS-DB2-OPERATION-ATTEMPTED.             
+           DISPLAY '***************************'.                               
+                                                                                
+      ******************************************************************        
+      *  THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-           
+      *  MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE                
+      *  'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE            
+      *  FORMAT.                                                                
+      ******************************************************************        
+           COPY DPPD004.                                                        
+                                                                                
+           MOVE +4013                  TO WS-ABEND-CODE.                        
+           CALL 'ILBOABN0' USING WS-ABEND-CODE.                                 

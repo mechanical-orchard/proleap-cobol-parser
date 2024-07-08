@@ -1,0 +1,591 @@
+       IDENTIFICATION DIVISION.                                                 
+                                                                                
+       PROGRAM-ID.         IMKUT010.                                            
+       AUTHOR.             PAUL KEBER.                                  00040024
+       INSTALLATION.       KOHLS DEPARTMENT STORES.                             
+       DATE-WRITTEN.       09-20-99.                                            
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *      IMKUT010 - INACTIVE TUPCPLS PURGE CANDIDATES SELECTION    *        
+      *                                                                *        
+      *  THIS PROGRAM DETERMINES WHICH INACTIVE TUPCPLS ROWS CAN BE    *        
+      *  PURGED BY FINDING TUPCPLS ROWS TIED TO AN ACTIVE SKU WITH AN  *        
+      *  EFFECTIVE END DATE OLDER THAN 180 DAYS  BEFORE THE CURRENT    *        
+      *  DATE.  FOR EACH TUPCPLS ROW WHICH MEET THESE CONDITIONS, ALL  *        
+      *  COLUMNS OF THE TUPCPLS ROW ARE WRITTEN TO AN OUTPUT FILE      *        
+      *  WHICH WILL BE USED AS INPUT TO A PURGE PROGRAM.  THIS FILE    *        
+      *  WILL ALSO BE USED AS A RELOAD FILE IF REQUIRED.               *        
+      *                                                                *        
+      ******************************************************************        
+      *  WR#20411  10/14/99  ADD NEW TUPCPLS FIELDS TO CURSOR AND FETCH*00220031
+      ******************************************************************        
+      *  ECOMM     11/17/00  ADDED TWEBITM PROCESSING.                 *00220031
+      ******************************************************************        
+      *  ECOMM     12/20/00  P. KEBER   E-COMM PHASE 2 SKU LEVEL CHGS  *00220031
+      *  INCREASE SIZE OF OUT-TWEBITM-REC TO HANDLE NEW FIELDS.        *00220031
+      ******************************************************************        
+      *            9/18/01   D. THEEL   ADDED LOGIC TO WRITE ALL       *00220031
+      *  TWEBITM INACTIVE ROWS THAT ARE MORE THAN 180 DAYS OLD INSTEAD *00220031
+      *  OF ONLY THOSE WITH A TUPCPLS INACTIVE ROW.                    *00220031
+      ******************************************************************        
+      *            2/18/02   D. THEEL   CHANGED LOGIC TO MORE THAN 120 *00220031
+      *  DAYS OLD FOR BOTH TWEBITM AND TUPCPLS.                        *00220031
+      ******************************************************************        
+      *            2/28/02   D. THEEL   INCREASE TWEBITM LRECL, ADDED  *00220031
+      *  NEW TWEBITM COLUMN CRE_BY_USR_ID TO SELECT AND FETCH.         *00220031
+      ******************************************************************        
+      *  WR23443   03/18/02 D. THEEL    CHANGE TWEBITM AND TUPCPLS     *00220031
+      *  PURGE HISTORY CRITERIA FROM 120 DAYS TO 60 DAYS.              *00220031
+      ******************************************************************        
+      *  WR23443   03/19/02 P. KEBER    INCREASE TWEBITM OUTPUT FILE   *00220031
+      *  LRECL, ADD NEW TWEBITM COLUMN WEB_ITM_DLTD_IND TO TWEBITM     *00220031
+      *  SELECT AND FETCH.                                             *        
+      ******************************************************************        
+      *  WR27400   08/11/04 D. THEEL    CHANGE TWEBITM AND TUPCPLS     *00220031
+      *  PURGE HISTORY CRITERIA FROM 60 TO 45 DAYS.                    *00220031
+      ******************************************************************        
+      *  WR27400   08/26/04 D. THEEL    CHANGE TWEBITM AND TUPCPLS     *00220031
+      *  PURGE HISTORY CRITERIA FROM 45 TO 30 DAYS.                    *00220031
+      ******************************************************************        
+      *  WR29925   04/13/06 D. THEEL    CHANGE TWEBITM AND TUPCPLS     *00220031
+      *  PURGE HISTORY CRITERIA FROM 30 TO 20 DAYS.                    *00220031
+      ******************************************************************        
+      *  WR29858   09/12/06 D. THEEL    CHANGE TWEBITM AND TUPCPLS     *00220031
+      *  PURGE HISTORY CRITERIA FROM 20 TO 40 DAYS. THIS IS TEMPORARY  *00220031
+      *  FOR MARKDOWN OPTIMIZATION.                                             
+      ******************************************************************        
+      *  WR29858   10/02/06 D. THEEL    CHANGE TWEBITM AND TUPCPLS     *00220031
+      *  PURGE HISTORY CRITERIA FROM 40 BACK TO 20 DAYS.               *00220031
+      ******************************************************************        
+       ENVIRONMENT DIVISION.                                                    
+                                                                                
+       CONFIGURATION SECTION.                                                   
+                                                                                
+       SOURCE-COMPUTER.    IBM-3090.                                            
+       OBJECT-COMPUTER.    IBM-3090.                                            
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT OUT-TUPCPLS-FILE        ASSIGN TO OUT01.                      
+           SELECT OUT-TWEBITM-FILE        ASSIGN TO OUT02.                      
+                                                                                
+       DATA DIVISION.                                                           
+                                                                                
+       FILE SECTION.                                                            
+                                                                                
+       FD  OUT-TUPCPLS-FILE                                                     
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  OUT-TUPCPLS-REC                  PIC  X(144).                        
+                                                                                
+       FD  OUT-TWEBITM-FILE                                                     
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  OUT-TWEBITM-REC                  PIC  X(123).                        
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  ABEND-CODE                       PIC S9(04) COMP SYNC                
+                                                       VALUE +0.                
+                                                                                
+       01  PROGRAM-ACCUMULATORS.                                                
+           05  PA-TUPCPLS-COUNT             PIC S9(09) COMP-3 VALUE +0.         
+           05  PA-TWEBITM-COUNT             PIC S9(09) COMP-3 VALUE +0.         
+                                                                                
+       01  PROGRAM-CONSTANTS.                                                   
+           05  PC-MAX-RETRIES               PIC S9(04) COMP SYNC                
+                                                       VALUE +3.                
+           05  PC-TABLE-MAX                 PIC S9(09) COMP-3                   
+                                                       VALUE +999.              
+           05  PC-PROGRAM-NAME              PIC  X(08) VALUE 'IMKUT010'.        
+                                                                                
+       01  PROGRAM-SWITCHES.                                                    
+           05  PS-END-OF-TUPCPLS-CSR-SW     PIC X      VALUE 'N'.               
+               88  PS-END-OF-TUPCPLS-CSR               VALUE 'Y'.               
+               88  PS-PROCESS-TUPCPLS-CSR              VALUE 'N'.               
+           05  PS-END-OF-TWEBITM-CSR-SW     PIC X      VALUE 'N'.               
+               88  PS-END-OF-TWEBITM-CSR               VALUE 'Y'.               
+               88  PS-PROCESS-TWEBITM-CSR              VALUE 'N'.               
+                                                                                
+       01  PROGRAM-VARIABLES.                                                   
+           05  PV-RECORD-COUNT              PIC S9(4)  VALUE 0 COMP.            
+           05  PV-DB2-OPER-ATTEMPTED        PIC  X(30) VALUE SPACE.             
+           05  PV-DISP-FIELD                PIC 9(16)  VALUE ZEROS.             
+           05  PV-DISPLAY-FIELD11           PIC ZZZZZZZZZZZ-.                   
+           05  PV-PARAGRAPH-NAME            PIC  X(30) VALUE SPACE.             
+           05  PV-SQL-SUB                   PIC  9(03) VALUE ZERO.              
+                                                                                
+      *****************************************************************         
+      * TUPCPLS PURGE FILE COPYBOOK                                             
+      *****************************************************************         
+                                                                                
+           COPY IMRD007.                                                        
+                                                                                
+      *****************************************************************         
+      * DB2 FORMATTED ERROR MESSAGE                                             
+      *****************************************************************         
+                                                                                
+           COPY DPWS004.                                                        
+                                                                                
+      *****************************************************************         
+      * DCLGEN FOR THE UPC PHYSICAL LOCATION STORE TABLE                        
+      *****************************************************************         
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TUPCPLS                                                  
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      * DCLGEN FOR THE UPC WEB ITEM TABLE                                       
+      *****************************************************************         
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TWEBITM                                                  
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      * TUPCPLS TABLE CURSOR                                                    
+      *****************************************************************         
+                                                                                
+           EXEC SQL                                                             
+               DECLARE TUPCPLS_CSR CURSOR FOR                                   
+               SELECT  UPC_ID                                                   
+                      ,OPERCO_NBR                                               
+                      ,STR_NBR                                                  
+                      ,EFF_BEG_TMST                                             
+                      ,EFF_END_TMST                                             
+                      ,UPC_STAT_CDE                                             
+                      ,UNT_COST_AMT                                             
+                      ,UNT_RTL_AMT                                              
+                      ,MEITGP_NBR                                               
+                      ,CRE_BY_USR_ID                                            
+                      ,CRE_TMST                                                 
+                      ,ITM_NBR                                                  
+                      ,PLU_IND                                                  
+                      ,UPC_STAT_CHG_DTE                                         
+                      ,UNT_RTL_CHG_DTE                                          
+               FROM   TUPCPLS                                                   
+               WHERE  DATE(EFF_END_TMST) < (CURRENT DATE - 20 DAYS)             
+               FOR FETCH ONLY                                                   
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      * TWEBITM TABLE CURSOR                                                    
+      *****************************************************************         
+                                                                                
+           EXEC SQL                                                             
+               DECLARE TWEBITM_CSR CURSOR FOR                                   
+               SELECT  INTR_UPC_ID                                              
+                      ,EFF_BEG_TMST                                             
+                      ,EFF_END_TMST                                             
+                      ,ASRT_BEG_DTE                                             
+                      ,ASRT_END_DTE                                             
+                      ,STRG_AREA_SEQ_NBR                                        
+                      ,SHIP_WD_QTY                                              
+                      ,SHIP_DPTH_QTY                                            
+                      ,SHIP_HT_QTY                                              
+                      ,SHIP_WT_QTY                                              
+                      ,SHIP_DIM_SRC_CDE                                         
+                      ,PKG_SEQ_NBR                                              
+                      ,SHIP_RSTRC_SEQ_NBR                                       
+                      ,GFT_WRAP_AVL_IND                                         
+                      ,PRD_GP_NBR                                               
+                      ,PRD_GP_IND                                               
+                      ,SHIP_SRCHG_FEE_AMT                                       
+                      ,SHIP_SRVC_SEQ_NBR                                        
+                      ,SHIP_GP_SEQ_NBR                                          
+                      ,CRE_BY_USR_ID                                            
+                      ,WEB_ITM_DLTD_IND                                         
+               FROM   TWEBITM                                                   
+               WHERE  DATE(EFF_END_TMST) < (CURRENT DATE - 20 DAYS)             
+               FOR FETCH ONLY                                                   
+           END-EXEC.                                                            
+                                                                                
+                                                                                
+      ******************************************************************        
+      * SQL COMMUNICATIONS WORK AREA                                            
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+                                                                                
+       PROCEDURE DIVISION.                                                      
+                                                                                
+       0000-MAINLINE-PROCESSING.                                                
+                                                                                
+           PERFORM 1000-INITIALIZATION.                                         
+                                                                                
+           PERFORM 2000-PROCESS-TUPCPLS-CURSOR                                  
+               UNTIL PS-END-OF-TUPCPLS-CSR.                                     
+                                                                                
+           PERFORM 7020-CLOSE-TUPCPLS-CURSOR.                                   
+           PERFORM 7100-OPEN-TWEBITM-CURSOR.                                    
+           PERFORM 7110-FETCH-TWEBITM-CURSOR.                                   
+           PERFORM 3000-PROCESS-TWEBITM-CURSOR                                  
+               UNTIL PS-END-OF-TWEBITM-CSR.                                     
+                                                                                
+           PERFORM 9000-EOJ-ROUTINE.                                            
+                                                                                
+           STOP RUN.                                                            
+                                                                                
+                                                                                
+      ******************************************************************        
+      *    - OPEN THE TUPCPLS CURSOR                                   *        
+      ******************************************************************        
+       1000-INITIALIZATION.                                                     
+                                                                                
+           INITIALIZE DCLTUPCPLS                                                
+                      DCLTWEBITM.                                               
+                                                                                
+           OPEN OUTPUT OUT-TUPCPLS-FILE                                         
+                       OUT-TWEBITM-FILE.                                        
+                                                                                
+           PERFORM 7000-OPEN-TUPCPLS-CURSOR.                                    
+           PERFORM 7010-FETCH-TUPCPLS-CURSOR.                                   
+                                                                                
+      ******************************************************************        
+      *  FOR EACH TUPCPLS CURSOR ROW, CREATE A TUPCPLS OUTPUT PURGE    *        
+      *  FILE RECORD.  FETCH THE NEXT ROW FROM THE TUPCPLS CURSOR.     *        
+      ******************************************************************        
+       2000-PROCESS-TUPCPLS-CURSOR.                                             
+                                                                                
+           MOVE DCLTUPCPLS TO IM007-TUPCPLS-DATA.                               
+           MOVE ZERO TO IM007-VS-ID.                                            
+           PERFORM 8000-WRITE-TUPCPLS-RECORD.                                   
+                                                                                
+           PERFORM 7010-FETCH-TUPCPLS-CURSOR.                                   
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  FOR EACH TWEBITM CURSOR ROW, CREATE A TWEBITM OUTPUT PURGE    *        
+      *  FILE RECORD.  FETCH THE NEXT ROW FROM THE TWEBITM CURSOR.     *        
+      ******************************************************************        
+       3000-PROCESS-TWEBITM-CURSOR.                                             
+                                                                                
+           PERFORM 7110-FETCH-TWEBITM-CURSOR.                                   
+                                                                                
+      ******************************************************************        
+      *  OPEN THE TUPCPLS CURSOR                                       *        
+      ******************************************************************        
+       7000-OPEN-TUPCPLS-CURSOR.                                                
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-SQL-SUB FROM 1 BY 1                                   
+               UNTIL  (PV-SQL-SUB > PC-MAX-RETRIES                              
+                  OR   SQLCODE = 0)                                             
+                                                                                
+               EXEC SQL                                                         
+                   OPEN TUPCPLS_CSR                                             
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+                   WHEN SQLWARN0 NOT = SPACES                                   
+                   WHEN SQLCODE < 0                                             
+                   WHEN SQLCODE > 0                                             
+                       MOVE '7000-OPEN-TUPCPLS-CURSOR'                          
+                           TO PV-PARAGRAPH-NAME                                 
+                       MOVE 'OPEN TUPCPLS CURSOR'                               
+                           TO PV-DB2-OPER-ATTEMPTED                             
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-SQL-SUB > PC-MAX-RETRIES                                      
+               MOVE '7000-OPEN-TUPCPLS-CURSOR' TO PV-PARAGRAPH-NAME             
+               MOVE 'OPEN TUPCPLS CURSOR' TO PV-DB2-OPER-ATTEMPTED              
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  FETCH A TUPCPLS CURSOR ROW                                    *        
+      ******************************************************************        
+       7010-FETCH-TUPCPLS-CURSOR.                                               
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-SQL-SUB FROM 1 BY 1                                   
+               UNTIL  (PV-SQL-SUB > PC-MAX-RETRIES                              
+                  OR   SQLCODE = 0                                              
+                  OR   SQLCODE = +100)                                          
+                                                                                
+               EXEC SQL                                                         
+                   FETCH  TUPCPLS_CSR                                           
+                   INTO  :UPCPLS-UPC-ID                                         
+                        ,:UPCPLS-OPERCO-NBR                                     
+                        ,:UPCPLS-STR-NBR                                        
+                        ,:UPCPLS-EFF-BEG-TMST                                   
+                        ,:UPCPLS-EFF-END-TMST                                   
+                        ,:UPCPLS-UPC-STAT-CDE                                   
+                        ,:UPCPLS-UNT-COST-AMT                                   
+                        ,:UPCPLS-UNT-RTL-AMT                                    
+                        ,:UPCPLS-MEITGP-NBR                                     
+                        ,:UPCPLS-CRE-BY-USR-ID                                  
+                        ,:UPCPLS-CRE-TMST                                       
+                        ,:UPCPLS-ITM-NBR                                        
+                        ,:UPCPLS-PLU-IND                                        
+                        ,:UPCPLS-UPC-STAT-CHG-DTE                               
+                        ,:UPCPLS-UNT-RTL-CHG-DTE                                
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = +100                                          
+                       SET PS-END-OF-TUPCPLS-CSR TO TRUE                        
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = 0                                             
+                       CONTINUE                                                 
+                   WHEN SQLWARN NOT = SPACES                                    
+                   WHEN SQLCODE NOT = ZERO                                      
+                       MOVE '7010-FETCH-TUPCPLS-CURSOR'                         
+                           TO PV-PARAGRAPH-NAME                                 
+                       MOVE 'FETCH CURSOR'                                      
+                           TO PV-DB2-OPER-ATTEMPTED                             
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-SQL-SUB > PC-MAX-RETRIES                                      
+               MOVE '7010-FETCH-TUPCPLS-CURSOR' TO PV-PARAGRAPH-NAME            
+               MOVE 'MAX RETRIES EXCEEDED' TO PV-DB2-OPER-ATTEMPTED             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  CLOSE THE TUPCPLS CURSOR                                      *        
+      ******************************************************************        
+       7020-CLOSE-TUPCPLS-CURSOR.                                               
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-SQL-SUB FROM 1 BY 1                                   
+               UNTIL  (PV-SQL-SUB > PC-MAX-RETRIES                              
+                  OR   SQLCODE = 0                                              
+                  OR   SQLCODE = +100)                                          
+                                                                                
+               EXEC SQL                                                         
+                   CLOSE TUPCPLS_CSR                                            
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = +100                                          
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+                   WHEN SQLWARN0 NOT = SPACES                                   
+                   WHEN SQLCODE < 0                                             
+                   WHEN SQLCODE > 0                                             
+                       MOVE '7020-CLOSE-TUPCPLS-CURSOR'                         
+                           TO PV-PARAGRAPH-NAME                                 
+                       MOVE 'CLOSE CURSOR'                                      
+                           TO PV-DB2-OPER-ATTEMPTED                             
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-SQL-SUB > PC-MAX-RETRIES                                      
+               MOVE '7020-CLOSE-TUPCPLS-CURSOR' TO PV-PARAGRAPH-NAME            
+               MOVE 'CLOSE CURSOR' TO PV-DB2-OPER-ATTEMPTED                     
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  OPEN THE TWEBITM CURSOR                                       *        
+      ******************************************************************        
+       7100-OPEN-TWEBITM-CURSOR.                                                
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-SQL-SUB FROM 1 BY 1                                   
+               UNTIL  (PV-SQL-SUB > PC-MAX-RETRIES                              
+                  OR   SQLCODE = 0)                                             
+                                                                                
+               EXEC SQL                                                         
+                   OPEN TWEBITM_CSR                                             
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = ZERO                                          
+                       SET PS-PROCESS-TWEBITM-CSR TO TRUE                       
+                   WHEN SQLWARN0 NOT = SPACES                                   
+                   WHEN SQLCODE < 0                                             
+                   WHEN SQLCODE > 0                                             
+                       MOVE '7100-OPEN-TWEBITM-CURSOR'                          
+                           TO PV-PARAGRAPH-NAME                                 
+                       MOVE 'OPEN TWEBITM CURSOR'                               
+                           TO PV-DB2-OPER-ATTEMPTED                             
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-SQL-SUB > PC-MAX-RETRIES                                      
+               MOVE '7100-OPEN-TWEBITM-CURSOR' TO PV-PARAGRAPH-NAME             
+               MOVE 'OPEN TWEBITM CURSOR' TO PV-DB2-OPER-ATTEMPTED              
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  FETCH A TWEBITM CURSOR ROW                                    *        
+      ******************************************************************        
+       7110-FETCH-TWEBITM-CURSOR.                                               
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-SQL-SUB FROM 1 BY 1                                   
+               UNTIL  (PV-SQL-SUB > PC-MAX-RETRIES                              
+                  OR   SQLCODE = 0                                              
+                  OR   SQLCODE = +100)                                          
+                                                                                
+               EXEC SQL                                                         
+                   FETCH  TWEBITM_CSR                                           
+                   INTO  :WEBITM-INTR-UPC-ID                                    
+                        ,:WEBITM-EFF-BEG-TMST                                   
+                        ,:WEBITM-EFF-END-TMST                                   
+                        ,:WEBITM-ASRT-BEG-DTE                                   
+                        ,:WEBITM-ASRT-END-DTE                                   
+                        ,:WEBITM-STRG-AREA-SEQ-NBR                              
+                        ,:WEBITM-SHIP-WD-QTY                                    
+                        ,:WEBITM-SHIP-DPTH-QTY                                  
+                        ,:WEBITM-SHIP-HT-QTY                                    
+                        ,:WEBITM-SHIP-WT-QTY                                    
+                        ,:WEBITM-SHIP-DIM-SRC-CDE                               
+                        ,:WEBITM-PKG-SEQ-NBR                                    
+                        ,:WEBITM-SHIP-RSTRC-SEQ-NBR                             
+                        ,:WEBITM-GFT-WRAP-AVL-IND                               
+                        ,:WEBITM-PRD-GP-NBR                                     
+                        ,:WEBITM-PRD-GP-IND                                     
+                        ,:WEBITM-SHIP-SRCHG-FEE-AMT                             
+                        ,:WEBITM-SHIP-SRVC-SEQ-NBR                              
+                        ,:WEBITM-SHIP-GP-SEQ-NBR                                
+                        ,:WEBITM-CRE-BY-USR-ID                                  
+                        ,:WEBITM-WEB-ITM-DLTD-IND                               
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = +100                                          
+                       SET PS-END-OF-TWEBITM-CSR TO TRUE                        
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = 0                                             
+                       PERFORM 8100-WRITE-TWEBITM-RECORD                        
+                   WHEN SQLWARN NOT = SPACES                                    
+                   WHEN SQLCODE NOT = ZERO                                      
+                       MOVE '7110-FETCH-TWEBITM-CURSOR'                         
+                           TO PV-PARAGRAPH-NAME                                 
+                       MOVE 'FETCH CURSOR'                                      
+                           TO PV-DB2-OPER-ATTEMPTED                             
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-SQL-SUB > PC-MAX-RETRIES                                      
+               MOVE '7110-FETCH-TWEBITM-CURSOR' TO PV-PARAGRAPH-NAME            
+               MOVE 'MAX RETRIES EXCEEDED' TO PV-DB2-OPER-ATTEMPTED             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  CLOSE THE TWEBITM CURSOR                                      *        
+      ******************************************************************        
+       7120-CLOSE-TWEBITM-CURSOR.                                               
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-SQL-SUB FROM 1 BY 1                                   
+               UNTIL  (PV-SQL-SUB > PC-MAX-RETRIES                              
+                  OR   SQLCODE = 0                                              
+                  OR   SQLCODE = +100)                                          
+                                                                                
+               EXEC SQL                                                         
+                   CLOSE TWEBITM_CSR                                            
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = +100                                          
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+                   WHEN SQLWARN0 NOT = SPACES                                   
+                   WHEN SQLCODE < 0                                             
+                   WHEN SQLCODE > 0                                             
+                       MOVE '7120-CLOSE-TWEBITM-CURSOR'                         
+                           TO PV-PARAGRAPH-NAME                                 
+                       MOVE 'CLOSE CURSOR'                                      
+                           TO PV-DB2-OPER-ATTEMPTED                             
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-SQL-SUB > PC-MAX-RETRIES                                      
+               MOVE '7120-CLOSE-TWEBITM-CURSOR' TO PV-PARAGRAPH-NAME            
+               MOVE 'CLOSE CURSOR' TO PV-DB2-OPER-ATTEMPTED                     
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  CREATE A TUPCPLS PURGE RECORD                                 *        
+      ******************************************************************        
+       8000-WRITE-TUPCPLS-RECORD.                                               
+                                                                                
+           WRITE OUT-TUPCPLS-REC FROM IM007-TUPCPLS-PURGE-RECORD.               
+           ADD +1 TO PA-TUPCPLS-COUNT.                                          
+                                                                                
+      ******************************************************************        
+      *  CREATE A TWEBITM PURGE RECORD                                 *        
+      ******************************************************************        
+       8100-WRITE-TWEBITM-RECORD.                                               
+                                                                                
+           WRITE OUT-TWEBITM-REC FROM DCLTWEBITM.                               
+           ADD +1 TO PA-TWEBITM-COUNT.                                          
+                                                                                
+      ******************************************************************        
+      *    - CLOSE THE FILES PROCESSED BY PROGRAM                      *        
+      *    - DISPLAY OUTPUT RECORD COUNTS                              *        
+      ******************************************************************        
+       9000-EOJ-ROUTINE.                                                        
+                                                                                
+                                                                                
+           PERFORM 7120-CLOSE-TWEBITM-CURSOR.                                   
+           CLOSE OUT-TUPCPLS-FILE                                               
+                 OUT-TWEBITM-FILE.                                              
+           DISPLAY SPACE.                                                       
+           DISPLAY '*** NUMBER OF TUPCPLS RECS WRITTEN = '                      
+               PA-TUPCPLS-COUNT.                                                
+           DISPLAY SPACE.                                                       
+           DISPLAY '*** NUMBER OF TWEBITM RECS WRITTEN = '                      
+               PA-TWEBITM-COUNT.                                                
+           DISPLAY SPACE.                                                       
+                                                                                
+                                                                                
+      ******************************************************************        
+      * ABEND THE PROGRAM IN THE EVENT THAT AN SQL ERROR OR WARNING             
+      * CODE OCCURS.                                                            
+      ******************************************************************        
+       9999-SQL-ABEND.                                                          
+                                                                                
+           DISPLAY '** ABEND     **'.                                           
+           DISPLAY '** PROGRAM   ** = ' PC-PROGRAM-NAME.                        
+           DISPLAY '** PARAGRAPH ** = ' PV-PARAGRAPH-NAME.                      
+           DISPLAY '** OPERATION ** = ' PV-DB2-OPER-ATTEMPTED.                  
+                                                                                
+      *-----------------------------------------------------------------        
+      * THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-            
+      * MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE                 
+      * 'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE             
+      * FORMAT.                                                                 
+      *-----------------------------------------------------------------        
+                                                                                
+           COPY DPPD004.                                                        
+                                                                                
+           MOVE +4013 TO ABEND-CODE.                                            
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    
+                                                                               

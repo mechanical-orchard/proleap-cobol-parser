@@ -1,0 +1,867 @@
+       IDENTIFICATION DIVISION.                                                 
+                                                                                
+       PROGRAM-ID.    INKUP191                                                  
+       AUTHOR.        LEE YANG.                                                 
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+       DATE-WRITTEN.  12-09-2000.                                               
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *     INKUP191 - SALES ADJUSTMENT UPDATE PROGRAM FOR ADDBACK     *        
+      *                PROCESS.  THIS PROGRAM IS THE SAME AS INKUP173  *        
+      *                WITH THE EXCEPTION OF THE TINVPAR SELECTION     *        
+      *                CRITERIA.  THEREFORE, ANY CHANGES TO INKUP173   *        
+      *                WILL NEED TO BE REFLECTED HERE AND POTENTIALLY  *        
+      *                VICE VERSA.                                     *        
+      ******************************************************************        
+      *     THIS PROGRAM WILL READ SALE ADJUSTMENT RECORDS AND INSERT  *        
+      * THEM TO THE ADJUSTMENT DETAIL DB2 TABLE (TADJDTL).  COMMITS    *        
+      * ARE TAKEN EVERY TEN SECONDS, AND CHECKPOINT RESTART LOGIC IS   *        
+      * INCORPORATED.                                                  *        
+      ******************************************************************        
+      * 12/08/2000 V. LEE YANG                                         *        
+      *            COPIED FROM INKUP173 AND CHANGE THE LOGIC TO UPDATE *        
+      *            TINVPAR TABLE'S SLS-ADJ-CPLD-IND.  THIS INDICATOR   *        
+      *            COULD BE 'N', IF IT IS IN THE PROCESS OF BACKING    *        
+      *            OUT; OR IT COULD BE 'Y', IF IT IS IN THE PROCESS    *        
+      *            OF ADDING BACK.  THE INDICATOR DOES NOT NEED TO BE  *        
+      *            UPDATED, IF IT IS ALREADY A 'Y'.                    *        
+      ******************************************************************        
+W21732* 11/18/2002        CHANGED BY SUKUMAR,IGSI    WR# W21732        *        
+W21732* CHANGE THE LOGIC FOR SALES ADJUSTMENT UPDATE PROGRAM           *        
+W21732* FOR ADD BACK PROCESS                                           *        
+W21732******************************************************************        
+W26600* 04/27/2004        CHANGED BY PAUL KEBER      WR# 26600         *        
+W26600* STORE NUMBER EXPANSION PROJECT CHANGES TO POPULATE THE NEW     *        
+W26600* TADJDTL LOC_NBR COLUMN WITH THE STORE NUMBER.                  *        
+W26600******************************************************************        
+W26600* 06/24/2004        CHANGED BY D. THEEL        WR# 26600         *        
+W26600* STORE EXPANSION CHANGES FOR PI.                                *        
+W26600******************************************************************        
+W28545* 07/20/2006        CHANGED BY J. SELWITSCHKA / STRATAGEM        *        
+W28545* DEPARTMENT LEVEL PHYSICAL INVENTORY.         WR# 28545         *        
+W28545* INCORPORATE INVENTORY ID.                                      *        
+W28545******************************************************************        
+                                                                                
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+                                                                                
+       CONFIGURATION SECTION.                                                   
+       SOURCE-COMPUTER.        IBM-3090.                                        
+       OBJECT-COMPUTER.        IBM-3090.                                        
+       INPUT-OUTPUT SECTION.                                                    
+       FILE-CONTROL.                                                            
+           SELECT SALES-ADJUSTMENT-FILE                                         
+               ASSIGN TO INP01.                                                 
+                                                                                
+                                                                                
+       DATA DIVISION.                                                           
+       FILE SECTION.                                                            
+                                                                                
+       FD  SALES-ADJUSTMENT-FILE                                                
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+W21732 01  SALES-ADJUSTMENT-RECORD     PIC X(90).                               
+      *                                                                         
+                                                                                
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  ABEND-CODE                  PIC S9(04)  VALUE ZERO COMP SYNC.        
+                                                                                
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-JOB-NAME                PIC  X(06) VALUE 'INK099'.            
+           05  PC-PROGRAM-NAME            PIC  X(08) VALUE 'INKUP191'.          
+           05  PC-MAX-RETRIES             PIC S9(03) VALUE +3.                  
+           05  PC-MAX-DEADLOCKS           PIC S9(03) VALUE +3.                  
+           05  PC-SALES-ADJUST-ADJ-RSN-TXT  PIC  X(20) VALUE                    
+                                                     'SALES ADJUSTMENT'.        
+           05  PC-SALES-ADJUST-ADJ-TYPE-CD  PIC  X(02) VALUE 'SA'.              
+                                                                                
+       01  PE-PROGRAM-ERROR-MESSAGES.                                           
+           05  PE-MSG-01                       PIC X(50) VALUE                  
+                'ATTEMPT TO INSERT ROW ON TABLE TADJDTL FAILED    '.            
+           05  PE-MSG-02                       PIC X(50) VALUE                  
+                'ERROR IN SELECT ''STATUS CODE'' FROM TCKRSTCNTL  '.            
+           05  PE-MSG-03                       PIC X(50) VALUE                  
+                'UPDATE TO ''WORK_STRG_DESC'' ON TCKRSTINF FAILED '.            
+           05  PE-MSG-04                       PIC X(50) VALUE                  
+                'PROGRAM ABENDED WHILE TRYING TO PERFORM A COMMIT '.            
+           05  PE-MSG-05                       PIC X(50) VALUE                  
+                'PROGRAM MAXIMUM DEADLOCK COUNT HAS BEEN EXCEEDED'.             
+           05  PE-MSG-06                       PIC X(50) VALUE                  
+                'UPDATE OF STATUS CODE ON TCKRSTCNTL UNSUCCESSFUL'.             
+           05  PE-MSG-07                       PIC X(50) VALUE                  
+                'ATTEMPT TO SELECT TIMESTAMP + CKPT_FRQNCY_QTY   '.             
+           05  PE-MSG-08                       PIC X(50) VALUE                  
+                'ATTEMPT TO UPDATE ROW ON TABLE TINVPAR FAILED    '.            
+      *                                                                         
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-INPUT-FILE-EOF-SW         PIC  X        VALUE 'N'.            
+               88  PS-MORE-INPUT-RECORDS                  VALUE 'N'.            
+               88  PS-NO-MORE-INPUT-RECORDS               VALUE 'Y'.            
+JS0599     05  PS-EMPTY-INPUT-SW            PIC  X        VALUE 'N'.            
+               88  PS-EMPTY-INPUT                         VALUE 'Y'.            
+JS0600         88  PS-NOT-EMPTY-INPUT                     VALUE 'N'.            
+           05  PS-FIRST-COMMIT-SW           PIC X         VALUE 'N'.            
+               88  PS-FIRST-COMMIT                        VALUE 'Y'.            
+           05  PS-DEADLOCK-RESTART-SW       PIC X         VALUE 'N'.            
+               88  PS-PROGRAM-DEADLOCKED                  VALUE 'Y'.            
+      *                                                                         
+      *                                                                         
+       01  PROGRAM-VARIABLES.                                                   
+           05  PV-SQL-SUB                      PIC  9(03) VALUE ZERO.           
+           05  PV-DEADLOCK-COUNTER             PIC  9(03) VALUE ZERO.           
+           05  PV-PARAGRAPH-NAME               PIC  X(30) VALUE SPACES.         
+           05  PV-DB2-OPERATION-ATTEMPTED      PIC  X(50) VALUE SPACES.         
+           05  PV-ABEND-MESSAGE                PIC  X(75) VALUE SPACES.         
+           05  PV-CURRENT-TIMESTAMP            PIC  X(26) VALUE SPACES.         
+           05  PV-COMMIT-TIMESTAMP             PIC  X(26) VALUE SPACES.         
+W26600     05  PV-STORE-NBR                    PIC  9(04) VALUE ZEROES.         
+W26600*    05  PV-STORE-NBR                    PIC  X(03) VALUE SPACES.         
+W26600*    05  PV-STORE-NBR-9 REDEFINES PV-STORE-NBR                            
+W26600*                                        PIC  9(03).                      
+W26600*    05  PV-STORE-NBR-PREV               PIC  X(03) VALUE SPACES.         
+W26600*    05  PV-STORE-NBR-HOLD               PIC  X(03) VALUE SPACES.         
+W26600     05  PV-STORE-NBR-PREV               PIC  9(04) VALUE ZEROES.         
+W26600     05  PV-STORE-NBR-HOLD               PIC  9(04) VALUE ZEROES.         
+W26600     05  PV-DISPLAY-STR                  PIC  9(04) VALUE ZEROES.         
+JS0600     05  PV-STORE-COUNT                  PIC  9(03) VALUE 1.              
+W28545     05  PV-INV-ID-PREV                  PIC S9(09) VALUE +0              
+W28545                                                            COMP.         
+      *                                                                         
+      *                                                                         
+       01  PA-PROGRAM-ACCUMULATORS.                                             
+           05  PA-RECORD-COUNTS.                                                
+               10  PA-INPUT-COUNT              PIC  9(9)  VALUE ZEROES.         
+               10  PA-INSERT-COUNT             PIC  9(9)  VALUE ZEROES.         
+               10  PA-COMMIT-COUNT             PIC  9(9)  VALUE ZEROES.         
+JS0600         10  PA-TOTAL-REC-COUNT          PIC  9(9)  VALUE ZEROES.         
+      *                                                                         
+       01  PD-PROGRAM-DISPLAYS.                                                 
+           05  PD-DEADLOCK-COUNT         PIC  9(04) VALUE 0.                    
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * INRD019 - TIME TIMESTAMP RECORD/ SALE ADJUSTMENT RECORD                 
+      ******************************************************************        
+           COPY INRD019.                                                        
+      *                                                                         
+      ******************************************************************        
+      *  DB2 ERROR MESSAGES FORMAT AREA.                                        
+      ******************************************************************        
+           COPY DPWS004.                                                        
+      *                                                                         
+      ******************************************************************        
+      *  USED FOR DB2 ERRORS                                                    
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+      *                                                                         
+      ******************************************************************        
+      *  DCLGEN FOR THE INVENTORY ADJUSTED DETAIL TABLE.                        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TADJDTL                                                  
+           END-EXEC.                                                            
+      *                                                                         
+      ******************************************************************        
+      *  DCLGEN FOR THE INVENTORY PARAMETERS TABLE.                             
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TINVPAR                                                  
+           END-EXEC.                                                            
+      *                                                                         
+W28545******************************************************************        
+W28545*  DCLGEN FOR THE INVENTORY CYCLE CONTROL TABLE                           
+W28545******************************************************************        
+W28545     EXEC SQL                                                             
+W28545         INCLUDE TINCNTL                                                  
+W28545     END-EXEC.                                                            
+W28545*                                                                         
+      *****************************************************************         
+      * DB2 CHECKPOINT RESTART CONTROL TABLE AND RESTART INFO TABLE             
+      *****************************************************************         
+           EXEC SQL                                                             
+               INCLUDE TCKRSTCN                                                 
+           END-EXEC.                                                            
+      *                                                                         
+           EXEC SQL                                                             
+               INCLUDE TCKRSTIN                                                 
+           END-EXEC.                                                            
+      *                                                                         
+      ******************************************************************        
+      * CHECKPOINT RESTART VARIABLES AND PREV COMMIT VARIABLES.        *        
+      ******************************************************************        
+       01  CR-CHECKPOINT-RESTART-AREA.                                          
+           05  CR-AREA-LEN                  PIC S9(04) VALUE +55  COMP.         
+           05  CR-CHECKPOINT-RESTART-VAR.                                       
+W26600*        10  CR-PREV-DTL-KEY          PIC  X(17) VALUE SPACES.            
+W26600         10  CR-PREV-DTL-KEY          PIC  X(18) VALUE SPACES.            
+               10  FILLER REDEFINES CR-PREV-DTL-KEY.                            
+W26600*            15  CR-STORE-NBR         PIC  X(03).                         
+W26600             15  CR-STORE-NBR         PIC  9(04).                         
+                   15  CR-AREA-NBR          PIC  9(06).                         
+W21732             15  CR-SKU-NBR           PIC  X(08).                         
+               10  CR-INPUT-READ-COUNT      PIC  9(09) VALUE ZEROES.            
+               10  CR-TADJDTL-COMMIT-COUNT  PIC  9(09) VALUE ZEROES.            
+               10  CR-INSERT-COUNT          PIC  9(09) VALUE ZEROES.            
+               10  CR-TTL-REC-COUNT         PIC  9(09) VALUE ZEROES.            
+      *                                                                         
+       01  CK-CHECKPOINT-SAVE-AREA.                                             
+W26600*    05  CK-SAVE-PREV-KEY         PIC  X(17) VALUE SPACES.                
+W26600     05  CK-SAVE-PREV-KEY         PIC  X(18) VALUE SPACES.                
+           05  FILLER REDEFINES CK-SAVE-PREV-KEY.                               
+W26600*        10  CK-STORE-NBR         PIC  X(03).                             
+W26600         10  CK-STORE-NBR         PIC  9(04).                             
+               10  CK-AREA-NBR          PIC  9(06).                             
+W21732         10  CK-SKU-NBR           PIC  X(08).                             
+      *                                                                         
+      *                                                                         
+      *                                                                         
+      *                                                                         
+      *-------------------*                                                     
+       PROCEDURE DIVISION.                                                      
+      *-------------------*                                                     
+                                                                                
+       0000-MAIN-MODULE.                                                        
+                                                                                
+           PERFORM 1000-INITIALIZATION.                                         
+      *                                                                         
+           PERFORM 2000-PROCESS-INPUT                                           
+                UNTIL PS-NO-MORE-INPUT-RECORDS.                                 
+      *                                                                         
+           PERFORM 8999-EOJ-ROUTINE.                                            
+                                                                                
+           STOP RUN.                                                            
+      *                                                                         
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * OPEN INPUT FILE , INITIALIZE COUNTERS , READ FIRST INPUT RECORD         
+      * PREPARE CHECKPOINT RESTART TABLES FOR PROCESSING / RESTART              
+      ******************************************************************        
+      *                                                                         
+       1000-INITIALIZATION.                                                     
+      *                                                                         
+           OPEN INPUT SALES-ADJUSTMENT-FILE.                                    
+      *                                                                         
+           PERFORM 7400-INIT-CHECKPOINT-SELECT.                                 
+      *                                                                         
+      * CKPT-STAT-CODE = '9' INDICATES A RESTART CONDITION                      
+           IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                                   
+               PERFORM 7500-SELECT-RESTART-INFO                                 
+               MOVE TCKRSTINF-WORK-STRG-DESC-TEXT TO                            
+                                             CR-CHECKPOINT-RESTART-VAR          
+               MOVE CR-PREV-DTL-KEY         TO CK-SAVE-PREV-KEY                 
+      * MOVE RESTART COUNTS TO PA-FIELDS FOR ACCURATE DISPLAY AT EOJ            
+               MOVE CR-INSERT-COUNT         TO PA-INSERT-COUNT                  
+               MOVE CR-TADJDTL-COMMIT-COUNT TO PA-COMMIT-COUNT                  
+JS0600         MOVE CR-TTL-REC-COUNT        TO PA-TOTAL-REC-COUNT               
+           ELSE                                                                 
+               SET PS-FIRST-COMMIT TO TRUE                                      
+           END-IF.                                                              
+      *                                                                         
+           DISPLAY 'COMMITS WILL BE TAKEN EVERY ',                              
+                   TCKRSTCNTL-CKPT-FRQNCY-QTY, ' SECONDS.'.                     
+      *                                                                         
+           PERFORM 4000-READ-SALES-ADJUST-FILE UNTIL                            
+               PA-INPUT-COUNT > CR-INPUT-READ-COUNT                             
+            OR PS-NO-MORE-INPUT-RECORDS.                                        
+      *                                                                         
+           MOVE IN019-STR-NBR TO PV-STORE-NBR-PREV                              
+                                                                                
+           IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                                   
+               MOVE PV-STORE-NBR-HOLD TO PV-STORE-NBR-PREV                      
+W26600*        DISPLAY 'STORE NBR            ' IN019-STR-NBR                    
+W26600         DISPLAY 'STORE NBR            ' PV-STORE-NBR-PREV                
+               DISPLAY 'AREA NBR             ' IN019-SCAN-AREA                  
+W21732         DISPLAY 'SKU                  ' IN019-SKU                        
+               DISPLAY 'DKEY                 ' IN019-DKEY-NBR                   
+               DISPLAY 'INPUT RECORD RESTARTED ON RECORD: '                     
+                        PA-INPUT-COUNT                                          
+           END-IF.                                                              
+                                                                                
+           IF PS-NO-MORE-INPUT-RECORDS                                          
+JS0599         SET PS-EMPTY-INPUT TO TRUE                                       
+               IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                               
+                   MOVE PV-STORE-NBR-PREV TO IN019-STR-NBR                      
+                   PERFORM 8010-CHECK-TINVPAR                                   
+               ELSE                                                             
+                   DISPLAY '******************************'                     
+                   DISPLAY '** NO RECORDS ON INPUT FILE **'                     
+                   DISPLAY '******************************'                     
+               END-IF                                                           
+           ELSE                                                                 
+JS0600         PERFORM 8010-CHECK-TINVPAR                                       
+               PERFORM 7300-GET-COMMIT-TIMESTAMP                                
+           END-IF.                                                              
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * PROCESS THE INPUT FILE BY INSERTING A TADJDTL ROW FOR EACH              
+      * RECORD.                                                                 
+      ******************************************************************        
+       2000-PROCESS-INPUT.                                                      
+      *                                                                         
+           MOVE 'N' TO PS-DEADLOCK-RESTART-SW.                                  
+      *    *-----------------------------------------                           
+      *    * THE STORE TOTAL RECORDS WILL BE IGNORED                            
+      *    *-----------------------------------------                           
+W21732     IF IN019-SKU       = '99999999' AND                                  
+JS0600        IN019-SCAN-AREA = 999999                                          
+JS0600        ADD +1 TO PA-TOTAL-REC-COUNT                                      
+JS0600          CONTINUE                                                        
+JS0600     ELSE                                                                 
+               PERFORM 2100-BUILD-TADJDTL-ROW                                   
+               PERFORM 7000-INSERT-TADJDTL-ROW                                  
+           END-IF.                                                              
+                                                                                
+           IF PV-STORE-NBR = PV-STORE-NBR-PREV                                  
+               CONTINUE                                                         
+           ELSE                                                                 
+               IF INVPAR-SLS-ADJ-CPLD-IND = 'N'                                 
+                   AND INVPAR-ACTL-UNIT-BK-DTE NOT = '9999-09-09'               
+                   PERFORM 8000-UPDATE-TINVPAR                                  
+               END-IF                                                           
+                                                                                
+JS0600         ADD 1 TO PV-STORE-COUNT                                          
+W28545         MOVE INVPAR-INV-ID TO PV-INV-ID-PREV                             
+JS0600         PERFORM 8010-CHECK-TINVPAR                                       
+               MOVE PV-STORE-NBR TO PV-STORE-NBR-PREV                           
+           END-IF.                                                              
+      *                                                                         
+           IF PS-PROGRAM-DEADLOCKED                                             
+               CONTINUE                                                         
+           ELSE                                                                 
+               PERFORM 7700-COMMIT-PROCESSING                                   
+               PERFORM 4000-READ-SALES-ADJUST-FILE.                             
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * BUILDS THE ADJUSTMENT DETAIL TABLE RECORD FROM THE SALES                
+      * ADJUSTMENT RECORD LAYOUT.                                               
+      ******************************************************************        
+       2100-BUILD-TADJDTL-ROW.                                                  
+00163                                                                           
+W26600*    MOVE IN019-STR-NBR               TO ADJDTL-STORE-NBR                 
+W26600     MOVE IN019-STR-NBR               TO ADJDTL-LOC-NBR                   
+                                               PV-STORE-NBR.                    
+00165      MOVE IN019-SCAN-AREA             TO ADJDTL-AREA-NBR.                 
+W21732     MOVE IN019-SKU                   TO ADJDTL-SKU-NBR.                  
+00169      MOVE PC-SALES-ADJUST-ADJ-RSN-TXT TO ADJDTL-ADJ-RSN-TXT.              
+00170      MOVE PC-SALES-ADJUST-ADJ-TYPE-CD TO ADJDTL-ADJ-TYPE-CDE.             
+00171      MOVE ZERO                        TO ADJDTL-ADJ-UNIT-PR-AMT.          
+00172      MOVE IN019-SALES-ADJ-QTY         TO ADJDTL-ADJ-QTY.                  
+00173      MOVE IN019-SALES-ADJ-EXT-RTL-AMT TO ADJDTL-ADJ-EXTD-AMT.             
+00174      MOVE IN019-DKEY-NBR              TO ADJDTL-DKEY-NBR.                 
+00175      MOVE PC-PROGRAM-NAME             TO ADJDTL-CRE-ID-NBR.               
+W26600*    MOVE PV-STORE-NBR-9              TO ADJDTL-LOC-NBR.          INKUP126
+00176                                                                           
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * READS THE SALES ADJUSTMENT FILE INTO THE SALES ADJUSTMENT               
+      * RECORD LAYOUT.                                                          
+      ******************************************************************        
+       4000-READ-SALES-ADJUST-FILE.                                             
+           MOVE IN019-STR-NBR TO PV-STORE-NBR-HOLD.                             
+                                                                                
+           READ SALES-ADJUSTMENT-FILE INTO IN019-ITEM-REC                       
+               AT END MOVE 'Y' TO PS-INPUT-FILE-EOF-SW.                         
+      *                                                                         
+           IF PS-NO-MORE-INPUT-RECORDS                                          
+               ADD 1                          TO PA-COMMIT-COUNT                
+               MOVE IN019-STR-NBR             TO CR-STORE-NBR                   
+               MOVE IN019-SCAN-AREA           TO CR-AREA-NBR                    
+W21732         MOVE IN019-SKU                 TO CR-SKU-NBR                     
+               MOVE PA-COMMIT-COUNT           TO CR-TADJDTL-COMMIT-COUNT        
+               MOVE PA-INPUT-COUNT            TO CR-INPUT-READ-COUNT            
+               MOVE PA-INSERT-COUNT           TO CR-INSERT-COUNT                
+JS0600         MOVE PA-TOTAL-REC-COUNT        TO CR-TTL-REC-COUNT               
+      *        MOVE COMMIT INFO TO WORKING STORAGE ROW                          
+               MOVE CR-CHECKPOINT-RESTART-AREA TO                               
+                                             TCKRSTINF-WORK-STRG-DESC           
+               EXEC SQL                                                         
+                 UPDATE TCKRSTINF                                               
+                    SET WORK_STRG_DESC = :TCKRSTINF-WORK-STRG-DESC              
+                  WHERE JOB_NAME   = :PC-JOB-NAME                               
+                    AND PLAN_NAME  = :PC-PROGRAM-NAME                           
+               END-EXEC                                                         
+               IF SQLCODE = 0                                                   
+                   CONTINUE                                                     
+               ELSE                                                             
+                   MOVE PE-MSG-03        TO PV-DB2-OPERATION-ATTEMPTED          
+                   MOVE '* 4000-READ-SALES-ADJUST-FILE *'                       
+                       TO PV-PARAGRAPH-NAME                                     
+                   PERFORM 9999-SQL-ABEND                                       
+               END-IF                                                           
+           ELSE                                                                 
+               ADD 1                     TO PA-INPUT-COUNT                      
+           END-IF.                                                              
+      *                                                                         
+00196 ******************************************************************        
+00197 * INSERT A ROW INTO THE TADJDTL TABLE. IF A -911 (DEADLOCK)               
+00198 * OCCURS, ALL UPDATES SINCE THE LAST COMMIT HAVE BEEN ROLLED BACK,        
+00199 * SO PERFORM THE RESTART PROCESS.  PROCESSING WILL RESUME WITH THE        
+00200 * FIRST RECORD AFTER THE LAST COMMIT.                                     
+00202 ******************************************************************        
+00204  7000-INSERT-TADJDTL-ROW.                                                 
+      *                                                                         
+      *                                                                         
+00213      EXEC SQL                                                             
+00214          INSERT INTO TADJDTL                                              
+00216                (                                                          
+W26600*               STORE_NBR                                                 
+W26600                LOC_NBR                                                   
+00217                , AREA_NBR                                                 
+W21732               , SKU_NBR                                                  
+00221                , CRE_TMST                                                 
+00222                , ADJ_RSN_TXT                                              
+00223                , ADJ_TYPE_CDE                                             
+00224                , ADJ_UNIT_PR_AMT                                          
+00225                , ADJ_QTY                                                  
+00226                , ADJ_EXTD_AMT                                             
+00227                , DKEY_NBR                                                 
+00228                , CRE_ID_NBR                                               
+W26600*              , LOC_NBR                                          INKUP126
+00229                )                                                          
+00230          VALUES                                                           
+00231                (                                                          
+W26600                 :ADJDTL-LOC-NBR                                          
+W26600*                :ADJDTL-STORE-NBR                                        
+00233                , :ADJDTL-AREA-NBR                                         
+W21732               , :ADJDTL-SKU-NBR                                          
+00237                ,  CURRENT TIMESTAMP                                       
+00238                , :ADJDTL-ADJ-RSN-TXT                                      
+00239                , :ADJDTL-ADJ-TYPE-CDE                                     
+00240                , :ADJDTL-ADJ-UNIT-PR-AMT                                  
+00241                , :ADJDTL-ADJ-QTY                                          
+00242                , :ADJDTL-ADJ-EXTD-AMT                                     
+00243                , :ADJDTL-DKEY-NBR                                         
+00244                , :ADJDTL-CRE-ID-NBR                                       
+W26600*              , :ADJDTL-LOC-NBR                                  INKUP126
+00245                )                                                          
+00246      END-EXEC                                                             
+      *                                                                         
+           EVALUATE SQLCODE                                                     
+               WHEN 0                                                           
+                   CONTINUE                                                     
+               WHEN -911                                                        
+                   ADD +1                 TO PV-DEADLOCK-COUNTER                
+                   DISPLAY 'DEADLOCK -911 IN 7000-INSERT-TADJDTL-ROW'           
+                   IF PV-DEADLOCK-COUNTER > PC-MAX-DEADLOCKS                    
+                       MOVE '7000-INSERT-TADJDTL-ROW'                           
+                                          TO PV-PARAGRAPH-NAME                  
+                       MOVE PE-MSG-05     TO PV-DB2-OPERATION-ATTEMPTED         
+                       PERFORM 9999-SQL-ABEND                                   
+                   ELSE                                                         
+                       PERFORM 7999-RESTART-PROCESS                             
+                   END-IF                                                       
+               WHEN OTHER                                                       
+                   MOVE '7000-INSERT-TADJDTL-ROW'                               
+                                          TO PV-PARAGRAPH-NAME                  
+                   MOVE PE-MSG-01         TO PV-DB2-OPERATION-ATTEMPTED         
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE                                                         
+      *                                                                         
+           IF PS-PROGRAM-DEADLOCKED                                             
+               CONTINUE                                                         
+           ELSE                                                                 
+               ADD 1 TO PA-INSERT-COUNT                                         
+           END-IF.                                                              
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * 7300-GET-COMMIT-TIMESTAMP.                                     *        
+      * PROCESSES: GET THE COMMIT TIMESTAMP FROM THE CHECKPOINT        *        
+      *            CONTROL TABLE                                       *        
+      ******************************************************************        
+       7300-GET-COMMIT-TIMESTAMP.                                               
+                                                                                
+           EXEC SQL                                                             
+      * CHECKPOINT TAKEN BASED ON CHEKPOINT RESTART CICSP1 PANEL                
+             SELECT (CURRENT TIMESTAMP + CKPT_FRQNCY_QTY SECONDS)               
+               INTO :PV-COMMIT-TIMESTAMP                                        
+               FROM TCKRSTCNTL                                                  
+              WHERE JOB_NAME  = :PC-JOB-NAME                                    
+                AND PLAN_NAME = :PC-PROGRAM-NAME                                
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = 0                                                 
+                   CONTINUE                                                     
+      *            DISPLAY 'NEXT COMMIT AT TIMESTAMP: ',                        
+      *                  PV-COMMIT-TIMESTAMP                                    
+               WHEN SQLCODE NOT EQUAL ZERO                                      
+                   MOVE '7300-GET-COMMIT-TIMESTAMP' TO PV-PARAGRAPH-NAME        
+                   MOVE PE-MSG-07        TO PV-DB2-OPERATION-ATTEMPTED          
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * 7400-INIT-CHECKPOINT-SELECT                                    *        
+      * PROCESSES: SELECTS FROM THE CHECKPOINT RESTART CONTROL TABLE   *        
+      *            IF WE ARE IN A RESTART CONDITION.                   *        
+      ******************************************************************        
+       7400-INIT-CHECKPOINT-SELECT.                                             
+                                                                                
+           EXEC SQL                                                             
+             SELECT  CKPT_STAT_CODE                                             
+                    ,CKPT_FRQNCY_QTY                                            
+               INTO  :TCKRSTCNTL-CKPT-STAT-CODE                                 
+                    ,:TCKRSTCNTL-CKPT-FRQNCY-QTY                                
+               FROM  TCKRSTCNTL                                                 
+              WHERE  JOB_NAME  = :PC-JOB-NAME                                   
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                               
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE '7400-INIT-CHECKPOINT-SELECT' TO PV-PARAGRAPH-NAME          
+               MOVE PE-MSG-02         TO PV-DB2-OPERATION-ATTEMPTED             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * 7500-SELECT-RESTART-INFO                                       *        
+      * PROCESSES: SELECTS FROM THE CHECKPOINT RESTART INFORMATION     *        
+      *            TABLE TO OBTAIN THE PROGRAMS SAVED VARIABLES.       *        
+      ******************************************************************        
+       7500-SELECT-RESTART-INFO.                                                
+                                                                                
+           EXEC SQL                                                             
+             SELECT  WORK_STRG_DESC                                             
+               INTO  :TCKRSTINF-WORK-STRG-DESC                                  
+               FROM  TCKRSTINF                                                  
+              WHERE  JOB_NAME  = :PC-JOB-NAME                                   
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                               
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE '*7500-SELECT-RESTART-INFO*' TO PV-PARAGRAPH-NAME           
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * 7600-SET-CURRENT-TIMESTAMP.                                    *        
+      * PROCESSES: GET THE CURRENT TIMESTAMP FROM DB2.                 *        
+      ******************************************************************        
+       7600-SET-CURRENT-TIMESTAMP.                                              
+                                                                                
+           EXEC SQL                                                             
+                SET :PV-CURRENT-TIMESTAMP = CURRENT TIMESTAMP                   
+           END-EXEC.                                                            
+      *                                                                         
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE '*7600-SET-CURRENT-TIMESTAMP*' TO PV-PARAGRAPH-NAME         
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * 7700-COMMIT-PROCESSING.                                        *        
+      * PROCESSES: CHECK IF WE NEED TO TAKE A COMMIT.                  *        
+      *          PREPARE CHECKPOINT RECORD FOR UPDATE OF WORK_STRG_DESC*        
+      ******************************************************************        
+       7700-COMMIT-PROCESSING.                                                  
+           MOVE '*7700-COMMIT-PROCESSING*'    TO PV-PARAGRAPH-NAME.             
+                                                                                
+           PERFORM 7600-SET-CURRENT-TIMESTAMP.                                  
+      *    *------------------------------------                                
+      *        PREPARE COMMIT RECORD FOR UPDATE                                 
+      *    *------------------------------------                                
+           IF (PV-CURRENT-TIMESTAMP > PV-COMMIT-TIMESTAMP)                      
+               ADD 1                          TO PA-COMMIT-COUNT                
+               MOVE IN019-STR-NBR             TO CR-STORE-NBR                   
+               MOVE IN019-SCAN-AREA           TO CR-AREA-NBR                    
+W21732         MOVE IN019-SKU                 TO CR-SKU-NBR                     
+               MOVE PA-COMMIT-COUNT           TO CR-TADJDTL-COMMIT-COUNT        
+               MOVE PA-INPUT-COUNT            TO CR-INPUT-READ-COUNT            
+               MOVE PA-INSERT-COUNT           TO CR-INSERT-COUNT                
+JS0600         MOVE PA-TOTAL-REC-COUNT        TO CR-TTL-REC-COUNT               
+      *    *---MOVE COMMIT INFO TO WORKING STORAGE ROW                          
+               MOVE CR-CHECKPOINT-RESTART-AREA TO                               
+                                             TCKRSTINF-WORK-STRG-DESC           
+               IF PS-FIRST-COMMIT                                               
+                   MOVE '9' TO TCKRSTCNTL-CKPT-STAT-CODE                        
+                   PERFORM 7900-UPDATE-CHECKPOINT-STATUS                        
+                   MOVE 'N' TO PS-FIRST-COMMIT-SW                               
+               END-IF                                                           
+TEST  *        DISPLAY '   .. TIMED COMMIT '                                    
+TEST  *            '   CHECKPT KEY: ' CR-PREV-DTL-KEY                           
+TEST  *            '   LINE NBR: '  CR-INPUT-READ-COUNT                         
+               PERFORM 7800-COMMIT-CHANGES                                      
+               PERFORM 7300-GET-COMMIT-TIMESTAMP                                
+           END-IF.                                                              
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * 7800-COMMIT-CHANGES.                                                    
+      * PROCESSES: PERFORM UPDATE OF CHECKPOINT INFORMATION TABLE.              
+      *            TAKE A COMMIT.                                               
+      *  ==> PERFORMED FROM: 7700-COMMIT-PROCESSING.                            
+      ******************************************************************        
+       7800-COMMIT-CHANGES.                                                     
+                                                                                
+           EXEC SQL                                                             
+             UPDATE TCKRSTINF                                                   
+                SET WORK_STRG_DESC = :TCKRSTINF-WORK-STRG-DESC                  
+              WHERE JOB_NAME       = :PC-JOB-NAME                               
+                AND PLAN_NAME      = :PC-PROGRAM-NAME                           
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE PE-MSG-03         TO PV-DB2-OPERATION-ATTEMPTED             
+               MOVE  '* 7800-COMMIT-CHANGES *' TO PV-PARAGRAPH-NAME             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+           EXEC SQL                                                             
+               COMMIT                                                           
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE PE-MSG-04         TO PV-DB2-OPERATION-ATTEMPTED             
+               MOVE  '* 7800-COMMIT-CHANGES *' TO PV-PARAGRAPH-NAME             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * 7900-UPDATE-CHECKPOINT-STATUS                                           
+      * PROCESSES: UPDATES THE STATUS ON THE CHECKPOINT CONTROL TABLE           
+      *                                                                         
+      ******************************************************************        
+       7900-UPDATE-CHECKPOINT-STATUS.                                           
+                                                                                
+           EXEC SQL                                                             
+             UPDATE  TCKRSTCNTL                                                 
+                SET  CKPT_STAT_CODE = :TCKRSTCNTL-CKPT-STAT-CODE                
+              WHERE  JOB_NAME  = :PC-JOB-NAME                                   
+                AND  PLAN_NAME = :PC-PROGRAM-NAME                               
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = 0                                                       
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE '7900-UPDATE-CHECKPOINT-STATUS' TO PV-PARAGRAPH-NAME        
+               MOVE PE-MSG-06        TO PV-DB2-OPERATION-ATTEMPTED              
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+           EJECT                                                                
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      * PROGRAM RESTART DUE TO A DEADLOCK AGAINST TADJDTL ROW FOR UPDATE        
+      *  FIND RESTART RECORD AND CKPT RESTART AT POINT OF LAST COMMIT.          
+      ******************************************************************        
+       7999-RESTART-PROCESS.                                                    
+      *                                                                         
+           SET PS-PROGRAM-DEADLOCKED TO TRUE.                                   
+      *                                                                         
+           CLOSE SALES-ADJUSTMENT-FILE.                                         
+      *                                                                         
+           PERFORM 7500-SELECT-RESTART-INFO.                                    
+      *                                                                         
+           DISPLAY '**** RESTART **** '.                                        
+           MOVE PV-DEADLOCK-COUNTER TO PD-DEADLOCK-COUNT.                       
+           DISPLAY '** SQLCODE -911 **  ' PD-DEADLOCK-COUNT ' TIMES'.           
+      *                                                                         
+      *-- THIS CHECK WILL PREVENT THE FILE FROM BEING RESTARTED IN              
+      *-- THE WRONG POSITION IF NO COMMITS HAVE OCCURRED AND THE                
+      *-- RESTART INFORMATION IN NOT CLEARED OUT.                               
+           IF PS-FIRST-COMMIT                                                   
+               INITIALIZE TCKRSTINF-WORK-STRG-DESC                              
+               DISPLAY 'NO COMMITS HAVE OCCURRED YET; RESTART FROM'             
+                      ' BEGINNING'                                              
+           ELSE                                                                 
+               DISPLAY 'TCKRSTINF-LAST CKPT '                                   
+                        TCKRSTINF-WORK-STRG-DESC (1:54)                         
+      ***    INFO ON LAST CHECKPOINT TAKEN IS IN                                
+      ***    CR-CHECKPOINT-RESTART-AREA.                                        
+               MOVE TCKRSTINF-WORK-STRG-DESC TO                                 
+                     CR-CHECKPOINT-RESTART-AREA                                 
+               DISPLAY 'CHECKPOINT RESTART INFORMATION:'                        
+               DISPLAY 'STORE NBR       ' CR-STORE-NBR                          
+               DISPLAY 'AREA NBR        ' CR-AREA-NBR                           
+W21732         DISPLAY 'SKU             ' CR-SKU-NBR                            
+               DISPLAY 'INPUT RECS READ ' CR-INPUT-READ-COUNT                   
+           END-IF.                                                              
+      *                                                                         
+           OPEN INPUT SALES-ADJUSTMENT-FILE.                                    
+           MOVE ZEROES                          TO PA-INPUT-COUNT.              
+      *                                                                         
+      *POSITION INPUT FILE TO 1ST RECORD AFTER LAST CHECKPOINT                  
+           PERFORM 4000-READ-SALES-ADJUST-FILE                                  
+               UNTIL PA-INPUT-COUNT > CR-INPUT-READ-COUNT                       
+                 OR PS-NO-MORE-INPUT-RECORDS.                                   
+           IF PS-NO-MORE-INPUT-RECORDS                                          
+               DISPLAY 'END OF INPUT FILE ON RESTART'                           
+           ELSE                                                                 
+               DISPLAY 'INPUT RECORD RESTARTED ON RECORD '                      
+                        PA-INPUT-COUNT                                          
+               DISPLAY 'STORE NBR       ' IN019-STR-NBR                         
+               DISPLAY 'AREA NBR        ' IN019-SCAN-AREA                       
+W21732         DISPLAY 'SKU             ' IN019-SKU                             
+           END-IF.                                                              
+      *                                                                         
+      *RE-ESTABLISH COUNTS FOR PROCESSED INPUT (FROM CHECKPOINT RECORD)         
+           MOVE CR-INSERT-COUNT         TO PA-INSERT-COUNT.                     
+           MOVE CR-TADJDTL-COMMIT-COUNT TO PA-COMMIT-COUNT.                     
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      *  UPDATE TINVPAR TABLE                                          *        
+      ******************************************************************        
+       8000-UPDATE-TINVPAR.                                                     
+W26600     MOVE PV-STORE-NBR-PREV TO INVPAR-LOC-NBR.                            
+W28545     MOVE PV-INV-ID-PREV    TO INVPAR-INV-ID.                             
+           EXEC SQL                                                             
+                UPDATE TINVPAR                                                  
+                SET    SLS_ADJ_CPLD_IND = 'Y'                                   
+W26600*         WHERE  STORE_NBR = :PV-STORE-NBR-PREV                           
+W26600          WHERE  LOC_NBR = :INVPAR-LOC-NBR                                
+W28545            AND  INV_ID  = :INVPAR-INV-ID                                 
+                  AND  ACTL_FIN_BK_DTE  = '9999-09-09'                          
+JS0600            AND  SLS_ADJ_CPLD_IND = 'N'                                   
+           END-EXEC.                                                            
+                                                                                
+           IF SQLCODE = +0                                                      
+JS0600        DISPLAY '** TINVPAR UPDATED '                                     
+JS0600                   'FOR STORE NUMBER: ' PV-STORE-NBR-PREV                 
+           ELSE                                                                 
+              DISPLAY '*------------------------------------'                   
+              DISPLAY 'STR ' PV-STORE-NBR-PREV                                  
+                  ' ---  CHECK SLS_ADJ_CPLD_IND ON TINVPAR'                     
+              DISPLAY '*------------------------------------'                   
+              MOVE '8000-UPDATE-TINVPAR'  TO PV-PARAGRAPH-NAME                  
+              MOVE PE-MSG-08              TO PV-DB2-OPERATION-ATTEMPTED         
+              PERFORM 9999-SQL-ABEND                                            
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * BEFORE UPDATING TADJDTL, CHECK IF SLS-ADJ-IND HAS ALREADY BEEN *        
+      * SET TO 'Y'                                                     *        
+      ******************************************************************        
+JS0600 8010-CHECK-TINVPAR.                                                      
+                                                                                
+           EXEC SQL                                                             
+W26600*      SELECT  STORE_NBR                                                  
+W26600       SELECT  LOC_NBR                                                    
+W28545              ,A.INV_ID                                                   
+                    ,ACTL_UNIT_BK_DTE                                           
+                    ,SLS_ADJ_CPLD_IND                                           
+W26600*        INTO  :INVPAR-STORE-NBR                                          
+W26600         INTO  :INVPAR-LOC-NBR                                            
+W28545              ,:INVPAR-INV-ID                                             
+                    ,:INVPAR-ACTL-UNIT-BK-DTE                                   
+                    ,:INVPAR-SLS-ADJ-CPLD-IND                                   
+W28545*        FROM  TINVPAR                                                    
+W28545         FROM  TINVPAR A                                                  
+W28545              ,TINCNTL B                                                  
+W26600*         WHERE  STORE_NBR = :IN019-STR-NBR                               
+W26600          WHERE  LOC_NBR = :IN019-STR-NBR                                 
+                  AND  ACTL_FIN_BK_DTE  = '9999-09-09'                          
+W28545            AND B.ACTV_IND        = 'Y'                                   
+W28545            AND A.INV_ID          = B.INV_ID                              
+           END-EXEC.                                                            
+                                                                                
+W26600     MOVE IN019-STR-NBR TO PV-DISPLAY-STR.                                
+           IF SQLCODE = 0                                                       
+W28545         MOVE INVPAR-LOC-NBR TO PV-INV-ID-PREV                            
+               DISPLAY '*------------------------------------'                  
+               IF INVPAR-SLS-ADJ-CPLD-IND = 'Y'                                 
+W26600*            DISPLAY 'STR ' IN019-STR-NBR                                 
+W26600             DISPLAY 'STR ' PV-DISPLAY-STR                                
+                       ' SALES ADJUSTMENTS HAVE BEEN PROCESSED,'                
+                   DISPLAY '       '                                            
+                       ' ASSUMING ADDBACK PROCESSING.'                          
+               ELSE                                                             
+W26600*            DISPLAY 'STR ' IN019-STR-NBR                                 
+W26600             DISPLAY 'STR ' PV-DISPLAY-STR                                
+                       ' SALES ADJUSTMENTS HAVE NOT BEEN PROCESSED.'            
+                   DISPLAY '       '                                            
+                       ' ASSUMING BACKOUT PROCESSING.'                          
+               END-IF                                                           
+               IF INVPAR-ACTL-UNIT-BK-DTE = '9999-09-09'                        
+                   DISPLAY '       '                                            
+                       ' STORE HAS NOT UNIT BOOK.  FASHION SALES'               
+                       ' FILE MAY BE IGNORED.'                                  
+               ELSE                                                             
+                   DISPLAY '       '                                            
+                       ' STORE HAS COMPLETED UNIT BOOKING WITH'                 
+                       ' UNIT BOOK DATE: ' INVPAR-ACTL-UNIT-BK-DTE              
+                   DISPLAY '       '                                            
+                       ' VERIFY AND PROCESS FASHION SALES FILE.'                
+               END-IF                                                           
+               DISPLAY '*------------------------------------'                  
+           ELSE                                                                 
+               DISPLAY '*------------------------------------'                  
+W26600*        DISPLAY 'STR ' IN019-STR-NBR                                     
+W26600         DISPLAY 'STR ' PV-DISPLAY-STR                                    
+               DISPLAY '*------------------------------------'                  
+               MOVE '*8010-CHECK-TINVPAR*' TO PV-PARAGRAPH-NAME                 
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+      *                                                                         
+      *                                                                         
+      ******************************************************************        
+      *  RESET STATUS CODE, DISPLAY FINAL COUNTS , CLOSE INPUT FILE    *        
+      ******************************************************************        
+       8999-EOJ-ROUTINE.                                                        
+      *                                                                         
+JS0600     IF PS-NOT-EMPTY-INPUT                                                
+JS0600       OR TCKRSTCNTL-CKPT-STAT-CODE = '9'                                 
+               IF INVPAR-SLS-ADJ-CPLD-IND = 'N'                                 
+                   AND INVPAR-ACTL-UNIT-BK-DTE NOT = '9999-09-09'               
+                   PERFORM 8000-UPDATE-TINVPAR                                  
+               END-IF                                                           
+                                                                                
+               MOVE '0' TO TCKRSTCNTL-CKPT-STAT-CODE                            
+               PERFORM 7900-UPDATE-CHECKPOINT-STATUS                            
+                                                                                
+               DISPLAY '                                      '                 
+               DISPLAY 'INPUT RECORDS    ', PA-INPUT-COUNT                      
+               DISPLAY 'TTL 99999999 REC ', PA-TOTAL-REC-COUNT                  
+               DISPLAY 'INSERT COUNT     ', PA-INSERT-COUNT                     
+               DISPLAY '                                         '              
+               DISPLAY 'COMMITS TAKEN    ', PA-COMMIT-COUNT                     
+               CLOSE SALES-ADJUSTMENT-FILE                                      
+JS0600     ELSE                                                                 
+               CLOSE SALES-ADJUSTMENT-FILE                                      
+           END-IF.                                                              
+      *                                                                         
+      ******************************************************************        
+      *  STANDARD DB2 ERROR ABEND ROUTINE                                       
+      *  THIS ROUTINE FORCES AN ABEND DUE TO A DB2 PROBLEM.                     
+      ******************************************************************        
+       9999-SQL-ABEND.                                                          
+                                                                                
+           MOVE +4013                 TO ABEND-CODE.                            
+           DISPLAY '**  ABEND     **'.                                          
+           DISPLAY '**  PROGRAM   ** => ' PC-PROGRAM-NAME.                      
+           DISPLAY '**  PARAGRAPH **  = ' PV-PARAGRAPH-NAME.                    
+           DISPLAY '**  OPERATION **  = ' PV-DB2-OPERATION-ATTEMPTED.           
+                                                                                
+      *    THE FOLLOWING COPYBOOK UTILIZES THE DB2 ABEND MODULE                 
+      *    DSNTIAR TO CONVERT SQLCA INTO UNDERSTANDABLE VERBAGE.                
+                                                                                
+           COPY DPPD004.                                                        
+           CALL 'ILBOABN0'  USING ABEND-CODE.                                   
+                                                                                

@@ -1,0 +1,1899 @@
+      ******************************************************************00010000
+       IDENTIFICATION DIVISION.                                         00020000
+      ******************************************************************00030000
+                                                                        00040000
+       PROGRAM-ID.             INKCS060.                                00050000
+       AUTHOR.                 JOHN SELWITSCHKA.                        00060000
+       INSTALLATION.           KOHLS DEPARTMENT STORES.                 00070000
+       DATE-WRITTEN.           03/15/2006.                              00080000
+       DATE-COMPILED.                                                   00090000
+                                                                        00100000
+      ******************************************************************00110000
+      *  INKCS060 - INVENTORY SKU STYLE DELETION LOAD                   00120000
+      *            (VIA MQ SERIES CICS TRIGGER)                         00130000
+      ******************************************************************00140000
+      *          CICS COBOL II WITH DB2 AND MQ SERIES                   00150000
+      ******************************************************************00160000
+      ******************************************************************00170000
+      * THIS IS A CICS PROGRAM WHICH WILL GET SKU AND VENDOR UPC        00180000
+      * MESSAGES FROM THE IN.ITEM.MESSAGE.Q QUEUE (IMT_EVENT_BRIDGE)    00190000
+      * WHENEVER A MESSAGE IS PUT ON THE QUEUE.  WHEN A MESSAGE         00200000
+      * BECOMES AVAILABLE, THE CICS TRIGGER EXECUTES TO PULL IN THE     00210000
+      * BRIDGE MESSAGES.  INV_SKU_STYL_DLT ROWS ARE CREATED AND INSERTED00220000
+      * TO THE INV_SKU_STYL_DLT TABLE.  THREE TYPES OF EVENTS ARE       00230000
+      * PROCESSED: EVENT 31 (SKU/STYLE DELETES), EVENT 120 (VENDOR UPC  00240000
+      * DELETE), AND EVENT 125 (VENDOR UPC NUMBER WHERE THE             00250000
+      * PLU_DWNLD_IND IS 'N').                                          00260000
+      *                                                                 00270000
+      * WHENEVER A MESSAGE IS PUT TO THE IN.ITEM.MESSAGE.Q, TRANSACTION 00280000
+      * 'I060' IS INITIATED FROM MQ TO EXECUTE THIS PROGRAM.            00290000
+      *                                                                 00300000
+      * MESSAGES FOUND TO BE IN ERROR ARE WRITTEN TO THE                00310000
+      * IN.ITEM.ERROR.Q QUEUE. MESSAGES IN THIS QUEUE ARE REPORTED ON   00320000
+      * THE SKU / STYLE DELETE ERROR REPORT (RPT ID INK06105). PROGRAM  00330000
+      * INKRP160 PRODUCES THIS REPORT.  INKRP160 IS EXECUTED IN JOB     00340000
+      * INK061.  WHEN MESSAGES ARE WRITTEN TO THE ERROR QUEUE, AN       00350000
+      * EMAIL WILL BE SENT TO IS-IN-ALERT VIA THE INTERNAL READER.      00360000
+      *                                                                 00370000
+      * THIS PROGRAM CONTAINS CHECKPOINT/RESTART LOGIC.  EACH MESSAGE   00380000
+      * AND THE ASSOCIATED INT_SKU_STYL_DLT ROWS CREATED FROM IT, IS    00390000
+      * A LOGICAL UNIT OF WORK.  A TWO-PHASE COMMIT (CICS SYNCPOINT)    00400000
+      * WILL BE ISSUED AFTER GETTING A MESSAGE FROM THE QUEUE.  THE     00410000
+      * MESSAGE WILL BE SAVED IN TCKRSTINF.  IF AN ABEND OCCURS, ALL    00420000
+      * DATABASE CHANGES FOR THE CURRENT MESSAGE BEING PROCESSED WILL   00430000
+      * BE ROLLED BACK.  UPON RESTART, PROCESSING WILL RESUME BEGINNING 00440000
+      * WITH THE MESSAGE SAVED IN TCKRSTINF.                            00450000
+      *                                                                 00460000
+      * IF THE PROGRAM TERMINATES ABNORMALLY, AN EMAIL WILL BE SENT TO  00470000
+      * IS-IN-ALERT VIA THE INTERNAL READER.                            00480000
+      ******************************************************************00490000
+      *                                                                 00500000
+      * 03/15/2006 J. SELWITSCHKA WR28545 - NEW PROGRAM                 00510000
+      * 06/23/2006 S. JACKSON      S28545 - PRODUCTION SERVER CHANGE    00520000
+      *                           MQSI INTEGRATOR (ISMQI01P TO ISMQI03P)00530000
+PE6084* 07/07/2011 COGNIZANT      PKE000000006084-ADDED A NEW VARIABLE  00531099
+PE6084*                           PV-UPC-ID-I TO HOLD ALL THE 10 DIGITS 00532099
+PE6084*                           FOR UPC ID.                           00533099
+      * 01/30/2024 JEAN KURK      REPLACE ERROR QUEUE WITH MESSAGES IN  00534099
+      *                           THE CSSL LOG            CHG0299580    00535099
+      ******************************************************************00540000
+                                                                        00550000
+      ******************************************************************00560000
+       ENVIRONMENT DIVISION.                                            00570000
+      ******************************************************************00580000
+                                                                        00590000
+       CONFIGURATION SECTION.                                           00600000
+                                                                        00610000
+       SOURCE-COMPUTER.        IBM-3090.                                00620000
+       OBJECT-COMPUTER.        IMB-3090.                                00630000
+                                                                        00640000
+      ******************************************************************00650000
+       DATA DIVISION.                                                   00660000
+      ******************************************************************00670000
+                                                                        00680000
+       WORKING-STORAGE SECTION.                                         00690000
+                                                                        00700000
+       01  PC-PROGRAM-CONSTANTS.                                        00710000
+           05  PC-DEFAULT-TMST         PIC X(26)    VALUE               00720000
+                                       '9999-09-09-23.59.00.999999'.    00730000
+           05  PC-DEFAULT-DTE          PIC X(10)    VALUE               00740000
+                                       '9999-09-09'.                    00750000
+           05  PC-MSGLENGTH            PIC S9(9)    VALUE +450 COMP.    00760000
+           05  PC-ER-MSGLENGTH         PIC S9(9)    VALUE +500 COMP.    00770000
+           05  PC-WORK-STRG-DESC-LEN   PIC S9(9)    VALUE +476 COMP.    00780000
+           05  PC-MAX-RETRIES          PIC S9(4)    VALUE 120  COMP.    00790000
+           05  PC-MAXIMUM-RETRY-COUNT  PIC S9(4)    VALUE +2   COMP.    00800000
+           05  PC-CURRENT-PROGRAM-NAME PIC X(8)     VALUE 'INKCS060'.   00810000
+           05  PC-JOB-NAME             PIC X(6)     VALUE 'CICS  '.     00820000
+           05  PC-QNAME                PIC X(48)    VALUE               00830000
+                                                 'IN.ITEM.MESSAGE.Q'.   00840000
+      *    05  PC-ERROR-QNAME          PIC X(48)    VALUE               00850099
+      *                                          'IN.ITEM.ERROR.Q  '.   00860099
+           05  PC-QMGR-NAME            PIC X(48)    VALUE SPACES.       00870000
+      *                                                      QKSP       00880000
+S28545*OLD     88  PC-PROD-QMGR-NAME                VALUE 'ISMQI01P'.   00890000
+               88  PC-PROD-QMGR-NAME                VALUE 'ISMQI03P'.   00900000
+      *                                                      QKSL       00910000
+               88  PC-LEARN-QMGR-NAME               VALUE 'ISMQI01T'.   00920000
+      *                                                      QKSQ       00930000
+               88  PC-QA-QMGR-NAME                  VALUE 'ISMQI01T'.   00940000
+      *                                                      QKST       00950000
+               88  PC-TEST-QMGR-NAME                VALUE 'ISMQI01T'.   00960000
+                                                                        00970000
+           05  PC-XS-QMGR-NAME         PIC X(48)    VALUE SPACES.       00980000
+      *                                                      QKSP       00990000
+               88  PC-XS-PROD-QMGR-NAME             VALUE 'QKSP'.       01000000
+      *                                                      QKSL       01010000
+               88  PC-XS-LEARN-QMGR-NAME            VALUE 'QKSL'.       01020000
+      *                                                      QKSQ       01030000
+               88  PC-XS-QA-QMGR-NAME               VALUE 'QKSQ'.       01040000
+      *                                                      QKST       01050000
+               88  PC-XS-TEST-QMGR-NAME             VALUE 'QKST'.       01060000
+                                                                        01070000
+           05  PC-CORREL-ID            PIC X(48)    VALUE SPACES.       01080000
+      *                                                      QKSP       01090000
+               88  PC-PROD-CORREL-ID                VALUE 'ISWMQ04P'.   01100000
+      *                                                      QKSL       01110000
+               88  PC-LEARN-CORREL-ID               VALUE 'ISWMQ04L'.   01120000
+      *                                                      QKSQ       01130000
+               88  PC-QA-CORREL-ID                  VALUE 'ISWMQ04Q'.   01140000
+      *                                                      QKST       01150000
+               88  PC-TEST-CORREL-ID                VALUE 'ISWMQ04T'.   01160000
+                                                                        01170000
+           05  PC-SYS-ID               PIC X(04).                       01180000
+               88  PC-KOHLS-TEST-SYSTEM             VALUE 'CIT1'.       01190000
+               88  PC-KOHLS-ACC-TEST-SYSTEM         VALUE 'CIQA',       01200000
+                                                          'CIQT',       01210000
+                                                          'CILA',       01220000
+                                                          'CILT'.       01230000
+               88  PC-KOHLS-QA-SYSTEM               VALUE 'CIQA',       01240000
+                                                          'CIQT'.       01250000
+               88  PC-KOHLS-LEARNING-SYSTEM         VALUE 'CILA',       01260000
+                                                          'CILT'.       01270000
+               88  PC-KOHLS-PROD-SYSTEM             VALUE 'CIPS',       01280000
+                                                          'CIP1',       01290000
+                                                          'CIP3',       01300000
+                                                          'CIP4',       01310000
+                                                          'CIP6'.       01320000
+                                                                        01330000
+       01  PS-PROGRAM-SWITCHES.                                         01340000
+           05  PS-DB-ERROR-SW            PIC X(01)  VALUE 'N'.          01350000
+               88  PS-DB-ERROR                      VALUE 'Y'.          01360000
+               88  PS-NO-DB-ERROR                   VALUE 'N'.          01370000
+           05  PS-ERROR-SW               PIC X(01)  VALUE SPACE.        01380000
+               88  PS-MQ-ERROR                      VALUE 'M'.          01390000
+               88  PS-DB2-ERROR                     VALUE 'D'.          01400000
+           05  PS-STYL-SKU-UPC-SW        PIC X(01)  VALUE SPACE.        01410000
+               88  PS-STYL-SKU-PROCESS              VALUE 'S'.          01420000
+               88  PS-STYL-SKU-END                  VALUE 'E'.          01430000
+               88  PS-UPC-PROCESS                   VALUE 'U'.          01440000
+               88  PS-UPC-END                       VALUE 'F'.          01450000
+           05  PS-SKU-STYL-DLT-SW        PIC X(01)  VALUE 'N'.          01460000
+               88  PS-SKU-STYL-DLT-FOUND            VALUE 'Y'.          01470000
+               88  PS-SKU-STYL-DLT-NOT-FOUND        VALUE 'N'.          01480000
+           05  PS-DUPLICATE-SW           PIC X(01)  VALUE 'N'.          01490000
+               88  PS-DUPLICATE-FOUND               VALUE 'Y'.          01500000
+               88  PS-DUPLICATE-NOT-FOUND           VALUE 'N'.          01510000
+           05  PS-FETCH-DEADLOCK-SW      PIC X(01)  VALUE 'N'.          01520000
+               88  PS-FETCH-DEADLOCK                VALUE 'Y'.          01530000
+               88  PS-NOT-FETCH-DEADLOCK            VALUE 'N'.          01540000
+           05  PS-MQGET-SUCCESSFUL-SW    PIC X(01)  VALUE 'Y'.          01550000
+               88  PS-MQGET-SUCCESSFUL              VALUE 'Y'.          01560000
+               88  PS-MQGET-NOT-SUCCESSFUL          VALUE 'N'.          01570000
+           05  PS-MQPUT-SUCCESSFUL-SW    PIC X(01)  VALUE 'Y'.          01580000
+               88  PS-MQPUT-SUCCESSFUL              VALUE 'Y'.          01590000
+               88  PS-MQPUT-NOT-SUCCESSFUL          VALUE 'N'.          01600000
+           05  PS-MQ-ERROR-Q-OPEN-SW     PIC X(01)  VALUE 'N'.          01610000
+               88  PS-MQ-ERROR-Q-OPEN               VALUE 'Y'.          01620000
+               88  PS-MQ-ERROR-Q-NOT-OPEN           VALUE 'N'.          01630000
+           05  PS-INTERNAL-READER-ENQ-DEQ-IND                           01640000
+                                         PIC X(1)   VALUE 'D'.          01650000
+               88  PS-INTERNAL-READER-ENQUEUED      VALUE 'E'.          01660000
+               88  PS-INTERNAL-READER-DEQUEUED      VALUE 'D'.          01670000
+                                                                        01680000
+       01  PV-PROGRAM-VARIABLES.                                        01690000
+           05  PV-HCONN                  PIC S9(9)  VALUE +0 COMP.      01700000
+           05  PV-ER-HCONN               PIC S9(9)  VALUE +0 COMP.      01710000
+           05  PV-HANDLE                 PIC S9(9)  VALUE +0 COMP.      01720000
+           05  PV-ER-HANDLE              PIC S9(9)  VALUE +0 COMP.      01730000
+           05  PV-OPEN-OPTIONS           PIC S9(9)  VALUE +0 COMP.      01740000
+           05  PV-COMPLETION-CODE        PIC S9(9)  VALUE +0 COMP.      01750000
+           05  PV-REASON                 PIC S9(9)  VALUE +0 COMP.      01760000
+           05  PV-MQGET-COUNTER          PIC S9(9)  VALUE +0 COMP.      01770000
+           05  PV-MQPUT-COUNTER          PIC S9(9)  VALUE +0 COMP.      01780000
+           05  PV-DATA-LENGTH            PIC S9(9)  VALUE +0 COMP.      01790000
+           05  PV-FETCH-DEADLOCK-COUNT   PIC S9(9)  VALUE +0 COMP.      01800000
+           05  PV-UPC-ID                 PIC S9(9)  VALUE +0 COMP.      01810000
+           05  PV-VS-ID                  PIC S9(9)  VALUE +0 COMP.      01820000
+           05  PV-SAVE-COMPLETION-CODE   PIC S9(9)  VALUE +0 COMP.      01830000
+           05  PV-SAVE-REASON            PIC S9(9)  VALUE +0 COMP.      01840000
+           05  PV-CICS-RESPONSE          PIC S9(4)  VALUE +0 COMP.      01850000
+           05  PV-COMMAREA-LENGTH              PIC S9(04)  VALUE +0     01851099
+                                                           COMP SYNC.   01852099
+           05  PV-RETRY-COUNT            PIC S9(4)  VALUE +0 COMP.      01860000
+           05  PV-MSG-TXT-NULL-IND       PIC S9(4)  VALUE +0 COMP.      01870000
+           05  PV-END-TMST-NULL-IND      PIC S9(4)  VALUE +0 COMP.      01880000
+           05  PV-UPC-STAT-NULL-IND      PIC S9(4)  VALUE +0 COMP.      01890000
+           05  PV-UPC-COST-NULL-IND      PIC S9(4)  VALUE +0 COMP.      01900000
+           05  PV-UPC-RTL-NULL-IND       PIC S9(4)  VALUE +0 COMP.      01910000
+           05  PV-MEITGP-NULL-IND        PIC S9(4)  VALUE +0 COMP.      01920000
+           05  PV-CLR-DTE-NULL-IND       PIC S9(4)  VALUE +0 COMP.      01930000
+           05  PV-MKDN-CDE-NULL-IND      PIC S9(4)  VALUE +0 COMP.      01940000
+           05  PV-DB2-OPERATION          PIC X(50)  VALUE SPACES.       01950000
+           05  PV-DB2-KEY-INFO           PIC X(50)  VALUE SPACES.       01960000
+           05  PV-DB2-TABLE-1            PIC X(50)  VALUE SPACES.       01970000
+           05  PV-PARAGRAPH              PIC X(48)  VALUE SPACES.       01980000
+           05  PV-CURRENT-SYSID          PIC X(4)   VALUE SPACES.       01990000
+           05  PV-CURRENT-TIMESTAMP      PIC X(26)  VALUE SPACES.       02000000
+           05  PV-BEGIN-TIMESTAMP        PIC X(26)  VALUE SPACES.       02010000
+           05  PV-COMMIT-TIMESTAMP       PIC X(26)  VALUE SPACES.       02020000
+           05  PV-ERROR.                                                02030000
+               10  PV-ERROR-LITERAL      PIC X(14)  VALUE SPACES.       02040000
+               10  PV-ERROR-VARIABLE     PIC X(34)  VALUE SPACES.       02050000
+           05  PV-MSGBUFFER              PIC X(450) VALUE SPACES.       02060000
+           05  PV-CICS-RESP              PIC S9(04) VALUE +0            02061099
+                                                           COMP SYNC.   02062099
+           05  PV-CICS-MSG-AREA          PIC  X(80) VALUE SPACE.        02063099
+           05  PV-ER-MSGBUFFER           PIC X(500) VALUE SPACES.       02070000
+           05  PV-SAVE-PARAGRAPH         PIC X(48)  VALUE SPACES.       02080000
+           05  PV-CICS-ID.                                              02090000
+               10  PV-FIRST-4            PIC X(4)   VALUE SPACES.       02100000
+               10  PV-CICS-REGION-TYPE   PIC X      VALUE SPACE.        02110000
+                   88  PV-CICS-REGION-PRODUCTION    VALUE 'P'.          02120000
+                   88  PV-CICS-REGION-ACCEPTANCE    VALUE 'A'.          02130000
+                   88  PV-CICS-REGION-QUALITY       VALUE 'Q'.          02140000
+                   88  PV-CICS-REGION-LEARNING      VALUE 'L'.          02150000
+                   88  PV-CICS-REGION-TEST          VALUE 'T'.          02160000
+                   88  PV-CICS-REGION-SYSTEST       VALUE 'S'.          02170000
+               10  PV-CICS-REGION-CODE   PIC X      VALUE SPACES.       02180000
+               10  PV-LAST-2             PIC X(2)   VALUE SPACES.       02190000
+                                                                        02200000
+      *  HAVE TO DEFINE INTR-UPC-ID AS 10 DIGITS BECAUSE S9(9) CAN      02210000
+      *  ACTUALLY HOLD 10 DIGITS UP TO A CERTAIN POINT.                 02220000
+                                                                        02230000
+       01  PV-INTR-UPC-ID                PIC S9(10) COMP VALUE ZEROES.  02240000
+       01  FILLER REDEFINES PV-INTR-UPC-ID.                             02250000
+           05  FILLER                    PIC X(04).                     02260000
+           05  PV-INTR-UPC-ID-4          PIC X(04).                     02270000
+           05  PV-INTR-UPC-ID-SPC        REDEFINES PV-INTR-UPC-ID-4     02280000
+                                         PIC S9(9)  COMP.               02290000
+PE6084 01  PV-UPC-ID-I              PIC S9(10) COMP VALUE ZEROES.       02301000
+PE6084 01  FILLER REDEFINES PV-UPC-ID-I.                                02302000
+PE6084     05  FILLER                    PIC X(04).                     02303000
+PE6084     05  PV-UPC-ID-4          PIC X(04).                          02304000
+PE6084     05  PV-UPC-ID-SPC        REDEFINES PV-UPC-ID-4               02305000
+                                         PIC S9(9)  COMP.               02306000
+       01  PV-DT-DATE-TIME-AREA.                                        02310000
+           05  PV-DT-CURRENT-ABSTIME     PIC S9(15) VALUE +0 COMP-3.    02320000
+           05  PV-DT-FORMAT-DATE-MMDDYY  PIC X(8)   VALUE SPACES.       02330000
+           05  PV-DT-CURRENT-TIME        PIC X(8)   VALUE SPACES.       02340000
+                                                                        02350000
+                                                                        02360000
+                                                                        02370000
+       01  TD-TRANSIENT-DATA-AREA.                                      02380000
+           05  TD-QUEUE-NAME-LENGTH      PIC S9(4)  VALUE +4  COMP.     02390000
+           05  TD-JCL-LINE-LENGTH        PIC S9(4)  VALUE +80 COMP.     02400000
+           05  TD-QUEUE-NAME             PIC X(4)   VALUE 'IRTD'.       02410000
+           05  TD-JCL-LINE               PIC X(80)  VALUE SPACES.       02420000
+                                                                        02430000
+      ******************************************************************02440000
+      *  JCL LINES FOR THE VSM BRIDGE TO ITEM HUB SHUTDOWN JOB          02450000
+      ******************************************************************02460000
+       01  JL-JCL-LINE-AREA.                                            02470000
+           05  JL-JCL-LINE-1P.                                          02480000
+               10  FILLER              PIC X(21)    VALUE               02490000
+                   '//INK960   JOB KOHLS,'.                             02500000
+               10  FILLER              PIC X(1)     VALUE QUOTE.        02510000
+               10  FILLER              PIC X(20)    VALUE               02520000
+                   'SKU DELETE ERROR MSG'.                              02530000
+               10  FILLER              PIC X(1)     VALUE QUOTE.        02540000
+               10  FILLER              PIC X(19)    VALUE               02550000
+                   ',CLASS=P,MSGCLASS=P'.                               02560000
+               10  FILLER              PIC X(18)    VALUE SPACES.       02570000
+           05  JL-JCL-LINE-1L.                                          02580000
+               10  FILLER              PIC X(21)    VALUE               02590000
+                   '//TKMAB17L JOB KOHLS,'.                             02600000
+               10  FILLER              PIC X(1)     VALUE QUOTE.        02610000
+               10  FILLER              PIC X(20)    VALUE               02620000
+                   'SKU DELETE ERROR MSG'.                              02630000
+               10  FILLER              PIC X(1)     VALUE QUOTE.        02640000
+               10  FILLER              PIC X(19)    VALUE               02650000
+                   ',CLASS=A,MSGCLASS=X'.                               02660000
+               10  FILLER              PIC X(18)    VALUE SPACES.       02670000
+           05  JL-JCL-LINE-1Q.                                          02680000
+               10  FILLER              PIC X(21)    VALUE               02690000
+S28545*            '//TKMAB17Q JOB KOHLS,'.                             02700000
+S28545             '//TKMA372Q JOB KOHLS,'.                             02710000
+               10  FILLER              PIC X(1)     VALUE QUOTE.        02720000
+               10  FILLER              PIC X(20)    VALUE               02730000
+                   'SKU DELETE ERROR MSG'.                              02740000
+               10  FILLER              PIC X(1)     VALUE QUOTE.        02750000
+               10  FILLER              PIC X(19)    VALUE               02760000
+                   ',CLASS=A,MSGCLASS=X'.                               02770000
+               10  FILLER              PIC X(18)    VALUE SPACES.       02780000
+           05  JL-JCL-LINE-1T.                                          02790000
+               10  FILLER              PIC X(21)    VALUE               02800000
+S28545*            '//TKMAB17T JOB KOHLS,'.                             02810000
+S28545             '//TKMA372T JOB KOHLS,'.                             02820000
+               10  FILLER              PIC X(1)     VALUE QUOTE.        02830000
+               10  FILLER              PIC X(20)    VALUE               02840000
+                   'SKU DELETE ERROR MSG'.                              02850000
+               10  FILLER              PIC X(1)     VALUE QUOTE.        02860000
+               10  FILLER              PIC X(19)    VALUE               02870000
+                   ',CLASS=A,MSGCLASS=X'.                               02880000
+               10  FILLER              PIC X(18)    VALUE SPACES.       02890000
+           05  JL-JCL-LINE-2.                                           02900000
+               10  FILLER              PIC X(13)    VALUE               02910000
+                   '/*JOBPARM K=0'.                                     02920000
+               10  FILLER              PIC X(67)    VALUE SPACES.       02930000
+           05  JL-JCL-LINE-3P.                                          02940000
+               10  FILLER              PIC X(42)    VALUE               02950000
+                   '//PS010    EXEC SMTPPROC,TO=''IS-IN-ALERT'','.      02960000
+               10  FILLER              PIC X(38)    VALUE SPACES.       02970000
+           05  JL-JCL-LINE-3T.                                          02980000
+               10  FILLER              PIC X(47)    VALUE               02990000
+S28545*            '//PS010    EXEC SMTPPROC,TO=''JOHN.SELWITSCHKA'','. 03000000
+S28545             '//PS010    EXEC SMTPPROC,TO=''SCOTT.JACKSON'','.    03010000
+               10  FILLER              PIC X(33)    VALUE SPACES.       03020000
+           05  JL-JCL-LINE-SUBJECT.                                     03030000
+               10  FILLER              PIC X(50)    VALUE               03040000
+               '//       SUBJECT=''INKCS060 SKU STYL DELETE ERROR'','.  03050000
+               10  FILLER              PIC X(30)    VALUE SPACES.       03060000
+           05  JL-JCL-LINE-JOBNAME.                                     03070000
+               10  FILLER              PIC X(24)    VALUE               03080000
+               '//       JOBNAME=''CICS'','.                            03090000
+               10  FILLER              PIC X(56)    VALUE SPACES.       03100000
+           05  JL-JCL-LINE-MSG1-MQ.                                     03110000
+               10  FILLER              PIC X(24)    VALUE               03120000
+                  '//       MSG1=''MQ ERROR '.                          03130000
+               10  JL-JCL-MSG1-MQ-CC   PIC ZZZZZZZZ9 VALUE ZERO.        03140000
+               10  FILLER              PIC X(11)    VALUE ' PARAGRAPH '.03150000
+               10  JL-JCL-MQ-PARAGRAPH PIC X(04)    VALUE SPACES.       03160000
+               10  FILLER              PIC X(01)    VALUE QUOTE.        03170000
+               10  FILLER              PIC X(01)    VALUE ','.          03180000
+               10  FILLER              PIC X(30)    VALUE SPACES.       03190000
+           05  JL-JCL-LINE-MSG1-DB2.                                    03200000
+               10  FILLER              PIC X(23)    VALUE               03210000
+                  '//       MSG1=''SQLCODE '.                           03220000
+               10  JL-JCL-MSG1-SQLCODE PIC ----9    VALUE ZERO.         03230000
+               10  FILLER              PIC X(11)    VALUE ' PARAGRAPH '.03240000
+               10  JL-JCL-PARAGRAPH    PIC X(04)    VALUE SPACES.       03250000
+               10  FILLER              PIC X(01)    VALUE QUOTE.        03260000
+               10  FILLER              PIC X(01)    VALUE ','.          03270000
+               10  FILLER              PIC X(35)    VALUE SPACES.       03280000
+           05  JL-JCL-LINE-MSG2.                                        03290000
+               10  JL-JCL-MSG2         PIC X(50)    VALUE               03300000
+                  '//       MSG2=''REFER TO JOB INK061 RPT ID INK06105'.03310000
+               10  FILLER              PIC X(01)    VALUE QUOTE.        03320000
+               10  FILLER              PIC X(29)    VALUE SPACES.       03330000
+           05  JL-JCL-LINE-EOF.                                         03340000
+               10  FILLER              PIC X(5)     VALUE '/*EOF'.      03350000
+               10  FILLER              PIC X(75)    VALUE SPACES.       03360000
+                                                                        03370000
+      *    API CONTROL BLOCKS                                           03380000
+                                                                        03390000
+       01  MQM-OBJECT-DESCRIPTOR.                                       03400000
+           COPY CMQODV.                                                 03410000
+       01  MQM-MESSAGE-DESCRIPTOR.                                      03420000
+           COPY CMQMDV.                                                 03430000
+       01  MQM-GET-MESSAGE-OPTIONS.                                     03440000
+           COPY CMQGMOV.                                                03450000
+       01  MQM-PUT-MESSAGE-OPTIONS.                                     03460000
+           COPY CMQPMOV.                                                03470000
+                                                                        03480000
+      *    MQV CONTAINS CONSTANTS (FOR FILLING IN THE CONTROL BLOCKS)   03490000
+      *    AND RETURN CODES (FOR TESTING THE RESULT OF A CALL)          03500000
+                                                                        03510000
+       01  MQM-CONSTANTS.                                               03520000
+           COPY CMQV.                                                   03530000
+                                                                        03540000
+       01  MQ-WORKING-STORAGE.                                          03550000
+           05  WS-MQOPEN               PIC X(8)  VALUE 'CSQCOPEN'.      03560000
+           05  WS-MQGET                PIC X(8)  VALUE 'CSQCGET '.      03570000
+           05  WS-MQPUT                PIC X(8)  VALUE 'CSQCPUT '.      03580000
+           05  WS-MQCMIT               PIC X(8)  VALUE 'CSQCCOMM'.      03590000
+           05  WS-MQBACK               PIC X(8)  VALUE 'CSQCBACK'.      03600000
+           05  WS-MQCLOSE              PIC X(8)  VALUE 'CSQCCLOS'.      03610000
+           05  WS-MQCHECK              PIC X(8)  VALUE 'MQR2C   '.      03620000
+                                                                        03630000
+       01  PE-PROGRAM-ERROR-MESSAGES.                                   03640000
+      *        MQ CALL ERROR MESSAGES                                   03650000
+           05  PE-MQ-ERROR-MESSAGE.                                     03660000
+               10  FILLER                   PIC X(19) VALUE             03670000
+                                      'MQ ERROR FOR CALL: '.            03680000
+               10  PE-MQ-CALL-TYPE          PIC X(7)  VALUE SPACES.     03690000
+                   88  PE-MQ-OPEN                     VALUE 'MQOPEN '.  03700000
+                   88  PE-MQ-GET                      VALUE 'MQGET  '.  03710000
+                   88  PE-MQ-PUT                      VALUE 'MQPUT  '.  03720000
+                   88  PE-MQ-CLOSE                    VALUE 'MQCLOSE'.  03730000
+               10  FILLER                   PIC X(02) VALUE SPACES.     03740000
+               10  FILLER                   PIC X(11) VALUE             03750000
+                                              'COMP CODE: '.            03760000
+               10  PE-MQ-COMPLETION-CODE    PIC 9(09) VALUE ZEROS.      03770000
+               10  FILLER                   PIC X(02) VALUE SPACES.     03780000
+               10  FILLER                   PIC X(13) VALUE             03790000
+                                            'REASON CODE: '.            03800000
+               10  PE-MQ-REASON-CODE        PIC 9(09) VALUE ZEROS.      03810000
+           05  PE-MQ-REASON-MESSAGE.                                    03820000
+               10  FILLER                   PIC X(18) VALUE 'REASON: '. 03830000
+               10  PE-MQ-REASON-TEXT        PIC X(30) VALUE SPACES.     03840000
+                                                                        03850000
+       01  AA-DB2-ERROR-FIELDS.                                         03860000
+           05  AA-DB2-OPERATION-LIT.                                    03870000
+               10  FILLER              PIC  X(17)  VALUE                03880000
+                   '***** OPERATION: '.                                 03890000
+               10  AA-DB2-OPERATION.                                    03900000
+                   15  AA-DB2-OP-1     PIC  X(25)  VALUE SPACES.        03910000
+           05  AA-DB2-TABLE-1          PIC  X(18)  VALUE SPACES.        03920000
+                                                                        03930000
+      ***************************************************************** 03940000
+      *    ABEND PROCESSING COPYBOOK.                                   03950000
+      ***************************************************************** 03960000
+           COPY DPWS013.                                                03970000
+                                                                        03980000
+      ***************************************************************** 03990000
+      *  LEGACY ITEM MAINTENANCE INFO COPYBOOK                          04000000
+      ******************************************************************04010000
+           COPY IMRD008.                                                04020000
+                                                                        04030000
+      ******************************************************************04040000
+      *  UPC TABLE                                                      04050000
+      ******************************************************************04060000
+                                                                        04070000
+           EXEC SQL                                                     04080000
+               INCLUDE TUPC                                             04090000
+           END-EXEC.                                                    04100000
+                                                                        04110000
+      ******************************************************************04120000
+      *  UPC PHYSICAL LOCATION STATUS TABLE                             04130000
+      ******************************************************************04140000
+                                                                        04150000
+           EXEC SQL                                                     04160000
+               INCLUDE TUPCPLS                                          04170000
+           END-EXEC.                                                    04180000
+                                                                        04190000
+      ***************************************************************** 04200000
+      *  SKU / STYLE DELETE TABLE                                       04210000
+      ***************************************************************** 04220000
+                                                                        04230000
+           EXEC SQL                                                     04240000
+               INCLUDE INT00003                                         04250000
+           END-EXEC.                                                    04260000
+                                                                        04270000
+      ***************************************************************** 04280000
+      * DB2 CHECKPOINT RESTART CONTROL TABLE                            04290000
+      ***************************************************************** 04300000
+           EXEC SQL                                                     04310000
+               INCLUDE TCKRSTCN                                         04320000
+           END-EXEC.                                                    04330000
+                                                                        04340000
+      ***************************************************************** 04350000
+      * DB2 CHECKPOINT RESTART INFORMATION TABLE                        04360000
+      ***************************************************************** 04370000
+           EXEC SQL                                                     04380000
+               INCLUDE TCKRSTIN                                         04390000
+           END-EXEC.                                                    04400000
+                                                                        04410000
+      ******************************************************************04420000
+      *    DB2 COMMUNICATION AREA                                       04430000
+      ******************************************************************04440000
+                                                                        04450000
+           EXEC SQL                                                     04460000
+               INCLUDE SQLCA                                            04470000
+           END-EXEC.                                                    04480000
+                                                                        04490000
+      ******************************************************************04500000
+      *  STYLE / SKU CURSOR                                             04510000
+      *-----------------------------------------------------------------04520000
+      *  THIS CURSOR IS USED BY THE STYLE SKU DELETE PROCESS TO         04530000
+      *  OBTAIN ALL UPC'S TO BE LOADED TO THE SKU STYLE DELETE TABLE    04540000
+      *  FOR A SKU/STYLE DELETE (EVENT 31).                             04550000
+      *  THE ORDER BY CLAUSE IS NECESSARY TO PROCESS ALL MESSAGES       04560000
+      *  IN THE CORRECT ORDER.                                          04570000
+      ******************************************************************04580000
+           EXEC SQL                                                     04590000
+               DECLARE STYL_SKU_CSR CURSOR WITH HOLD FOR                04600000
+               SELECT A.INTR_UPC_ID                                     04610000
+                    , A.UPC_ID                                          04620000
+                    , A.UPC_NBR                                         04630000
+                    , A.SUB_CL_MDSEAR_ID                                04640000
+                    , A.VS_ID                                           04650000
+                    , B.STR_NBR                                         04660000
+                    , B.EFF_BEG_TMST                                    04670000
+                    , B.EFF_END_TMST                                    04680000
+                    , B.UPC_STAT_CDE                                    04690000
+                    , B.UNT_COST_AMT                                    04700000
+                    , B.UNT_RTL_AMT                                     04710000
+                    , B.MEITGP_NBR                                      04720000
+                    , B.ITM_NBR                                         04730000
+                    , B.UPC_STAT_CHG_DTE                                04740000
+                    , B.UNT_RTL_CHG_DTE                                 04750000
+                    , B.ORIG_CLR_DTE                                    04760000
+                    , B.MKDN_CDE                                        04770000
+               FROM TUPC A,                                             04780000
+                    TUPCPLS B                                           04790000
+               WHERE A.INTR_UPC_ID = B.UPC_ID                           04800000
+                 AND A.INTR_UPC_ID = :PV-INTR-UPC-ID-SPC                04810000
+               ORDER BY A.VS_ID                                         04820000
+           END-EXEC.                                                    04830000
+                                                                        04840000
+      ******************************************************************04850000
+      *  UPC CURSOR                                                     04860000
+      *-----------------------------------------------------------------04870000
+      *  THIS CURSOR IS USED BY THE STYLE SKU DELETE PROCESS TO         04880000
+      *  OBTAIN ALL UPC'S TO BE LOADED TO THE SKU STYLE DELETE TABLE    04890000
+      *  FOR A VENDOR UPC DELETE (EVENT 120).                           04900000
+      *  THE ORDER BY CLAUSE IS NECESSARY TO PROCESS ALL MESSAGES       04910000
+      *  IN THE CORRECT ORDER.                                          04920000
+      ******************************************************************04930000
+           EXEC SQL                                                     04940000
+               DECLARE UPC_CSR CURSOR WITH HOLD FOR                     04950000
+               SELECT A.INTR_UPC_ID                                     04960000
+                    , A.UPC_ID                                          04970000
+                    , A.UPC_NBR                                         04980000
+                    , A.SUB_CL_MDSEAR_ID                                04990000
+                    , A.VS_ID                                           05000000
+                    , B.STR_NBR                                         05010000
+                    , B.EFF_BEG_TMST                                    05020000
+                    , B.EFF_END_TMST                                    05030000
+                    , B.UPC_STAT_CDE                                    05040000
+                    , B.UNT_COST_AMT                                    05050000
+                    , B.UNT_RTL_AMT                                     05060000
+                    , B.MEITGP_NBR                                      05070000
+                    , B.ITM_NBR                                         05080000
+                    , B.UPC_STAT_CHG_DTE                                05090000
+                    , B.UNT_RTL_CHG_DTE                                 05100000
+                    , B.ORIG_CLR_DTE                                    05110000
+                    , B.MKDN_CDE                                        05120000
+               FROM TUPC A,                                             05130000
+                    TUPCPLS B                                           05140000
+               WHERE A.INTR_UPC_ID = B.UPC_ID                           05150000
+                 AND A.UPC_NBR = :UPC-UPC-NBR                           05160000
+               ORDER BY A.VS_ID                                         05170000
+           END-EXEC.                                                    05180000
+                                                                        05190000
+                                                                        05200000
+       LINKAGE SECTION.                                                 05210000
+                                                                        05220000
+       01 DFHCOMMAREA                 PIC X(01).                        05230000
+                                                                        05240000
+      ******************************************************************05250000
+       PROCEDURE DIVISION.                                              05260000
+      ******************************************************************05270000
+                                                                        05280000
+       0000-MAINLINE.                                                   05290000
+                                                                        05300000
+           PERFORM 1000-INITIALIZE.                                     05310000
+                                                                        05320000
+           IF PS-NO-DB-ERROR                                            05330000
+               PERFORM 2000-PROCESS-MESSAGES                            05340000
+                   UNTIL PS-MQGET-NOT-SUCCESSFUL                        05350000
+           END-IF.                                                      05360000
+                                                                        05370000
+           PERFORM 9000-END-ROUTINE.                                    05380000
+                                                                        05390000
+                                                                        05400000
+      ******************************************************************05410000
+      *    INITIALIZE VARIABLES, PERFORM MQ SETUP, GET COMMIT INFO,     05420000
+      *    GET FIRST MESSAGE.  PREPARE CHECKPOINT RESTART TABLES FOR    05430000
+      *    PROCESSING / RESTART.  TCKRSTCNTL-CKPT-STAT-CODE = '9'       05440000
+      *    INDICATES A RESTART CONDITION.                               05450000
+      ******************************************************************05460000
+       1000-INITIALIZE.                                                 05470000
+                                                                        05480000
+           SET PS-NO-DB-ERROR TO TRUE.                                  05490000
+           SET PS-MQGET-SUCCESSFUL TO TRUE.                             05500000
+           PERFORM 1500-MQ-SETUP.                                       05510000
+           PERFORM 7400-INIT-CHECKPOINT-SELECT                          05520000
+           IF TCKRSTCNTL-CKPT-STAT-CODE = '9'                           05530000
+               PERFORM 7500-SELECT-RESTART-INFO                         05540000
+           ELSE                                                         05550000
+               PERFORM 4100-SET-BEGIN-TIMESTAMP                         05560000
+               PERFORM 8600-MQGET-MSG                                   05570000
+               PERFORM 7800-UPDATE-TCKRSTINF                            05580000
+               MOVE '9' TO TCKRSTCNTL-CKPT-STAT-CODE                    05590000
+               PERFORM 7900-UPDATE-TCKRSTCNTL                           05600000
+               PERFORM 4500-DB2-MQ-COMMIT                               05610000
+           END-IF.                                                      05620000
+                                                                        05630000
+                                                                        05640000
+      ******************************************************************05650000
+      *    CONNECT TO THE QUEUE MANAGER AND OPEN THE IN.ITEM.MESSAGE.Q  05660000
+      *    QUEUE FOR INPUT                                              05670000
+      ******************************************************************05680000
+       1500-MQ-SETUP.                                                   05690000
+                                                                        05700000
+           EXEC CICS                                                    05710000
+               ASSIGN SYSID (PV-CURRENT-SYSID)                          05720000
+           END-EXEC.                                                    05730000
+                                                                        05740000
+           MOVE PV-CURRENT-SYSID TO PC-SYS-ID.                          05750000
+                                                                        05760000
+           IF PC-KOHLS-PROD-SYSTEM                                      05770000
+               SET PC-PROD-QMGR-NAME     TO TRUE                        05780000
+               SET PC-XS-PROD-QMGR-NAME  TO TRUE                        05790000
+               SET PC-PROD-CORREL-ID     TO TRUE                        05800000
+           ELSE                                                         05810000
+               IF PC-KOHLS-LEARNING-SYSTEM                              05820000
+                   SET PC-LEARN-QMGR-NAME    TO TRUE                    05830000
+                   SET PC-XS-LEARN-QMGR-NAME TO TRUE                    05840000
+                   SET PC-LEARN-CORREL-ID    TO TRUE                    05850000
+               ELSE                                                     05860000
+                   IF PC-KOHLS-QA-SYSTEM                                05870000
+                       SET PC-QA-QMGR-NAME    TO TRUE                   05880000
+                       SET PC-XS-QA-QMGR-NAME TO TRUE                   05890000
+                       SET PC-QA-CORREL-ID    TO TRUE                   05900000
+                   ELSE                                                 05910000
+                       SET PC-TEST-QMGR-NAME    TO TRUE                 05920000
+                       SET PC-XS-TEST-QMGR-NAME TO TRUE                 05930000
+                       SET PC-TEST-CORREL-ID    TO TRUE                 05940000
+                   END-IF                                               05950000
+               END-IF                                                   05960000
+           END-IF.                                                      05970000
+                                                                        05980000
+                                                                        05990000
+      *---------------------------------------------------------------* 06000000
+      *    OPEN THE IN.ITEM.MESSAGE.Q QUEUE FOR INPUT                   06010000
+      *---------------------------------------------------------------* 06020000
+                                                                        06030000
+           COMPUTE PV-OPEN-OPTIONS = MQOO-INPUT-SHARED +                06040000
+                                  MQOO-FAIL-IF-QUIESCING.               06050000
+           MOVE MQOT-Q                         TO MQOD-OBJECTTYPE.      06060000
+           MOVE PC-QNAME                       TO MQOD-OBJECTNAME.      06070000
+           MOVE PC-XS-QMGR-NAME                TO MQOD-OBJECTQMGRNAME.  06080000
+      *                                                                 06090000
+      *                                                                 06100000
+           CALL WS-MQOPEN USING PV-HCONN                                06110000
+                                MQM-OBJECT-DESCRIPTOR                   06120000
+                                PV-OPEN-OPTIONS                         06130000
+                                PV-HANDLE                               06140000
+                                PV-COMPLETION-CODE                      06150000
+                                PV-REASON.                              06160000
+      *                                                                 06170000
+      *                                                                 06180000
+      *    IF OPEN FAILED THEN DISPLAY ERROR MESSAGE                    06190000
+      *    AND EXIT.                                                    06200000
+      *                                                                 06210000
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK)                        06220000
+               MOVE PV-COMPLETION-CODE TO JL-JCL-MSG1-MQ-CC             06230000
+               MOVE '1500-MQ-SETUP'    TO PV-PARAGRAPH                  06240000
+                                          JL-JCL-MQ-PARAGRAPH           06250000
+               SET PS-MQ-ERROR         TO TRUE                          06260000
+               PERFORM 5000-SUBMIT-EMAIL-JOB                            06270000
+               SET PE-MQ-OPEN TO TRUE                                   06280000
+               PERFORM 9900-DISPLAY-MQ-ERROR                            06290000
+           END-IF.                                                      06300000
+                                                                        06310000
+                                                                        06320000
+      ******************************************************************06330000
+      *    OPEN THE IN.ITEM.ERROR.Q QUEUE FOR OUTPUT                    06340000
+      ******************************************************************06350000
+      *1600-OPEN-MQ-ERROR-QUEUE.                                        06360099
+      *                                                                 06370099
+      *    COMPUTE PV-OPEN-OPTIONS = MQOO-OUTPUT +                      06380099
+      *                           MQOO-FAIL-IF-QUIESCING +              06390099
+      *                           MQOO-SET-IDENTITY-CONTEXT.            06400099
+      *    MOVE MQOT-Q                         TO MQOD-OBJECTTYPE.      06410099
+      *    MOVE PC-ERROR-QNAME                 TO MQOD-OBJECTNAME.      06420099
+      *    MOVE PC-XS-QMGR-NAME                TO MQOD-OBJECTQMGRNAME.  06430099
+      *                                                                 06440000
+      *                                                                 06450000
+      *    CALL WS-MQOPEN USING PV-ER-HCONN                             06460099
+      *                         MQM-OBJECT-DESCRIPTOR                   06470099
+      *                         PV-OPEN-OPTIONS                         06480099
+      *                         PV-ER-HANDLE                            06490099
+      *                         PV-COMPLETION-CODE                      06500099
+      *                         PV-REASON.                              06510099
+      *                                                                 06520000
+      *                                                                 06530000
+      *    IF OPEN FAILED THEN DISPLAY ERROR MESSAGE                    06540000
+      *    AND EXIT.                                                    06550000
+      *                                                                 06560000
+      *    IF (PV-COMPLETION-CODE NOT = MQCC-OK)                        06570099
+      *        MOVE PV-COMPLETION-CODE TO JL-JCL-MSG1-MQ-CC             06580099
+      *        MOVE '1600-OPEN-MQ-ERROR-QUEUE' TO PV-PARAGRAPH          06590099
+      *                                   JL-JCL-MQ-PARAGRAPH           06600099
+      *        SET PS-MQ-ERROR         TO TRUE                          06610099
+      *        PERFORM 5000-SUBMIT-EMAIL-JOB                            06620099
+      *        SET PE-MQ-OPEN TO TRUE                                   06630099
+      *        PERFORM 9900-DISPLAY-MQ-ERROR                            06640099
+      *    ELSE                                                         06650099
+      *        SET PS-MQ-ERROR-Q-OPEN  TO TRUE                          06660099
+      *    END-IF.                                                      06670099
+                                                                        06680000
+                                                                        06690000
+      ******************************************************************06700000
+      *  PROCESS INVENTORY SKU / STYLE DELETE MESSAGES.                 06710000
+      *  THREE TYPES OF EVENTS ARE PROCESSED: EVENT 31 (SKU/STYL        06720000
+      *  DELETES), EVENT 120 (VENDOR UPC DELETE), AND EVENT 125         06730000
+      *  (VENDOR UPC NUMBER WHERE THE PLU_DWNLD_IND IS 'N').            06740000
+      ******************************************************************06750000
+       2000-PROCESS-MESSAGES.                                           06760000
+                                                                        06770000
+           INITIALIZE DCLTUPC                                           06780000
+                      DCLTUPCPLS                                        06790000
+                      PV-INTR-UPC-ID.                                   06800000
+           SET PS-NO-DB-ERROR TO TRUE.                                  06810000
+                                                                        06820000
+           EVALUATE TRUE                                                06830000
+             WHEN IM008-BUS-EVENT-STYLE-SKU-DEL                         06840000
+                 SET PS-STYL-SKU-PROCESS TO TRUE                        06850000
+                 MOVE IM008-ITEM-KEY-INTR-UPC-ID                        06860000
+                   TO PV-INTR-UPC-ID                                    06870000
+                 PERFORM 2100-OPEN-STYL-SKU-CSR                         06880000
+                 PERFORM 2110-FETCH-STYL-SKU-CSR                        06890000
+                   UNTIL UPC-VS-ID = IM008-ITEM-KEY-VS-ID               06900000
+                      OR SQLCODE   = +100                               06910000
+                      OR PS-STYL-SKU-END                                06920000
+                 MOVE UPC-VS-ID TO PV-VS-ID                             06930000
+                 PERFORM 2200-PROCESS-UPCS                              06940000
+                   UNTIL PS-STYL-SKU-END                                06950000
+                      OR SQLCODE   = +100                               06960000
+                 PERFORM 2120-CLOSE-STYL-SKU-CSR                        06970000
+             WHEN IM008-BUS-EVENT-UPC-DELETE                            06980000
+                 SET PS-UPC-PROCESS      TO TRUE                        06990000
+                 MOVE IM008-ITEM-KEY-UPC-NBR                            07000000
+                   TO UPC-UPC-NBR                                       07010000
+                 PERFORM 3100-OPEN-UPC-CSR                              07020000
+                 PERFORM 3110-FETCH-UPC-CSR                             07030000
+                   UNTIL UPC-VS-ID = IM008-ITEM-KEY-VS-ID               07040000
+                      OR SQLCODE   = +100                               07050000
+                      OR PS-UPC-END                                     07060000
+                 MOVE UPC-VS-ID TO PV-VS-ID                             07070000
+                 PERFORM 2300-PROCESS-UPCS                              07080000
+                   UNTIL PS-UPC-END                                     07090000
+                      OR SQLCODE = +100                                 07100000
+                 PERFORM 3120-CLOSE-UPC-CSR                             07110000
+             WHEN IM008-BUS-EVENT-NONINV-UPC-DEL                        07120000
+                 PERFORM 2400-PROCESS-EVENT-125                         07130000
+             WHEN OTHER                                                 07140000
+                 CONTINUE                                               07150000
+           END-EVALUATE.                                                07160000
+                                                                        07170000
+           PERFORM 8600-MQGET-MSG.                                      07180000
+           PERFORM 7800-UPDATE-TCKRSTINF.                               07190000
+           PERFORM 4500-DB2-MQ-COMMIT.                                  07200000
+                                                                        07210000
+                                                                        07220000
+      ******************************************************************07230000
+      *  OPEN THE STYLE SKU CURSOR                                      07240000
+      ******************************************************************07250000
+       2100-OPEN-STYL-SKU-CSR.                                          07260000
+                                                                        07270000
+           EXEC SQL                                                     07280000
+               OPEN STYL_SKU_CSR                                        07290000
+           END-EXEC.                                                    07300000
+                                                                        07310000
+           EVALUATE TRUE                                                07320000
+               WHEN SQLCODE = ZERO                                      07330000
+                   CONTINUE                                             07340000
+               WHEN OTHER                                               07350000
+                   MOVE SQLCODE                TO JL-JCL-MSG1-SQLCODE   07360000
+                   SET PS-DB2-ERROR            TO TRUE                  07370000
+                   MOVE '2100-OPEN-STYL-SKU-CSR'                        07380000
+                                               TO PV-PARAGRAPH          07390000
+                                                  JL-JCL-PARAGRAPH      07400000
+                   PERFORM 8800-PUT-ERROR-Q-MSG                         07410000
+                   MOVE 'OPEN STYL SKU CURSOR'                          07420000
+                                               TO AA-DB2-OPERATION      07430000
+                   MOVE 'TUPC'                 TO AA-DB2-TABLE-1        07440000
+                   SET PS-DB-ERROR             TO TRUE                  07450000
+                   SET PS-STYL-SKU-END         TO TRUE                  07460000
+           END-EVALUATE.                                                07470000
+                                                                        07480000
+                                                                        07490000
+      ******************************************************************07500000
+      *  FETCHES THE UPC AND PRICING DATA                               07510000
+      ******************************************************************07520000
+       2110-FETCH-STYL-SKU-CSR.                                         07530000
+                                                                        07540000
+           INITIALIZE DCLTUPC                                           07550000
+                      DCLTUPCPLS                                        07560000
+                      PV-INTR-UPC-ID.                                   07570000
+                                                                        07580000
+           EXEC SQL                                                     07590000
+               FETCH STYL_SKU_CSR                                       07600000
+                INTO :UPC-INTR-UPC-ID                                   07610000
+                   , :UPC-UPC-ID                                        07620000
+                   , :UPC-UPC-NBR                                       07630000
+                   , :UPC-SUB-CL-MDSEAR-ID                              07640000
+                   , :UPC-VS-ID                                         07650000
+                   , :UPCPLS-STR-NBR                                    07660000
+                   , :UPCPLS-EFF-BEG-TMST                               07670000
+                   , :UPCPLS-EFF-END-TMST     :PV-END-TMST-NULL-IND     07680000
+                   , :UPCPLS-UPC-STAT-CDE     :PV-UPC-STAT-NULL-IND     07690000
+                   , :UPCPLS-UNT-COST-AMT     :PV-UPC-COST-NULL-IND     07700000
+                   , :UPCPLS-UNT-RTL-AMT      :PV-UPC-RTL-NULL-IND      07710000
+                   , :UPCPLS-MEITGP-NBR       :PV-MEITGP-NULL-IND       07720000
+                   , :UPCPLS-ITM-NBR                                    07730000
+                   , :UPCPLS-UPC-STAT-CHG-DTE                           07740000
+                   , :UPCPLS-UNT-RTL-CHG-DTE                            07750000
+                   , :UPCPLS-ORIG-CLR-DTE     :PV-CLR-DTE-NULL-IND      07760000
+                   , :UPCPLS-MKDN-CDE         :PV-MKDN-CDE-NULL-IND     07770000
+           END-EXEC.                                                    07780000
+                                                                        07790000
+           EVALUATE TRUE                                                07800000
+               WHEN SQLCODE = ZERO                                      07810000
+                   CONTINUE                                             07820000
+               WHEN SQLCODE = +100                                      07830000
+                   SET PS-STYL-SKU-END TO TRUE                          07840000
+               WHEN OTHER                                               07850000
+                   MOVE SQLCODE              TO JL-JCL-MSG1-SQLCODE     07860000
+                   SET PS-DB2-ERROR          TO TRUE                    07870000
+                   MOVE '2110-FETCH-STYL-SKU-CSR'                       07880000
+                                             TO PV-PARAGRAPH            07890000
+                                                JL-JCL-PARAGRAPH        07900000
+                   PERFORM 8800-PUT-ERROR-Q-MSG                         07910000
+                   MOVE 'FETCH STYL SKU CURSOR'                         07920000
+                                             TO AA-DB2-OPERATION        07930000
+                   MOVE 'TUPC'               TO AA-DB2-TABLE-1          07940000
+                   SET PS-DB-ERROR           TO TRUE                    07950000
+                   SET PS-STYL-SKU-END       TO TRUE                    07960000
+           END-EVALUATE.                                                07970000
+                                                                        07980000
+                                                                        07990000
+      ******************************************************************08000000
+      *  CLOSE THE STYLE SKU CURSOR                                     08010000
+      ******************************************************************08020000
+       2120-CLOSE-STYL-SKU-CSR.                                         08030000
+                                                                        08040000
+           EXEC SQL                                                     08050000
+               CLOSE STYL_SKU_CSR                                       08060000
+           END-EXEC.                                                    08070000
+                                                                        08080000
+           EVALUATE TRUE                                                08090000
+               WHEN SQLCODE = ZERO                                      08100000
+                   CONTINUE                                             08110000
+               WHEN OTHER                                               08120000
+                   MOVE SQLCODE                TO JL-JCL-MSG1-SQLCODE   08130000
+                   SET PS-DB2-ERROR            TO TRUE                  08140000
+                   MOVE '2120-CLOSE-STYL-SKU-CSR'                       08150000
+                                               TO PV-PARAGRAPH          08160000
+                                                  JL-JCL-PARAGRAPH      08170000
+                   PERFORM 8800-PUT-ERROR-Q-MSG                         08180000
+                   MOVE 'CLOSE STYL SKU CURSOR'                         08190000
+                                               TO AA-DB2-OPERATION      08200000
+                   MOVE 'TUPC'                 TO AA-DB2-TABLE-1        08210000
+                   SET PS-DB-ERROR             TO TRUE                  08220000
+                   SET PS-STYL-SKU-END         TO TRUE                  08230000
+           END-EVALUATE.                                                08240000
+                                                                        08250000
+      ******************************************************************08260000
+      *  PROCESS UPC'S.                                                 08270000
+      *  EVENT 31 (SKU/STYL DELETES).                                   08280000
+      ******************************************************************08290000
+       2200-PROCESS-UPCS.                                               08300000
+                                                                        08310000
+      *    POPULATE THE INVENTORY STYLE SKU DELETION TABLE COLUMNS      08320000
+                                                                        08330000
+           INITIALIZE DCLINT00003.                                      08340000
+           MOVE UPC-INTR-UPC-ID         TO INT00003-INTR-UPC-ID.        08350000
+           MOVE UPC-UPC-ID              TO INT00003-UPC-ID.             08360000
+           MOVE UPC-UPC-NBR             TO INT00003-UPC-NBR.            08370000
+           MOVE UPCPLS-STR-NBR          TO INT00003-LOC-NBR.            08380000
+           MOVE UPCPLS-EFF-BEG-TMST     TO INT00003-EFF-BEG-TMST.       08390000
+           IF PV-END-TMST-NULL-IND = ZERO                               08400000
+               MOVE UPCPLS-EFF-END-TMST TO INT00003-EFF-END-TMST        08410000
+           END-IF.                                                      08420000
+           IF PV-UPC-STAT-NULL-IND = ZERO                               08430000
+              MOVE UPCPLS-UPC-STAT-CDE  TO INT00003-UPC-STAT-CDE        08440000
+           END-IF.                                                      08450000
+           IF PV-UPC-COST-NULL-IND = ZERO                               08460000
+               MOVE UPCPLS-UNT-COST-AMT TO INT00003-UNT-COST-AMT        08470000
+           END-IF.                                                      08480000
+           IF PV-UPC-RTL-NULL-IND = ZERO                                08490000
+               MOVE UPCPLS-UNT-RTL-AMT  TO INT00003-UNT-RTL-AMT         08500000
+           END-IF.                                                      08510000
+           IF PV-MEITGP-NULL-IND = ZERO                                 08520000
+               MOVE UPCPLS-MEITGP-NBR   TO INT00003-MEITGP-NBR          08530000
+           END-IF.                                                      08540000
+           MOVE UPCPLS-ITM-NBR          TO INT00003-ITM-NBR.            08550000
+           MOVE UPCPLS-UPC-STAT-CHG-DTE TO INT00003-UPC-STAT-CHG-DTE.   08560000
+           MOVE UPCPLS-UNT-RTL-CHG-DTE  TO INT00003-UNT-RTL-CHG-DTE.    08570000
+           IF PV-CLR-DTE-NULL-IND = ZERO                                08580000
+               MOVE UPCPLS-ORIG-CLR-DTE TO INT00003-ORIG-CLR-DTE        08590000
+           END-IF.                                                      08600000
+           IF PV-MKDN-CDE-NULL-IND = ZERO                               08610000
+               MOVE UPCPLS-MKDN-CDE     TO INT00003-MKDN-CDE            08620000
+           END-IF.                                                      08630000
+           MOVE UPC-SUB-CL-MDSEAR-ID    TO INT00003-SUB-CL-MDSEAR-ID.   08640000
+           MOVE UPC-VS-ID               TO INT00003-VS-ID.              08650000
+           MOVE IM008-ITEM-KEY-DEPT     TO INT00003-DEPT-NBR.           08660000
+           MOVE IM008-ITEM-KEY-CLASS    TO INT00003-MAJ-CL-NBR.         08670000
+           MOVE IM008-ITEM-KEY-SUBCL    TO INT00003-SUB-CL-NBR.         08680000
+           MOVE IM008-ITEM-KEY-SKU      TO INT00003-SKU-NBR.            08690000
+           MOVE IM008-ITEM-KEY-ENT-ID   TO INT00003-ENT-ID.             08700000
+           MOVE 'Y'                     TO INT00003-PLU-DWNLD-IND.      08710000
+           PERFORM 8000-SELECT-SKU-STYL-DLT.                            08720000
+           IF PS-DB-ERROR                                               08730000
+               SET PS-STYL-SKU-END TO TRUE                              08740000
+           ELSE                                                         08750000
+               IF PS-SKU-STYL-DLT-FOUND                                 08760000
+                   MOVE 'N'                 TO INT00003-PLU-DWNLD-IND   08770000
+               END-IF                                                   08780000
+                                                                        08790000
+               SET PS-DUPLICATE-NOT-FOUND   TO TRUE                     08800000
+               PERFORM 8100-INSERT-SKU-STYL-DLT                         08810000
+               IF PS-DUPLICATE-FOUND AND PS-NO-DB-ERROR                 08820000
+                   PERFORM 8200-UPDATE-SKU-STYL-DLT                     08830000
+               END-IF                                                   08840000
+                                                                        08850000
+               IF PS-NO-DB-ERROR                                        08860000
+                   PERFORM 2110-FETCH-STYL-SKU-CSR                      08870000
+                                                                        08880000
+      *    IF THE VS-ID HAS CHANGED, WE HAVE REACHED THE END OF A STYLE 08890000
+      *    AND ARE FINISHED.                                            08900000
+                                                                        08910000
+                   IF UPC-VS-ID = PV-VS-ID                              08920000
+                       CONTINUE                                         08930000
+                   ELSE                                                 08940000
+                       SET PS-STYL-SKU-END TO TRUE                      08950000
+                   END-IF                                               08960000
+                   MOVE UPC-VS-ID TO PV-VS-ID                           08970000
+               ELSE                                                     08980000
+                   SET PS-STYL-SKU-END TO TRUE                          08990000
+               END-IF                                                   09000000
+           END-IF.                                                      09010000
+                                                                        09020000
+                                                                        09030000
+      ******************************************************************09040000
+      *  PROCESS UPC'S.                                                 09050000
+      *  EVENT 120 (VENDOR UPC DELETE).                                 09060000
+      ******************************************************************09070000
+       2300-PROCESS-UPCS.                                               09080000
+                                                                        09090000
+      *    POPULATE THE INVENTORY STYLE SKU DELETION TABLE COLUMNS      09100000
+                                                                        09110000
+           INITIALIZE DCLINT00003.                                      09120000
+           MOVE UPC-INTR-UPC-ID         TO INT00003-INTR-UPC-ID.        09130000
+           MOVE UPC-UPC-ID              TO INT00003-UPC-ID.             09140000
+           MOVE UPC-UPC-NBR             TO INT00003-UPC-NBR.            09150000
+           MOVE UPCPLS-STR-NBR          TO INT00003-LOC-NBR.            09160000
+           MOVE UPCPLS-EFF-BEG-TMST     TO INT00003-EFF-BEG-TMST.       09170000
+           IF PV-END-TMST-NULL-IND = ZERO                               09180000
+               MOVE UPCPLS-EFF-END-TMST TO INT00003-EFF-END-TMST        09190000
+           END-IF.                                                      09200000
+           IF PV-UPC-STAT-NULL-IND = ZERO                               09210000
+              MOVE UPCPLS-UPC-STAT-CDE  TO INT00003-UPC-STAT-CDE        09220000
+           END-IF.                                                      09230000
+           IF PV-UPC-COST-NULL-IND = ZERO                               09240000
+               MOVE UPCPLS-UNT-COST-AMT TO INT00003-UNT-COST-AMT        09250000
+           END-IF.                                                      09260000
+           IF PV-UPC-RTL-NULL-IND = ZERO                                09270000
+               MOVE UPCPLS-UNT-RTL-AMT  TO INT00003-UNT-RTL-AMT         09280000
+           END-IF.                                                      09290000
+           IF PV-MEITGP-NULL-IND = ZERO                                 09300000
+               MOVE UPCPLS-MEITGP-NBR   TO INT00003-MEITGP-NBR          09310000
+           END-IF.                                                      09320000
+           MOVE UPCPLS-ITM-NBR          TO INT00003-ITM-NBR.            09330000
+           MOVE UPCPLS-UPC-STAT-CHG-DTE TO INT00003-UPC-STAT-CHG-DTE.   09340000
+           MOVE UPCPLS-UNT-RTL-CHG-DTE  TO INT00003-UNT-RTL-CHG-DTE.    09350000
+           IF PV-CLR-DTE-NULL-IND = ZERO                                09360000
+               MOVE UPCPLS-ORIG-CLR-DTE TO INT00003-ORIG-CLR-DTE        09370000
+           END-IF.                                                      09380000
+           IF PV-MKDN-CDE-NULL-IND = ZERO                               09390000
+               MOVE UPCPLS-MKDN-CDE     TO INT00003-MKDN-CDE            09400000
+           END-IF.                                                      09410000
+           MOVE UPC-SUB-CL-MDSEAR-ID    TO INT00003-SUB-CL-MDSEAR-ID.   09420000
+           MOVE UPC-VS-ID               TO INT00003-VS-ID.              09430000
+           MOVE IM008-ITEM-KEY-DEPT     TO INT00003-DEPT-NBR.           09440000
+           MOVE IM008-ITEM-KEY-CLASS    TO INT00003-MAJ-CL-NBR.         09450000
+           MOVE IM008-ITEM-KEY-SUBCL    TO INT00003-SUB-CL-NBR.         09460000
+           MOVE IM008-ITEM-KEY-SKU      TO INT00003-SKU-NBR.            09470000
+           MOVE IM008-ITEM-KEY-ENT-ID   TO INT00003-ENT-ID.             09480000
+           MOVE 'Y'                     TO INT00003-PLU-DWNLD-IND.      09490000
+           PERFORM 8000-SELECT-SKU-STYL-DLT.                            09500000
+           IF PS-DB-ERROR                                               09510000
+               SET PS-UPC-END TO TRUE                                   09520000
+           ELSE                                                         09530000
+               IF PS-SKU-STYL-DLT-FOUND                                 09540000
+                   MOVE 'N'                 TO INT00003-PLU-DWNLD-IND   09550000
+               END-IF                                                   09560000
+                                                                        09570000
+               SET PS-DUPLICATE-NOT-FOUND   TO TRUE                     09580000
+               PERFORM 8100-INSERT-SKU-STYL-DLT                         09590000
+               IF PS-DUPLICATE-FOUND AND PS-NO-DB-ERROR                 09600000
+                   PERFORM 8200-UPDATE-SKU-STYL-DLT                     09610000
+               END-IF                                                   09620000
+                                                                        09630000
+               IF PS-NO-DB-ERROR                                        09640000
+                   PERFORM 3110-FETCH-UPC-CSR                           09650000
+                                                                        09660000
+      *    IF THE VS-ID HAS CHANGED, WE HAVE REACHED THE END OF A STYLE 09670000
+      *    AND ARE FINISHED.                                            09680000
+                                                                        09690000
+                   IF UPC-VS-ID = PV-VS-ID                              09700000
+                       CONTINUE                                         09710000
+                   ELSE                                                 09720000
+                       SET PS-UPC-END TO TRUE                           09730000
+                   END-IF                                               09740000
+                   MOVE UPC-VS-ID TO PV-VS-ID                           09750000
+               ELSE                                                     09760000
+                   SET PS-UPC-END TO TRUE                               09770000
+               END-IF                                                   09780000
+           END-IF.                                                      09790000
+                                                                        09800000
+                                                                        09810000
+      ******************************************************************09820000
+      *  PROCESS EVENT 125 (VENDOR UPC NUMBER WHERE THE PLU_DWNLD_IND   09830000
+      *  IS 'N').                                                       09840000
+      ******************************************************************09850000
+       2400-PROCESS-EVENT-125.                                          09860000
+                                                                        09870000
+      *    POPULATE THE INVENTORY STYLE SKU DELETION TABLE COLUMNS      09880000
+                                                                        09890000
+           INITIALIZE DCLINT00003.                                      09900000
+           MOVE IM008-ITEM-KEY-INTR-UPC-ID                              09910000
+                                        TO PV-INTR-UPC-ID.              09920000
+           MOVE PV-INTR-UPC-ID-SPC      TO INT00003-INTR-UPC-ID.        09930000
+PE6084     MOVE IM008-ITEM-KEY-UPC-ID                                   09931000
+PE6084                                  TO PV-UPC-ID-I.                 09932000
+PE6084     MOVE PV-UPC-ID-SPC           TO INT00003-UPC-ID.             09933000
+PE6084*    MOVE IM008-ITEM-KEY-UPC-ID   TO INT00003-UPC-ID.             09940000
+           MOVE IM008-ITEM-KEY-UPC-NBR  TO INT00003-UPC-NBR.            09950000
+           MOVE ZERO                    TO INT00003-LOC-NBR.            09960000
+           MOVE PC-DEFAULT-TMST         TO INT00003-EFF-BEG-TMST.       09970000
+           MOVE -1                      TO PV-END-TMST-NULL-IND         09980000
+                                           PV-UPC-STAT-NULL-IND         09990000
+                                           PV-UPC-COST-NULL-IND         10000000
+                                           PV-UPC-RTL-NULL-IND          10010000
+                                           PV-MEITGP-NULL-IND           10020000
+                                           PV-CLR-DTE-NULL-IND          10030000
+                                           PV-MKDN-CDE-NULL-IND.        10040000
+           MOVE PC-DEFAULT-DTE          TO INT00003-UPC-STAT-CHG-DTE    10050000
+                                           INT00003-UNT-RTL-CHG-DTE.    10060000
+           MOVE IM008-ITEM-KEY-DEPT     TO INT00003-DEPT-NBR.           10070000
+           MOVE IM008-ITEM-KEY-CLASS    TO INT00003-MAJ-CL-NBR.         10080000
+           MOVE IM008-ITEM-KEY-SUBCL    TO INT00003-SUB-CL-NBR.         10090000
+           MOVE IM008-ITEM-KEY-SKU      TO INT00003-SKU-NBR.            10100000
+           MOVE IM008-ITEM-KEY-ENT-ID   TO INT00003-ENT-ID.             10110000
+           MOVE 'N'                     TO INT00003-PLU-DWNLD-IND.      10120000
+                                                                        10130000
+           SET PS-DUPLICATE-NOT-FOUND   TO TRUE.                        10140000
+           PERFORM 8100-INSERT-SKU-STYL-DLT.                            10150000
+           IF PS-DUPLICATE-FOUND AND PS-NO-DB-ERROR                     10160000
+               PERFORM 8200-UPDATE-SKU-STYL-DLT                         10170000
+           END-IF.                                                      10180000
+                                                                        10190000
+           IF PS-DB-ERROR                                               10200000
+               SET PS-STYL-SKU-END      TO TRUE                         10210000
+           END-IF.                                                      10220000
+                                                                        10230000
+                                                                        10240000
+      ******************************************************************10250000
+      *  OPEN THE UPC CURSOR                                            10260000
+      ******************************************************************10270000
+       3100-OPEN-UPC-CSR.                                               10280000
+                                                                        10290000
+           EXEC SQL                                                     10300000
+               OPEN UPC_CSR                                             10310000
+           END-EXEC.                                                    10320000
+                                                                        10330000
+           EVALUATE TRUE                                                10340000
+               WHEN SQLCODE = ZERO                                      10350000
+                   CONTINUE                                             10360000
+               WHEN OTHER                                               10370000
+                   MOVE SQLCODE                TO JL-JCL-MSG1-SQLCODE   10380000
+                   SET PS-DB2-ERROR            TO TRUE                  10390000
+                   MOVE '3100-OPEN-UPC-CSR'                             10400000
+                                               TO PV-PARAGRAPH          10410000
+                                                  JL-JCL-PARAGRAPH      10420000
+                   PERFORM 8800-PUT-ERROR-Q-MSG                         10430000
+                   MOVE 'OPEN UPC CURSOR'                               10440000
+                                               TO AA-DB2-OPERATION      10450000
+                   MOVE 'TUPC'                 TO AA-DB2-TABLE-1        10460000
+                   SET PS-DB-ERROR             TO TRUE                  10470000
+                   SET PS-STYL-SKU-END         TO TRUE                  10480000
+           END-EVALUATE.                                                10490000
+                                                                        10500000
+                                                                        10510000
+      ******************************************************************10520000
+      *  FETCHES THE UPC AND PRICING DATA                               10530000
+      ******************************************************************10540000
+       3110-FETCH-UPC-CSR.                                              10550000
+                                                                        10560000
+           INITIALIZE DCLTUPC                                           10570000
+                      DCLTUPCPLS                                        10580000
+                      PV-INTR-UPC-ID.                                   10590000
+                                                                        10600000
+           EXEC SQL                                                     10610000
+               FETCH UPC_CSR                                            10620000
+                INTO :UPC-INTR-UPC-ID                                   10630000
+                   , :UPC-UPC-ID                                        10640000
+                   , :UPC-UPC-NBR                                       10650000
+                   , :UPC-SUB-CL-MDSEAR-ID                              10660000
+                   , :UPC-VS-ID                                         10670000
+                   , :UPCPLS-STR-NBR                                    10680000
+                   , :UPCPLS-EFF-BEG-TMST                               10690000
+                   , :UPCPLS-EFF-END-TMST     :PV-END-TMST-NULL-IND     10700000
+                   , :UPCPLS-UPC-STAT-CDE     :PV-UPC-STAT-NULL-IND     10710000
+                   , :UPCPLS-UNT-COST-AMT     :PV-UPC-COST-NULL-IND     10720000
+                   , :UPCPLS-UNT-RTL-AMT      :PV-UPC-RTL-NULL-IND      10730000
+                   , :UPCPLS-MEITGP-NBR       :PV-MEITGP-NULL-IND       10740000
+                   , :UPCPLS-ITM-NBR                                    10750000
+                   , :UPCPLS-UPC-STAT-CHG-DTE                           10760000
+                   , :UPCPLS-UNT-RTL-CHG-DTE                            10770000
+                   , :UPCPLS-ORIG-CLR-DTE     :PV-CLR-DTE-NULL-IND      10780000
+                   , :UPCPLS-MKDN-CDE         :PV-MKDN-CDE-NULL-IND     10790000
+           END-EXEC.                                                    10800000
+                                                                        10810000
+           EVALUATE TRUE                                                10820000
+               WHEN SQLCODE = ZERO                                      10830000
+                   CONTINUE                                             10840000
+               WHEN SQLCODE = +100                                      10850000
+                   SET PS-UPC-END TO TRUE                               10860000
+               WHEN OTHER                                               10870000
+                   MOVE SQLCODE              TO JL-JCL-MSG1-SQLCODE     10880000
+                   SET PS-DB2-ERROR          TO TRUE                    10890000
+                   MOVE '3110-FETCH-UPC-CSR'                            10900000
+                                             TO PV-PARAGRAPH            10910000
+                                                JL-JCL-PARAGRAPH        10920000
+                   PERFORM 8800-PUT-ERROR-Q-MSG                         10930000
+                   MOVE 'FETCH UPC CURSOR'                              10940000
+                                             TO AA-DB2-OPERATION        10950000
+                   MOVE 'TUPC'               TO AA-DB2-TABLE-1          10960000
+                   SET PS-DB-ERROR           TO TRUE                    10970000
+                   SET PS-STYL-SKU-END       TO TRUE                    10980000
+           END-EVALUATE.                                                10990000
+                                                                        11000000
+                                                                        11010000
+      ******************************************************************11020000
+      *  CLOSE THE UPC CURSOR                                           11030000
+      ******************************************************************11040000
+       3120-CLOSE-UPC-CSR.                                              11050000
+                                                                        11060000
+           EXEC SQL                                                     11070000
+               CLOSE UPC_CSR                                            11080000
+           END-EXEC.                                                    11090000
+                                                                        11100000
+           EVALUATE TRUE                                                11110000
+               WHEN SQLCODE = ZERO                                      11120000
+                   CONTINUE                                             11130000
+               WHEN OTHER                                               11140000
+                   MOVE SQLCODE                TO JL-JCL-MSG1-SQLCODE   11150000
+                   SET PS-DB2-ERROR            TO TRUE                  11160000
+                   MOVE '3120-CLOSE-UPC-CSR'                            11170000
+                                               TO PV-PARAGRAPH          11180000
+                                                  JL-JCL-PARAGRAPH      11190000
+                   PERFORM 8800-PUT-ERROR-Q-MSG                         11200000
+                   MOVE 'CLOSE UPC CURSOR'                              11210000
+                                               TO AA-DB2-OPERATION      11220000
+                   MOVE 'TUPC'                 TO AA-DB2-TABLE-1        11230000
+                   SET PS-DB-ERROR             TO TRUE                  11240000
+                   SET PS-STYL-SKU-END         TO TRUE                  11250000
+           END-EVALUATE.                                                11260000
+                                                                        11270000
+                                                                        11280000
+      ******************************************************************11290000
+      *  GET THE CURRENT TIMESTAMP FROM DB2.                            11300000
+      ******************************************************************11310000
+       4100-SET-BEGIN-TIMESTAMP.                                        11320000
+                                                                        11330000
+           EXEC SQL                                                     11340000
+                SET :PV-BEGIN-TIMESTAMP = CURRENT TIMESTAMP             11350000
+           END-EXEC.                                                    11360000
+                                                                        11370000
+           IF SQLCODE = 0                                               11380000
+               CONTINUE                                                 11390000
+           ELSE                                                         11400000
+               MOVE SQLCODE                  TO JL-JCL-MSG1-SQLCODE     11410000
+               SET PS-DB2-ERROR              TO TRUE                    11420000
+               MOVE '4100-SET-BEGIN-TIMESTAMP'                          11430000
+                                             TO PV-PARAGRAPH            11440000
+                                                JL-JCL-PARAGRAPH        11450000
+               PERFORM 8800-PUT-ERROR-Q-MSG                             11460000
+               MOVE 'SET BEGIN TIMESTAMP'    TO AA-DB2-OPERATION        11470000
+               MOVE 'DB2 SYSTEM'             TO AA-DB2-TABLE-1          11480000
+               SET PS-STYL-SKU-END           TO TRUE                    11490000
+           END-IF.                                                      11500000
+                                                                        11510000
+                                                                        11520000
+      ******************************************************************11530000
+      *  COMMIT THE DB2 INT_SKU_STYL_DLT TABLE CHANGES USING A CICS     11540000
+      *  SYNCPOINT COMMAND.                                             11550000
+      ******************************************************************11560000
+       4500-DB2-MQ-COMMIT.                                              11570000
+                                                                        11580000
+           EXEC CICS                                                    11590000
+               SYNCPOINT                                                11600000
+           END-EXEC.                                                    11610000
+                                                                        11620000
+                                                                        11630000
+      ******************************************************************11640000
+      *  WRITE ALL JCL LINES FOR THE JOB DECK OF THE EMAIL SUBMISSION   11650000
+      *  JOB TO THE TRANSIENT DATA QUEUE FOR THE INTERNAL READER.       11660000
+      *  THIS WILL SUBMIT THE JOB WITH THE CURRENT CICS PARTITION AS    11670000
+      *  THE OWNER.  ENQUEUE THE INTERNAL READER BEFORE WRITING ANY     11680000
+      *  JCL LINES, TO INSURE NO INTERLEAVING OF JCL LINES FROM OTHER   11690000
+      *  REQUESTS, AND DEQUEUE THE INTERNAL READER AFTER WRITING THE    11700000
+      *  LAST JCL LINE.                                                 11710000
+      ******************************************************************11720000
+       5000-SUBMIT-EMAIL-JOB.                                           11730000
+                                                                        11740000
+           PERFORM 7000-ENQUEUE-INTERNAL-READER.                        11750000
+                                                                        11760000
+           IF PC-KOHLS-PROD-SYSTEM                                      11770000
+               MOVE JL-JCL-LINE-1P TO TD-JCL-LINE                       11780000
+           ELSE                                                         11790000
+               IF PC-KOHLS-LEARNING-SYSTEM                              11800000
+                   MOVE JL-JCL-LINE-1L TO TD-JCL-LINE                   11810000
+               ELSE                                                     11820000
+                   IF PC-KOHLS-QA-SYSTEM                                11830000
+                       MOVE JL-JCL-LINE-1Q TO TD-JCL-LINE               11840000
+                   ELSE                                                 11850000
+                       MOVE JL-JCL-LINE-1T TO TD-JCL-LINE               11860000
+                   END-IF                                               11870000
+               END-IF                                                   11880000
+           END-IF.                                                      11890000
+           PERFORM 5100-WRITE-TD-LINE.                                  11900000
+                                                                        11910000
+           MOVE JL-JCL-LINE-2 TO TD-JCL-LINE.                           11920000
+           PERFORM 5100-WRITE-TD-LINE.                                  11930000
+                                                                        11940000
+           IF PC-KOHLS-PROD-SYSTEM                                      11950000
+               MOVE JL-JCL-LINE-3P TO TD-JCL-LINE                       11960000
+           ELSE                                                         11970000
+               MOVE JL-JCL-LINE-3T TO TD-JCL-LINE                       11980000
+           END-IF.                                                      11990000
+           PERFORM 5100-WRITE-TD-LINE.                                  12000000
+                                                                        12010000
+           MOVE JL-JCL-LINE-SUBJECT TO TD-JCL-LINE.                     12020000
+           PERFORM 5100-WRITE-TD-LINE.                                  12030000
+                                                                        12040000
+           MOVE JL-JCL-LINE-JOBNAME TO TD-JCL-LINE.                     12050000
+           PERFORM 5100-WRITE-TD-LINE.                                  12060000
+                                                                        12070000
+           EVALUATE TRUE                                                12080000
+               WHEN PS-MQ-ERROR                                         12090000
+                   MOVE JL-JCL-LINE-MSG1-MQ  TO TD-JCL-LINE             12100000
+               WHEN PS-DB2-ERROR                                        12110000
+                   MOVE JL-JCL-LINE-MSG1-DB2 TO TD-JCL-LINE             12120000
+           END-EVALUATE.                                                12130000
+           PERFORM 5100-WRITE-TD-LINE.                                  12140000
+                                                                        12150000
+           MOVE JL-JCL-LINE-MSG2    TO TD-JCL-LINE.                     12160000
+           PERFORM 5100-WRITE-TD-LINE.                                  12170000
+                                                                        12180000
+           MOVE JL-JCL-LINE-EOF     TO TD-JCL-LINE.                     12190000
+           PERFORM 5100-WRITE-TD-LINE.                                  12200000
+                                                                        12210000
+           PERFORM 7100-DEQUEUE-INTERNAL-READER.                        12220000
+                                                                        12230000
+                                                                        12240000
+      ******************************************************************12250000
+      *  WRITE A JCL LINE TO THE TRANSIENT DATA QUEUE FOR THE INTERNAL *12260000
+      *  READER.  ON ANY ERROR, DEQUEUE THE INTERNAL READER AND ABEND. *12270000
+      ******************************************************************12280000
+       5100-WRITE-TD-LINE.                                              12290000
+           EXEC CICS                                                    12300000
+               WRITEQ TD                                                12310000
+                   QUEUE(TD-QUEUE-NAME)                                 12320000
+                   FROM(TD-JCL-LINE)                                    12330000
+                   LENGTH(TD-JCL-LINE-LENGTH)                           12340000
+                   RESP(PV-CICS-RESPONSE)                               12350000
+           END-EXEC.                                                    12360000
+                                                                        12370000
+           IF PV-CICS-RESPONSE NOT = DFHRESP(NORMAL)                    12380000
+               SET DP013-LINK-RETURN                                    12390000
+                   DP013-OTHER-ABEND                                    12400000
+                   DP013-NO-ROLLBACK     TO TRUE                        12410000
+               MOVE '5100-WRITE-TD-LINE' TO DP013-PARAGRAPH             12420000
+               MOVE 'ATTEMPTING TO WRITE TO INTERNAL READER TD QUEUE'   12430000
+                                         TO DP013-MESSAGE-TEXT(1)       12440000
+               PERFORM 7100-DEQUEUE-INTERNAL-READER                     12450000
+               PERFORM 9950-PROGRAM-ABEND                               12460000
+           END-IF.                                                      12470000
+                                                                        12480000
+                                                                        12490000
+      ******************************************************************12500000
+      *  ENQUEUE THE TRANSIENT DATA QUEUE FOR THE INTERNAL READER.     *12510000
+      *  THIS WILL PREVENT INTERLEAVING OF JCL SUBMITTED CONCURRENTLY  *12520000
+      *  BY MULTIPLE USERS.  IF THE QUEUE IS BUSY, THIS PROGRAM WILL   *12530000
+      *  WAIT TO ENQUEUE IT, BY NOT SPECIFICALLY HANDLING THE QBUSY    *12540000
+      *  CONDITION.                                                    *12550000
+      ******************************************************************12560000
+       7000-ENQUEUE-INTERNAL-READER.                                    12570000
+           EXEC CICS                                                    12580000
+               ENQ                                                      12590000
+                   RESOURCE(TD-QUEUE-NAME)                              12600000
+                   LENGTH(TD-QUEUE-NAME-LENGTH)                         12610000
+                   RESP(PV-CICS-RESPONSE)                               12620000
+           END-EXEC.                                                    12630000
+                                                                        12640000
+           IF PV-CICS-RESPONSE NOT = DFHRESP(NORMAL)                    12650000
+               SET DP013-LINK-RETURN                                    12660000
+                   DP013-OTHER-ABEND                                    12670000
+                   DP013-NO-ROLLBACK     TO TRUE                        12680000
+               MOVE '7000-ENQUEUE-INTERNAL-READER'                      12690000
+                                         TO DP013-PARAGRAPH             12700000
+               STRING 'ENQUEUE '            DELIMITED BY SIZE           12710000
+                      TD-QUEUE-NAME         DELIMITED BY SIZE           12720000
+                      ' (INTERNAL READER)'  DELIMITED BY SIZE           12730000
+                   INTO DP013-MESSAGE-TEXT (1)                          12740000
+               PERFORM 9950-PROGRAM-ABEND                               12750000
+           END-IF.                                                      12760000
+                                                                        12770000
+           SET PS-INTERNAL-READER-ENQUEUED TO TRUE.                     12780000
+                                                                        12790000
+                                                                        12800000
+      ******************************************************************12810000
+      *  DEQUEUE THE TRANSIENT DATA QUEUE FOR THE INTERNAL READER.     *12820000
+      *  THIS SHOULD BE DONE FOLLOWING A SUCCESSFUL REPORT REQUEST     *12830000
+      *  SUBMISSION, A CANCELLATION OF THE CURRENT REPORT REQUEST, OR  *12840000
+      *  ANY DETECTED ABENDS.  THIS WILL FREE UP THE INTERNAL READER   *12850000
+      *  FOR THE NEXT USER.                                            *12860000
+      ******************************************************************12870000
+       7100-DEQUEUE-INTERNAL-READER.                                    12880000
+           SET PS-INTERNAL-READER-DEQUEUED TO TRUE.                     12890000
+                                                                        12900000
+           EXEC CICS                                                    12910000
+               DEQ                                                      12920000
+                   RESOURCE(TD-QUEUE-NAME)                              12930000
+                   LENGTH(TD-QUEUE-NAME-LENGTH)                         12940000
+                   RESP(PV-CICS-RESPONSE)                               12950000
+           END-EXEC.                                                    12960000
+                                                                        12970000
+           IF PV-CICS-RESPONSE NOT = DFHRESP(NORMAL)                    12980000
+               SET DP013-LINK-RETURN                                    12990000
+                   DP013-OTHER-ABEND                                    13000000
+                   DP013-NO-ROLLBACK     TO TRUE                        13010000
+               MOVE '7100-DEQUEUE-INTERNAL-READER'                      13020000
+                                         TO DP013-PARAGRAPH             13030000
+               STRING 'DEQUEUE '            DELIMITED BY SIZE           13040000
+                      TD-QUEUE-NAME         DELIMITED BY SIZE           13050000
+                      ' (INTERNAL READER)'  DELIMITED BY SIZE           13060000
+                   INTO DP013-MESSAGE-TEXT (1)                          13070000
+               PERFORM 9950-PROGRAM-ABEND                               13080000
+           END-IF.                                                      13090000
+                                                                        13100000
+                                                                        13110000
+      ******************************************************************13120000
+      * 7400-INIT-CHECKPOINT-SELECT                                    *13130000
+      * PROCESSES: SELECTS FROM THE CHECKPOINT RESTART CONTROL TABLE   *13140000
+      *            IF WE ARE IN A RESTART CONDITION.                   *13150000
+      ******************************************************************13160000
+       7400-INIT-CHECKPOINT-SELECT.                                     13170000
+                                                                        13180000
+           EXEC SQL                                                     13190000
+             SELECT  CKPT_STAT_CODE                                     13200000
+               INTO  :TCKRSTCNTL-CKPT-STAT-CODE                         13210000
+               FROM  TCKRSTCNTL                                         13220000
+              WHERE  JOB_NAME  = :PC-JOB-NAME                           13230000
+                AND  PLAN_NAME = :PC-CURRENT-PROGRAM-NAME               13240000
+           END-EXEC.                                                    13250000
+                                                                        13260000
+           IF SQLCODE = 0                                               13270000
+               CONTINUE                                                 13280000
+           ELSE                                                         13290000
+               MOVE SQLCODE               TO JL-JCL-MSG1-SQLCODE        13300000
+               SET PS-DB2-ERROR           TO TRUE                       13310000
+               MOVE '7400-INIT-CHECKPOINT-SELECT' TO PV-PARAGRAPH       13320000
+                                                     JL-JCL-PARAGRAPH   13330000
+               PERFORM 8800-PUT-ERROR-Q-MSG                             13340000
+               MOVE 'SELECT TCKRSTCNTL'   TO AA-DB2-OPERATION           13350000
+               MOVE 'TCKRSTCNTL'          TO AA-DB2-TABLE-1             13360000
+               SET PS-DB-ERROR            TO TRUE                       13370000
+               SET PS-STYL-SKU-END        TO TRUE                       13380000
+           END-IF.                                                      13390000
+                                                                        13400000
+                                                                        13410000
+      ******************************************************************13420000
+      * 7500-SELECT-RESTART-INFO                                       *13430000
+      * PROCESSES: SELECTS FROM THE CHECKPOINT RESTART INFORMATION     *13440000
+      *            TABLE TO OBTAIN THE PROGRAMS SAVED VARIABLES.       *13450000
+      ******************************************************************13460000
+       7500-SELECT-RESTART-INFO.                                        13470000
+                                                                        13480000
+           EXEC SQL                                                     13490000
+             SELECT  WORK_STRG_DESC                                     13500000
+               INTO  :TCKRSTINF-WORK-STRG-DESC                          13510000
+               FROM  TCKRSTINF                                          13520000
+              WHERE  JOB_NAME  = :PC-JOB-NAME                           13530000
+                AND  PLAN_NAME = :PC-CURRENT-PROGRAM-NAME               13540000
+           END-EXEC.                                                    13550000
+                                                                        13560000
+           IF SQLCODE = 0                                               13570000
+               MOVE TCKRSTINF-WORK-STRG-DESC-TEXT (1:26)                13580000
+                 TO PV-BEGIN-TIMESTAMP                                  13590000
+               MOVE TCKRSTINF-WORK-STRG-DESC-TEXT (27:)                 13600000
+                 TO IMRD008-RECORD                                      13610000
+           ELSE                                                         13620000
+               MOVE SQLCODE               TO JL-JCL-MSG1-SQLCODE        13630000
+               SET PS-DB2-ERROR           TO TRUE                       13640000
+               MOVE '7500-SELECT-RESTART-INFO' TO PV-PARAGRAPH          13650000
+                                                  JL-JCL-PARAGRAPH      13660000
+               PERFORM 8800-PUT-ERROR-Q-MSG                             13670000
+               MOVE 'SELECT TCKRSTINF'    TO AA-DB2-OPERATION           13680000
+               MOVE 'TCKRSTINF'           TO AA-DB2-TABLE-1             13690000
+               SET PS-DB-ERROR            TO TRUE                       13700000
+               SET PS-STYL-SKU-END        TO TRUE                       13710000
+           END-IF.                                                      13720000
+                                                                        13730000
+                                                                        13740000
+      ******************************************************************13750000
+      * 7800-UPDATE-TCKRSTINF.                                          13760000
+      *   PERFORM UPDATE OF CHECKPOINT INFORMATION TABLE.               13770000
+      ******************************************************************13780000
+       7800-UPDATE-TCKRSTINF.                                           13790000
+                                                                        13800000
+           STRING PV-BEGIN-TIMESTAMP DELIMITED BY SIZE                  13810000
+                  IMRD008-RECORD     DELIMITED BY SIZE                  13820000
+               INTO TCKRSTINF-WORK-STRG-DESC-TEXT                       13830000
+           END-STRING.                                                  13840000
+           MOVE PC-WORK-STRG-DESC-LEN TO TCKRSTINF-WORK-STRG-DESC-LEN.  13850000
+                                                                        13860000
+           EXEC SQL                                                     13870000
+             UPDATE TCKRSTINF                                           13880000
+                SET WORK_STRG_DESC = :TCKRSTINF-WORK-STRG-DESC          13890000
+              WHERE JOB_NAME       = :PC-JOB-NAME                       13900000
+                AND PLAN_NAME      = :PC-CURRENT-PROGRAM-NAME           13910000
+           END-EXEC.                                                    13920000
+                                                                        13930000
+           IF SQLCODE = 0                                               13940000
+               CONTINUE                                                 13950000
+           ELSE                                                         13960000
+               MOVE SQLCODE               TO JL-JCL-MSG1-SQLCODE        13970000
+               SET PS-DB2-ERROR           TO TRUE                       13980000
+               MOVE '7800-UPDATE-TCKRSTINF' TO PV-PARAGRAPH             13990000
+                                               JL-JCL-PARAGRAPH         14000000
+               PERFORM 8800-PUT-ERROR-Q-MSG                             14010000
+               MOVE 'UPDATE TCKRSTINF'    TO AA-DB2-OPERATION           14020000
+               MOVE 'TCKRSTINF'           TO AA-DB2-TABLE-1             14030000
+               SET PS-DB-ERROR            TO TRUE                       14040000
+               SET PS-STYL-SKU-END        TO TRUE                       14050000
+           END-IF.                                                      14060000
+                                                                        14070000
+                                                                        14080000
+      ******************************************************************14090000
+      * 7900-UPDATE-TCKRSTCNTL                                          14100000
+      * PROCESSES: UPDATES THE STATUS ON THE CHECKPOINT CONTROL TABLE   14110000
+      *                                                                 14120000
+      ******************************************************************14130000
+       7900-UPDATE-TCKRSTCNTL.                                          14140000
+                                                                        14150000
+           EXEC SQL                                                     14160000
+             UPDATE  TCKRSTCNTL                                         14170000
+                SET  CKPT_STAT_CODE = :TCKRSTCNTL-CKPT-STAT-CODE        14180000
+              WHERE  JOB_NAME  = :PC-JOB-NAME                           14190000
+                AND  PLAN_NAME = :PC-CURRENT-PROGRAM-NAME               14200000
+           END-EXEC.                                                    14210000
+                                                                        14220000
+           IF SQLCODE = 0                                               14230000
+               CONTINUE                                                 14240000
+           ELSE                                                         14250000
+               MOVE SQLCODE               TO JL-JCL-MSG1-SQLCODE        14260000
+               SET PS-DB2-ERROR           TO TRUE                       14270000
+               MOVE '7900-UPDATE-TCKRSTCNTL' TO PV-PARAGRAPH            14280000
+                                                JL-JCL-PARAGRAPH        14290000
+               PERFORM 8800-PUT-ERROR-Q-MSG                             14300000
+               MOVE 'UPDATE TCKRSTINF'    TO AA-DB2-OPERATION           14310000
+               MOVE 'TCKRSTINF'           TO AA-DB2-TABLE-1             14320000
+               SET PS-DB-ERROR            TO TRUE                       14330000
+               SET PS-STYL-SKU-END        TO TRUE                       14340000
+           END-IF.                                                      14350000
+                                                                        14360000
+                                                                        14370000
+      ******************************************************************14380000
+      * 8000-SELECT-SKU-STYL-DLT.                                      *14390000
+      * SELECTS FROM THE SKU STYLE DELETE TABLE A UPC_NBR WITH         *14400000
+      * LOC_NBR ZERO AND EFF_BEG_TMST EQUAL TO THE DEFAULT TIMESTAMP,  *14410000
+      * FOR THIS RUN.                                                  *14420000
+      * IF A ROW IS FOUND, THIS INDICATES AN EVENT 125 FOR THIS        *14430000
+      * UPC-NBR.  THEREFORE THE PLU_DOWNLD_IND WILL BE SET TO 'N' FOR  *14440000
+      * THIS UPC_NBR.                                                  *14450000
+      ******************************************************************14460000
+       8000-SELECT-SKU-STYL-DLT.                                        14470000
+                                                                        14480000
+           SET PS-SKU-STYL-DLT-NOT-FOUND TO TRUE.                       14490000
+                                                                        14500000
+           EXEC SQL                                                     14510000
+             SELECT  UPC_ID                                             14520000
+               INTO  :PV-UPC-ID                                         14530000
+               FROM  INT_SKU_STYL_DLT                                   14540000
+              WHERE  LOC_NBR      = 0                                   14550000
+                AND  EFF_BEG_TMST = :PC-DEFAULT-TMST                    14560000
+                AND  UPC_NBR      = :INT00003-UPC-NBR                   14570000
+                AND  CRE_TMST    >= :PV-BEGIN-TIMESTAMP                 14580000
+           END-EXEC.                                                    14590000
+                                                                        14600000
+           EVALUATE TRUE                                                14610000
+               WHEN SQLCODE = 0                                         14620000
+               WHEN SQLCODE = -811                                      14630000
+                   SET PS-SKU-STYL-DLT-FOUND  TO TRUE                   14640000
+               WHEN SQLCODE = +100                                      14650000
+                   CONTINUE                                             14660000
+               WHEN OTHER                                               14670000
+                   MOVE SQLCODE               TO JL-JCL-MSG1-SQLCODE    14680000
+                   SET PS-DB2-ERROR           TO TRUE                   14690000
+                   MOVE '8000-SELECT-SKU-STYL-DLT'                      14700000
+                                              TO PV-PARAGRAPH           14710000
+                                                 JL-JCL-PARAGRAPH       14720000
+                   PERFORM 8800-PUT-ERROR-Q-MSG                         14730000
+                   MOVE 'SELECT INT_SKU_STYL_DLT'                       14740000
+                                              TO AA-DB2-OPERATION       14750000
+                   MOVE 'INT_SKU_STYL_DLT'    TO AA-DB2-TABLE-1         14760000
+                   SET PS-DB-ERROR            TO TRUE                   14770000
+                   SET PS-STYL-SKU-END        TO TRUE                   14780000
+           END-EVALUATE.                                                14790000
+                                                                        14800000
+                                                                        14810000
+      ******************************************************************14820000
+      *  INSERT A ROW TO THE SKU STYLE DELETION TABLE.                  14830000
+      ******************************************************************14840000
+       8100-INSERT-SKU-STYL-DLT.                                        14850000
+                                                                        14860000
+           EXEC SQL                                                     14870000
+                INSERT INTO INT_SKU_STYL_DLT                            14880000
+                       ( UPC_ID                                         14890000
+                        ,LOC_NBR                                        14900000
+                        ,EFF_BEG_TMST                                   14910000
+                        ,UPC_NBR                                        14920000
+                        ,EFF_END_TMST                                   14930000
+                        ,UPC_STAT_CDE                                   14940000
+                        ,UNT_COST_AMT                                   14950000
+                        ,UNT_RTL_AMT                                    14960000
+                        ,MEITGP_NBR                                     14970000
+                        ,ITM_NBR                                        14980000
+                        ,INTR_UPC_ID                                    14990000
+                        ,UPC_STAT_CHG_DTE                               15000000
+                        ,UNT_RTL_CHG_DTE                                15010000
+                        ,ORIG_CLR_DTE                                   15020000
+                        ,MKDN_CDE                                       15030000
+                        ,SUB_CL_MDSEAR_ID                               15040000
+                        ,VS_ID                                          15050000
+                        ,DEPT_NBR                                       15060000
+                        ,MAJ_CL_NBR                                     15070000
+                        ,SUB_CL_NBR                                     15080000
+                        ,SKU_NBR                                        15090000
+                        ,ENT_ID                                         15100000
+                        ,PLU_DWNLD_IND                                  15110000
+                        ,CRE_TMST )                                     15120000
+                VALUES                                                  15130000
+                      (:INT00003-UPC-ID                                 15140000
+                      ,:INT00003-LOC-NBR                                15150000
+                      ,:INT00003-EFF-BEG-TMST                           15160000
+                      ,:INT00003-UPC-NBR                                15170000
+                      ,:INT00003-EFF-END-TMST     :PV-END-TMST-NULL-IND 15180000
+                      ,:INT00003-UPC-STAT-CDE     :PV-UPC-STAT-NULL-IND 15190000
+                      ,:INT00003-UNT-COST-AMT     :PV-UPC-COST-NULL-IND 15200000
+                      ,:INT00003-UNT-RTL-AMT      :PV-UPC-RTL-NULL-IND  15210000
+                      ,:INT00003-MEITGP-NBR       :PV-MEITGP-NULL-IND   15220000
+                      ,:INT00003-ITM-NBR                                15230000
+                      ,:INT00003-INTR-UPC-ID                            15240000
+                      ,:INT00003-UPC-STAT-CHG-DTE                       15250000
+                      ,:INT00003-UNT-RTL-CHG-DTE                        15260000
+                      ,:INT00003-ORIG-CLR-DTE     :PV-CLR-DTE-NULL-IND  15270000
+                      ,:INT00003-MKDN-CDE         :PV-MKDN-CDE-NULL-IND 15280000
+                      ,:INT00003-SUB-CL-MDSEAR-ID                       15290000
+                      ,:INT00003-VS-ID                                  15300000
+                      ,:INT00003-DEPT-NBR                               15310000
+                      ,:INT00003-MAJ-CL-NBR                             15320000
+                      ,:INT00003-SUB-CL-NBR                             15330000
+                      ,:INT00003-SKU-NBR                                15340000
+                      ,:INT00003-ENT-ID                                 15350000
+                      ,:INT00003-PLU-DWNLD-IND                          15360000
+                      ,CURRENT TIMESTAMP)                               15370000
+           END-EXEC.                                                    15380000
+                                                                        15390000
+           EVALUATE TRUE                                                15400000
+               WHEN SQLCODE = 0                                         15410000
+                    CONTINUE                                            15420000
+               WHEN SQLCODE = -803                                      15430000
+                    SET PS-DUPLICATE-FOUND TO TRUE                      15440000
+               WHEN OTHER                                               15450000
+                    MOVE SQLCODE               TO JL-JCL-MSG1-SQLCODE   15460000
+                    SET PS-DB2-ERROR           TO TRUE                  15470000
+                    MOVE '8100-INSERT-SKU-STYL-DLT'                     15480000
+                                               TO PV-PARAGRAPH          15490000
+                                                  JL-JCL-PARAGRAPH      15500000
+                    PERFORM 8800-PUT-ERROR-Q-MSG                        15510000
+                    MOVE 'INSERT INT_SKU_STYL_DLT'                      15520000
+                                               TO AA-DB2-OPERATION      15530000
+                    MOVE 'INT_SKU_STYL_DLT'    TO AA-DB2-TABLE-1        15540000
+                    SET PS-DB-ERROR            TO TRUE                  15550000
+                    SET PS-STYL-SKU-END        TO TRUE                  15560000
+           END-EVALUATE.                                                15570000
+                                                                        15580000
+                                                                        15590000
+      ******************************************************************15600000
+      *  UPDATE A DUPLICATE ROW FROM THE SKU STYLE DELETION TABLE.      15610000
+      ******************************************************************15620000
+       8200-UPDATE-SKU-STYL-DLT.                                        15630000
+                                                                        15640000
+           EXEC SQL                                                     15650000
+                UPDATE INT_SKU_STYL_DLT                                 15660000
+                    SET UPC_NBR          = :INT00003-UPC-NBR            15670000
+                       ,EFF_END_TMST     = :INT00003-EFF-END-TMST       15680000
+                                           :PV-END-TMST-NULL-IND        15690000
+                       ,UPC_STAT_CDE     = :INT00003-UPC-STAT-CDE       15700000
+                                           :PV-UPC-STAT-NULL-IND        15710000
+                       ,UNT_COST_AMT     = :INT00003-UNT-COST-AMT       15720000
+                                           :PV-UPC-COST-NULL-IND        15730000
+                       ,UNT_RTL_AMT      = :INT00003-UNT-RTL-AMT        15740000
+                                           :PV-UPC-RTL-NULL-IND         15750000
+                       ,MEITGP_NBR       = :INT00003-MEITGP-NBR         15760000
+                                           :PV-MEITGP-NULL-IND          15770000
+                       ,ITM_NBR          = :INT00003-ITM-NBR            15780000
+                       ,INTR_UPC_ID      = :INT00003-INTR-UPC-ID        15790000
+                       ,UPC_STAT_CHG_DTE = :INT00003-UPC-STAT-CHG-DTE   15800000
+                       ,UNT_RTL_CHG_DTE  = :INT00003-UNT-RTL-CHG-DTE    15810000
+                       ,ORIG_CLR_DTE     = :INT00003-ORIG-CLR-DTE       15820000
+                                           :PV-CLR-DTE-NULL-IND         15830000
+                       ,MKDN_CDE         = :INT00003-MKDN-CDE           15840000
+                                           :PV-MKDN-CDE-NULL-IND        15850000
+                       ,SUB_CL_MDSEAR_ID = :INT00003-SUB-CL-MDSEAR-ID   15860000
+                       ,VS_ID            = :INT00003-VS-ID              15870000
+                       ,DEPT_NBR         = :INT00003-DEPT-NBR           15880000
+                       ,MAJ_CL_NBR       = :INT00003-MAJ-CL-NBR         15890000
+                       ,SUB_CL_NBR       = :INT00003-SUB-CL-NBR         15900000
+                       ,SKU_NBR          = :INT00003-SKU-NBR            15910000
+                       ,ENT_ID           = :INT00003-ENT-ID             15920000
+                       ,PLU_DWNLD_IND    = :INT00003-PLU-DWNLD-IND      15930000
+                WHERE UPC_ID             = :INT00003-UPC-ID             15940000
+                  AND LOC_NBR            = :INT00003-LOC-NBR            15950000
+                  AND EFF_BEG_TMST       = :INT00003-EFF-BEG-TMST       15960000
+           END-EXEC.                                                    15970000
+                                                                        15980000
+           EVALUATE TRUE                                                15990000
+               WHEN SQLCODE = 0                                         16000000
+                    CONTINUE                                            16010000
+               WHEN OTHER                                               16020000
+                    MOVE SQLCODE               TO JL-JCL-MSG1-SQLCODE   16030000
+                    SET PS-DB2-ERROR           TO TRUE                  16040000
+                    MOVE '8200-UPDATE-SKU-STYL-DLT'                     16050000
+                                               TO PV-PARAGRAPH          16060000
+                                                  JL-JCL-PARAGRAPH      16070000
+                    PERFORM 8800-PUT-ERROR-Q-MSG                        16080000
+                    MOVE 'UPDATE INT_SKU_STYL_DLT'                      16090000
+                                               TO AA-DB2-OPERATION      16100000
+                    MOVE 'INT_SKU_STYL_DLT'    TO AA-DB2-TABLE-1        16110000
+                    SET PS-DB-ERROR            TO TRUE                  16120000
+                    SET PS-STYL-SKU-END        TO TRUE                  16130000
+           END-EVALUATE.                                                16140000
+                                                                        16150000
+                                                                        16160000
+      ******************************************************************16170000
+      *  GET IN.ITEM.MESSAGE.Q MESSAGES FROM MQ SERIES                  16180000
+      ******************************************************************16190000
+       8600-MQGET-MSG.                                                  16200000
+                                                                        16210000
+           INITIALIZE PV-MSGBUFFER.                                     16220000
+           MOVE MQMI-NONE              TO MQMD-MSGID.                   16230000
+           MOVE MQCI-NONE              TO MQMD-CORRELID.                16240000
+           MOVE PC-QNAME               TO MQOD-OBJECTNAME.              16250000
+           MOVE PC-XS-QMGR-NAME        TO MQOD-OBJECTQMGRNAME.          16260000
+      *    WAIT ONE MINUTE IF NO MORE MESSAGES ARE FOUND                16270000
+           MOVE 60000                  TO MQGMO-WAITINTERVAL.           16280000
+           COMPUTE MQGMO-OPTIONS  = MQGMO-WAIT +                        16290000
+                                    MQGMO-NO-SYNCPOINT +                16300000
+                                    MQGMO-CONVERT +                     16310000
+                                    MQGMO-FAIL-IF-QUIESCING.            16320000
+                                                                        16330000
+           CALL WS-MQGET USING PV-HCONN                                 16340000
+                               PV-HANDLE                                16350000
+                               MQM-MESSAGE-DESCRIPTOR                   16360000
+                               MQM-GET-MESSAGE-OPTIONS                  16370000
+                               PC-MSGLENGTH                             16380000
+                               PV-MSGBUFFER                             16390000
+                               PV-DATA-LENGTH                           16400000
+                               PV-COMPLETION-CODE                       16410000
+                               PV-REASON.                               16420000
+                                                                        16430000
+      *        IF GET FAILED THEN DISPLAY ERROR MESSAGE                 16440000
+      *        AND BREAK OUT OF LOOP                                    16450000
+                                                                        16460000
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK)                        16470000
+               IF (PV-REASON NOT = MQRC-NO-MSG-AVAILABLE)               16480000
+                   MOVE PV-COMPLETION-CODE   TO JL-JCL-MSG1-MQ-CC       16490000
+                   MOVE '8600-MQGET-MSG'     TO PV-PARAGRAPH            16500000
+                                                JL-JCL-MQ-PARAGRAPH     16510000
+                   SET PS-MQ-ERROR           TO TRUE                    16520000
+                   PERFORM 5000-SUBMIT-EMAIL-JOB                        16530000
+                   MOVE PV-PARAGRAPH         TO PV-SAVE-PARAGRAPH       16540000
+                   MOVE PV-COMPLETION-CODE                              16550000
+                                             TO PV-SAVE-COMPLETION-CODE 16560000
+                   MOVE PV-REASON            TO PV-SAVE-REASON          16570000
+                   PERFORM 8700-CLOSE-MQ-QUEUE                          16580000
+                   MOVE PV-SAVE-PARAGRAPH    TO PV-PARAGRAPH            16590000
+                   MOVE PV-SAVE-COMPLETION-CODE                         16600000
+                                             TO PV-COMPLETION-CODE      16610000
+                   MOVE PV-SAVE-REASON       TO PV-REASON               16620000
+                   SET PE-MQ-GET             TO TRUE                    16630000
+                   SET PS-MQGET-NOT-SUCCESSFUL TO TRUE                  16640000
+                   PERFORM 9900-DISPLAY-MQ-ERROR                        16650000
+               ELSE                                                     16660000
+                   SET PS-MQGET-NOT-SUCCESSFUL TO TRUE                  16670000
+               END-IF                                                   16680000
+           ELSE                                                         16690000
+               SET PS-MQGET-SUCCESSFUL TO TRUE                          16700000
+               ADD 1 TO PV-MQGET-COUNTER                                16710000
+               MOVE PV-MSGBUFFER TO IMRD008-RECORD                      16720000
+           END-IF.                                                      16730000
+                                                                        16740000
+                                                                        16750000
+      ******************************************************************16760000
+      *  CLOSE THE INPUT MESSAGE QUEUE.                                 16770000
+      ******************************************************************16780000
+       8700-CLOSE-MQ-QUEUE.                                             16790000
+                                                                        16800000
+      *    CLOSE THE IN.ITEM.MESSAGE.Q INPUT MESSAGE QUEUE.             16810000
+           MOVE PC-QNAME               TO MQOD-OBJECTNAME.              16820000
+           CALL WS-MQCLOSE USING PV-HCONN                               16830000
+                                 PV-HANDLE                              16840000
+                                 MQCO-NONE                              16850000
+                                 PV-COMPLETION-CODE                     16860000
+                                 PV-REASON.                             16870000
+                                                                        16880000
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK)                        16890000
+               MOVE PV-COMPLETION-CODE TO JL-JCL-MSG1-MQ-CC             16900000
+               MOVE '8700-CLOSE-MQ-QUEUE - CLOSE ERROR'                 16910000
+                                       TO PV-PARAGRAPH                  16920000
+                                          JL-JCL-MQ-PARAGRAPH           16930000
+               SET PS-MQ-ERROR         TO TRUE                          16940000
+               PERFORM 5000-SUBMIT-EMAIL-JOB                            16950000
+               SET PE-MQ-CLOSE         TO TRUE                          16960000
+               PERFORM 9900-DISPLAY-MQ-ERROR                            16970000
+           END-IF.                                                      16980000
+                                                                        16990000
+                                                                        17000000
+      ******************************************************************17001099
+      *  WRITE ERROR MESSAGES TO CSSL LOG                               17002099
+      ******************************************************************17003099
+       8800-PUT-ERROR-Q-MSG.                                            17004099
+      *                                                                 17005099
+           INITIALIZE                      PV-CICS-MSG-AREA.            17005199
+           STRING ' INKCS060 ERROR ON RECORD: ',                        17005499
+                  IMRD008-RECORD, JL-JCL-LINE-MSG1-DB2 (16:50)          17005599
+               DELIMITED BY SIZE     INTO PV-CICS-MSG-AREA.             17005699
+           MOVE LENGTH OF PV-CICS-MSG-AREA                              17006199
+                                       TO PV-COMMAREA-LENGTH.           17006299
+           EXEC CICS                                                    17006399
+               WRITEQ TD                                                17006499
+                   QUEUE   ('CSSL')                                     17006599
+                   FROM    (PV-CICS-MSG-AREA)                           17006699
+                   LENGTH  (PV-COMMAREA-LENGTH)                         17006799
+                   RESP    (PV-CICS-RESP)                               17006899
+           END-EXEC.                                                    17006999
+                                                                        17007099
+                                                                        17008099
+      ******************************************************************17010000
+      *  PUT IN.ITEM.ERROR.Q MESSAGES                                   17020000
+      ******************************************************************17030000
+      *8800-PUT-ERROR-Q-MSG.                                            17040099
+      *                                                                 17050099
+      *    IF PS-MQ-ERROR-Q-NOT-OPEN                                    17060099
+      *        PERFORM 5000-SUBMIT-EMAIL-JOB                            17070099
+      *        PERFORM 1600-OPEN-MQ-ERROR-QUEUE                         17080099
+      *    END-IF.                                                      17090099
+      *                                                                 17100099
+      *    INITIALIZE PV-ER-MSGBUFFER.                                  17110099
+      *    STRING IMRD008-RECORD, JL-JCL-LINE-MSG1-DB2 (16:50)          17120099
+      *        DELIMITED BY SIZE     INTO PV-ER-MSGBUFFER.              17130099
+      *    MOVE MQMI-NONE              TO MQMD-MSGID.                   17140099
+      *    MOVE PC-CORREL-ID           TO MQMD-CORRELID.                17150099
+      *    MOVE PC-ERROR-QNAME         TO MQOD-OBJECTNAME.              17160099
+      *    MOVE PC-XS-QMGR-NAME        TO MQOD-OBJECTQMGRNAME.          17170099
+      *    MOVE MQFMT-STRING           TO MQMD-FORMAT.                  17180099
+      *    MOVE MQPER-PERSISTENT       TO MQMD-PERSISTENCE.             17190099
+      *    COMPUTE MQPMO-OPTIONS = MQPMO-FAIL-IF-QUIESCING              17200099
+      *                          + MQPMO-SET-IDENTITY-CONTEXT           17210099
+      *                          + MQPMO-SYNCPOINT.                     17220099
+      *                                                                 17230099
+      *    CALL WS-MQPUT USING PV-ER-HCONN                              17240099
+      *                        PV-ER-HANDLE                             17250099
+      *                        MQM-MESSAGE-DESCRIPTOR                   17260099
+      *                        MQM-PUT-MESSAGE-OPTIONS                  17270099
+      *                        PC-ER-MSGLENGTH                          17280099
+      *                        PV-ER-MSGBUFFER                          17290099
+      *                        PV-COMPLETION-CODE                       17300099
+      *                        PV-REASON.                               17310099
+      *                                                                 17320099
+      *        IF PUT FAILED THEN DISPLAY ERROR MESSAGE                 17330000
+      *        AND BREAK OUT OF LOOP                                    17340000
+      *                                                                 17350099
+      *    IF (PV-COMPLETION-CODE NOT = MQCC-OK)                        17360099
+      *        IF (PV-REASON NOT = MQRC-PAGESET-FULL                    17370099
+      *          AND PV-REASON NOT = MQRC-Q-FULL                        17380099
+      *          AND PV-REASON NOT = MQRC-Q-SPACE-NOT-AVAILABLE )       17390099
+      *            MOVE PV-COMPLETION-CODE   TO JL-JCL-MSG1-MQ-CC       17400099
+      *            MOVE '8800-PUT-ERROR-Q-MSG' TO PV-PARAGRAPH          17410099
+      *                                         JL-JCL-MQ-PARAGRAPH     17420099
+      *            SET PS-MQ-ERROR           TO TRUE                    17430099
+      *            PERFORM 5000-SUBMIT-EMAIL-JOB                        17440099
+      *            MOVE PV-PARAGRAPH         TO PV-SAVE-PARAGRAPH       17450099
+      *            MOVE PV-COMPLETION-CODE                              17460099
+      *                                      TO PV-SAVE-COMPLETION-CODE 17470099
+      *            MOVE PV-REASON            TO PV-SAVE-REASON          17480099
+      *            PERFORM 8900-CLOSE-MQ-ERROR-QUEUE                    17490099
+      *            MOVE PV-SAVE-PARAGRAPH    TO PV-PARAGRAPH            17500099
+      *            MOVE PV-SAVE-COMPLETION-CODE                         17510099
+      *                                      TO PV-COMPLETION-CODE      17520099
+      *            MOVE PV-SAVE-REASON       TO PV-REASON               17530099
+      *            SET PE-MQ-PUT             TO TRUE                    17540099
+      *            SET PS-MQPUT-NOT-SUCCESSFUL TO TRUE                  17550099
+      *            PERFORM 9900-DISPLAY-MQ-ERROR                        17560099
+      *        ELSE                                                     17570099
+      *            SET PS-MQPUT-NOT-SUCCESSFUL TO TRUE                  17580099
+      *        END-IF                                                   17590099
+      *    ELSE                                                         17600099
+      *        SET PS-MQPUT-SUCCESSFUL TO TRUE                          17610099
+      *        ADD 1 TO PV-MQPUT-COUNTER                                17620099
+      *    END-IF.                                                      17630099
+      *                                                                 17640099
+      *                                                                 17650099
+      ******************************************************************17660000
+      *  CLOSE THE ERROR MESSAGE QUEUE.                                 17670000
+      ******************************************************************17680000
+      *8900-CLOSE-MQ-ERROR-QUEUE.                                       17690099
+      *                                                                 17700099
+      *    CLOSE THE IN.ITEM.ERROR.Q OUTPUT MESSAGE QUEUE.              17710000
+      *    MOVE PC-ERROR-QNAME         TO MQOD-OBJECTNAME.              17720099
+      *    CALL WS-MQCLOSE USING PV-ER-HCONN                            17730099
+      *                          PV-ER-HANDLE                           17740099
+      *                          MQCO-NONE                              17750099
+      *                          PV-COMPLETION-CODE                     17760099
+      *                          PV-REASON.                             17770099
+      *                                                                 17780099
+      *    IF (PV-COMPLETION-CODE NOT = MQCC-OK)                        17790099
+      *        MOVE PV-COMPLETION-CODE TO JL-JCL-MSG1-MQ-CC             17800099
+      *        MOVE '8900-CLOSE-MQ-ERROR-QUEUE - CLOSE ERROR'           17810099
+      *                                TO PV-PARAGRAPH                  17820099
+      *                                   JL-JCL-MQ-PARAGRAPH           17830099
+      *        SET PS-MQ-ERROR         TO TRUE                          17840099
+      *        PERFORM 5000-SUBMIT-EMAIL-JOB                            17850099
+      *        SET PE-MQ-CLOSE         TO TRUE                          17860099
+      *        PERFORM 9900-DISPLAY-MQ-ERROR                            17870099
+      *    END-IF.                                                      17880099
+                                                                        17890000
+                                                                        17900000
+      ******************************************************************17910000
+      *  9000-END-ROUTINE.                                             *17920000
+      *  CLOSE IN.ITEM.MESSAGE.Q                                       *17930000
+      *  SET CHECKPOINT STATUS CODE TO ZERO.                           *17940000
+      *  RETURN CONTROL TO CICS.                                       *17950000
+      ******************************************************************17960000
+       9000-END-ROUTINE.                                                17970000
+                                                                        17980000
+           PERFORM 8700-CLOSE-MQ-QUEUE.                                 17990000
+      *    IF PS-MQ-ERROR-Q-OPEN                                        18000099
+      *        PERFORM 8900-CLOSE-MQ-ERROR-QUEUE                        18010099
+      *    END-IF.                                                      18020099
+           MOVE '0' TO TCKRSTCNTL-CKPT-STAT-CODE                        18030000
+           PERFORM 7900-UPDATE-TCKRSTCNTL                               18040000
+           PERFORM 9990-EXEC-CICS-RETURN.                               18050000
+                                                                        18060000
+                                                                        18070000
+      ******************************************************************18080000
+      *     DB2 ERROR ROUTINE                                           18090000
+      ******************************************************************18100000
+       9800-DB2-ERROR-ROUTINE.                                          18110000
+                                                                        18120000
+           SET DP013-LINK-RETURN                                        18130000
+               DP013-DB2-ABEND                                          18140000
+               DP013-ROLLBACK     TO TRUE.                              18150000
+           MOVE SQLCA             TO DP013-SQLCA.                       18160000
+           MOVE PV-PARAGRAPH      TO DP013-PARAGRAPH.                   18170000
+           MOVE AA-DB2-OPERATION-LIT                                    18180000
+                                  TO DP013-MESSAGE-TEXT (1).            18190000
+           MOVE AA-DB2-TABLE-1    TO DP013-DB2-TABLE-NAME (1).          18200000
+           PERFORM 9950-PROGRAM-ABEND.                                  18210000
+                                                                        18220000
+                                                                        18230000
+      ******************************************************************18240000
+      * DISPLAY THE VALUES OF A FAILED MQ API COMMAND, AND ABEND PGM    18250000
+      ******************************************************************18260000
+       9900-DISPLAY-MQ-ERROR.                                           18270000
+                                                                        18280000
+           CALL WS-MQCHECK USING PV-REASON PE-MQ-REASON-TEXT.           18290000
+           MOVE PV-REASON        TO PE-MQ-REASON-CODE.                  18300000
+                                                                        18310000
+           SET DP013-LINK-RETURN                                        18320000
+               DP013-OTHER-ABEND                                        18330000
+               DP013-ROLLBACK     TO TRUE.                              18340000
+           MOVE PV-PARAGRAPH      TO DP013-PARAGRAPH.                   18350000
+           MOVE PE-MQ-ERROR-MESSAGE                                     18360000
+                                  TO DP013-MESSAGE-TEXT (1).            18370000
+           MOVE PE-MQ-REASON-MESSAGE                                    18380000
+                                  TO DP013-MESSAGE-TEXT (2).            18390000
+           PERFORM 9950-PROGRAM-ABEND.                                  18400000
+                                                                        18410000
+                                                                        18420000
+      ******************************************************************18430000
+      * ABEND THE PROGRAM                                               18440000
+      ******************************************************************18450000
+       9950-PROGRAM-ABEND.                                              18460000
+                                                                        18470000
+           PERFORM DP014-0000-PROCESS-ABEND.                            18480000
+           PERFORM 9990-EXEC-CICS-RETURN.                               18490000
+                                                                        18500000
+                                                                        18510000
+       9990-EXEC-CICS-RETURN.                                           18520000
+           EXEC CICS                                                    18530000
+               RETURN                                                   18540000
+           END-EXEC.                                                    18550000
+                                                                        18560000
+      ******************************************************************18570000
+      *    NON-CICS ARCHITECTURE ABEND ROUTINE CALL                     18580000
+      ******************************************************************18590000
+                                                                        18600000
+           COPY DPPD014.                                                18610000

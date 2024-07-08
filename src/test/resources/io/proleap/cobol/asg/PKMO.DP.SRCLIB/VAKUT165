@@ -1,0 +1,563 @@
+       IDENTIFICATION DIVISION.                                                 
+W34517 PROGRAM-ID.              VAKUT165.                                       
+       AUTHOR.                  JULIE SEIDLER.                                  
+       INSTALLATION.            KOHLS DEPARTMENT STORES.                        
+       DATE-WRITTEN.            06/26/98.                                       
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+W34517*********** I M P O R T A N T ************************************        
+W34517* THIS IS A CLONE OF INKUT165 CREATED FOR THE VA PROJECT                  
+W34517* NO CHANGES ON TABLES                                                    
+      ******************************************************************        
+      *                   SHORTAGE EXTRACT                                      
+      *                                                                         
+      * THIS PROGRAM WILL EXTRACT THE SALES BASE, ITS ASSOCIATED SHRINK,        
+      * AND THE BOOK VALUE OF THE ENDING INVENTORY, AND CREATE A                
+      * SHORTAGE EXTRACT FILE BY DEPARTMENT/SUBCLASS/STORE.                     
+      *                                                                         
+      * FIRST, THE SALES BASE CONTROL FILE IS READ AND USED TO LOAD A           
+      * WORKING-STORAGE STORE TABLE CONTAINING THE UNBOOKED INVENTORY           
+      * INDICATOR. IF THE UNBOOKED INVENTORY INDICATOR IS SET TO 'Y',           
+      * IT INDICATES THAT THE STORE HAS AN UNBOOKED INVENTORY IN THE            
+      * OPEN MONTH. ONLY STORES WITH AN INDICATOR OF 'Y' ARE INCLUDED           
+      * IN THE OUTPUT FILE.                                                     
+      *                                                                         
+      * THE SALES BASE CUM FILE IS THEN PROCESSED. IT IS AT THE                 
+      * DEPARTMENT/SUBCLASS/STORE LEVEL. FOR EACH RECORD, THE STORE IS          
+      * MATCHED AGAINST THE STORE TABLE SO THAT THE UNBOOKED INVENTORY          
+      * INDICATOR CAN BE CHECKED. IF THE INDICATOR IS 'Y', A SHORTAGE           
+      * EXTRACT RECORD IS WRITTEN. THE RECORD CONTAINS THE CUMULATIVE           
+      * SALES AMOUNT FROM THE CUM FILE RECORD IN THE SLS-BSE-RTL-AMT            
+      * FIELD, AND THE CUMULATIVE SHRINK AMOUNT FROM THE CUM FILE RECORD        
+      * IN THE SHNK-RTL-AMT FIELD.                                              
+      *                                                                         
+      * NEXT, A CURSOR IS OPENED TO RETRIEVE THE ENDING INVENTORY FOR           
+      * THE OPEN MONTH FROM THE INVENTORY MONTHLY SUBCLASS/STORE TABLE,         
+      * TINSCLS. TINSCLS CONTAINS ONLY BEFORE-INVENTORY DATA, SO ITS            
+      * ENDING INVENTORY REFLECTS THE BOOK VALUE OF THE INVENTORY AT THE        
+      * TIME INVENTORY WAS TAKEN. FOR EACH ROW IN THE CURSOR, THE STORE         
+      * IS MATCHED AGAINST THE STORE TABLE SO THAT THE UNBOOKED                 
+      * INVENTORY INDICATOR CAN BE CHECKED. IF THE INDICATOR IS 'Y', A          
+      * SHORTAGE EXTRACT RECORD IS WRITTEN FOR THE DEPARTMENT/SUBCLASS/         
+      * STORE. THE RECORD CONTAINS THE ENDING INVENTORY AMOUNT FROM             
+      * TINSCLS IN THE BOOK-INV-RTL-AMT FIELD.                                  
+      *                                                                         
+      * THESE INDIVIDUAL SHORTAGE RECORDS ARE THEN SUMMED BY A SORT STEP        
+      * TO CREATE ONE RECORD PER DEPARTMENT/SUBCLASS/STORE. THE SUMMED          
+      * FILE WILL LATER BE COMBINED WITH AN EXTRACT CONTAINING THE              
+      * PHYSICAL INVENTORY, THUS CREATING THE FINAL SHORTAGE EXTRACT            
+      * FILE THAT WILL DRIVE THE SHORTAGE REPORTING AND THE CREATION OF         
+      * THE INVENTORY ADJUSTMENTS.                                              
+      *                                                                         
+      ******************************************************************        
+      *  03/08/99    J. SEIDLER                                                 
+      *              THIS PROGRAM WAS RE-WRITTEN TO NOT DRIVE OFF THE           
+      *              ACTIVE DEPARTMENTS ON THE MBS TABLES.                      
+      *              INSTEAD ALL DEPT/SUBCLASSES ON THE                         
+      *              LEDGER AND INVENTORY TABLES WILL BE PROCESSED.             
+      ******************************************************************        
+      *  07/04/99    J. SEIDLER                                                 
+      *              CHANGED PROGRAM TO INCLUDE TINSCLS CUTOFF VALUES           
+      *              WHEN DETERMINING SALES AND SHRINK.                         
+      ******************************************************************        
+      *    MODIFIED  03/20/2000  BY: TESS BESTE      PROJECT: WR20839           
+      *                                                                         
+      *    REWROTE PROGRAM TO USE THE NEW SALES BASE FILES TO DETERMINE         
+      *    THE SALES BASE AND ITS ASSOCIATED SHRINK. CHANGED LOGIC TO           
+      *    DETERMINE THE STORES TO BE INCLUDED IN THE OUTPUT FILE BY            
+      *    READING THE SALES BASE CONTROL FILE AND CHECKING THE BOOKED          
+      *    INVENTORY INDICATOR. REMOVED ALL LOGIC FOR CALCULATING THE           
+      *    SALES BASE AND SHRINK, AND REPLACED IT WITH LOGIC TO GET THE         
+      *    SALES AND SHRINK FROM THE SALES BASE CUM FILE. THIS INCLUDED         
+      *    ELIMINATING THE INPUT TMNSCLS AND TINSCLS UNLOAD FILES. ADDED        
+      *    LOGIC TO GET THE ENDING INVENTORY DIRECTLY FROM TINSCLS.             
+      ******************************************************************        
+      *    MODIFIED  04/03/2000  BY: BOB MCASEY      PROJECT: WR20839           
+      *                                                                         
+      *    ADDED LOGIC TO MOVE THE ESTIMATED ADJUSTMENT AMOUNT FROM THE         
+      *    SALES BASE CUM FILE TO THE SHORTAGE EXTRACT RECORD.                  
+      ******************************************************************        
+      *    MODIFIED  06/07/2000  BY: SCOTT JACKSON  CHANGE ID : 'PHYCNT'        
+      *    CHANGED LOGIC TO ONLY WRITE A SHORTAGE EXTRACT RECORD IF THE         
+      *    STORE HAS PERFORMED A 'PHYSICAL' INVENTORY. STORES NOT DOING         
+      *    PHYSICAL COUNTS WILL RECEIVE 'ESTIMATED' SHORTAGE ADJUSTMENTS        
+      *    BUT THESE STORES WILL NOT BE INCLUDED ON THE EXTRACT OUTPUT.         
+      *    'CLOSED' STORES WILL RECEIVE ADJUSTMENTS LIKE 'PHYSICAL' STRS        
+      *    AND BE WRITTEN TO THE EXTRACT FILE TO 'ZERO-OUT' THEIR INV$.         
+      *                                                                         
+W26600* W26600  04-05-2004 ROD JANSSEN INV LEDGER STORE EXPANSION               
+W20445* W20445  09-01-2004 ROD JANSSEN DETAILED INVNENTORY ADJUSTMENT           
+W28582* W28582  12-22-2005 CLARK SCHWENN VENDOR/BRAND CHANGES                   
+W34517* W34517  10-14-2008 IN-VA INVENTORY STREAM SPLIT                         
+W33304* W33304  11-11-2008 VIGNESH/INFOSYS                                      
+W33304*                    HOLDING INVENTORY LEDGER OPEN - (HILO)               
+F33304* F33304  09-15-2009  BRUCE GRAHAM/KFORCE                                 
+F33304*                     RUN TIME ISSUE                                      
+F33304*                     FIX DB2 DECLARE CURSOR HILO CHANGE                  
+      ******************************************************************        
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+       CONFIGURATION SECTION.                                                   
+       SOURCE-COMPUTER. IBM-3090.                                               
+       OBJECT-COMPUTER. IBM-3090.                                               
+       INPUT-OUTPUT SECTION.                                                    
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT SALES-BASE-CNTL-FILE                                          
+               ASSIGN TO INP01.                                                 
+                                                                                
+           SELECT SALES-BASE-CUM-FILE                                           
+               ASSIGN TO INP02.                                                 
+                                                                                
+           SELECT SHORTAGE-EXTRACT-FILE                                         
+               ASSIGN TO OUT01.                                                 
+                                                                                
+       DATA DIVISION.                                                           
+       FILE SECTION.                                                            
+                                                                                
+       FD  SALES-BASE-CNTL-FILE                                                 
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 CHARACTERS.                                         
+                                                                                
+       01  SALES-BASE-CNTL-REC         PIC X(50).                               
+                                                                                
+       FD  SALES-BASE-CUM-FILE                                                  
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 CHARACTERS.                                         
+                                                                                
+W20445 01  SALES-BASE-CUM-REC          PIC X(80).                               
+                                                                                
+       FD  SHORTAGE-EXTRACT-FILE                                                
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           BLOCK CONTAINS 0 RECORDS.                                            
+                                                                                
+W33304 01  SHORTAGE-EXTRACT-RECORD           PIC X(170).                        
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-MAX-RETRIES               PIC S9(04) COMP SYNC                
+                                                       VALUE +3.                
+                                                                                
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-TINSCLS-ROW-FND-SW        PIC X      VALUE 'N'.               
+               88  PS-TINSCLS-ROW-FND                  VALUE 'Y'.               
+               88  PS-TINSCLS-ROW-NOT-FND              VALUE 'N'.               
+           05  PS-END-OF-CNTL-FILE-SW       PIC X      VALUE 'N'.               
+               88  PS-END-OF-CNTL-FILE                 VALUE 'Y'.               
+           05  PS-END-OF-CUM-FILE-SW        PIC X      VALUE 'N'.               
+               88  PS-END-OF-CUM-FILE                  VALUE 'Y'.               
+           05  PS-END-OF-END-INV-CSR-SW     PIC X      VALUE 'N'.               
+               88  PS-END-OF-END-INV-CSR               VALUE 'Y'.               
+                                                                                
+                                                                                
+       01  PV-PROGRAM-VARIABLES.                                                
+           05  PV-DB2-OPER-ATTEMPTED        PIC X(30).                          
+           05  PV-PARAGRAPH-NAME            PIC X(30).                          
+           05  PV-RETRY-COUNT               PIC S9(04) COMP SYNC                
+                                                       VALUE ZERO.              
+           05  PV-MAJCL.                                                        
+               10 PV-MAJCL-1                PIC X(01)  VALUE SPACES.            
+               10 FILLER                    PIC X(01)  VALUE ZERO.              
+           05  PV-SQL-SUB                   PIC 9(03)  VALUE ZEROES.            
+                                                                                
+           05  PV-ABEND-CODE                PIC S9(04) COMP                     
+                                                       VALUE ZERO.              
+W33304     05  PV-MIN-INCNTL-OPN-FSCL-MN-DTE                                    
+W33304                                      PIC X(10)  VALUE SPACES.            
+W33304     05  PV-MAX-INCNTL-OPN-FSCL-MN-DTE                                    
+W33304                                      PIC X(10)  VALUE SPACES.            
+W33304     05  PV-MIN-INCNTL-OPN-FSCL-MN-NBR                                    
+W33304                                      PIC X(02)  VALUE SPACES.            
+W33304     05  PV-MAX-INCNTL-OPN-FSCL-MN-NBR                                    
+W33304                                      PIC X(02)  VALUE SPACES.            
+W33304     05  PV-NULL                      PIC S9(04) VALUE +0            CL*34
+W33304                                                 COMP SYNC.          CL*34
+                                                                                
+      *    STORE TABLE                                                          
+       01  ST-SUB                            PIC S9(04)    COMP SYNC.           
+W26600 01  ST-MAX-ENTRIES                    PIC S9(04) COMP VALUE 9999.        
+       01  ST-STORE-TABLE.                                                      
+W26600     05  ST-STORE-TABLE-ENTRY          OCCURS 9999 TIMES.                 
+W26600         10  ST-STR-NBR                PIC S9(04) COMP.                   
+               10  ST-UNBKD-INV-IND          PIC X.                             
+W33304         10  ST-SCHEDULED-INV-TYPE-CDE PIC XX.                            
+W33304         10  ST-INV-ID                 PIC S9(09) COMP.                   
+W33304         10  ST-SLS-BSE-MN-END-DTE     PIC X(10).                         
+W33304         10  ST-FINCL-INV-STAT-CDE     PIC X(02).                         
+                                                                                
+      ******************************************************************        
+      * RECORD LAYOUT  OR SALES BASE CONTROL FILE                               
+      ******************************************************************        
+                                                                                
+           COPY INRD022.                                                        
+                                                                                
+      ******************************************************************        
+      * RECORD LAYOUT FOR SALES BASE CUM FILE                                   
+      ******************************************************************        
+                                                                                
+W20445     COPY INRD023.                                                        
+                                                                                
+      ****************************************************************          
+      * RECORD LAYOUT FOR SHORTAGE EXTRACT FILE                                 
+      ****************************************************************          
+                                                                                
+W20445     COPY INRD014.                                                        
+                                                                                
+      ****************************************************************          
+      *  ERROR MESSAGE AREA FOR DB2                                             
+      ****************************************************************          
+                                                                                
+           COPY DPWS004.                                                        
+      ****************************************************************          
+W33304* INVENTORY CONTROL TABLE                                                 
+      ****************************************************************          
+                                                                                
+           EXEC SQL                                                             
+W33304         INCLUDE TINCNTL                                                  
+           END-EXEC.                                                            
+                                                                                
+W33304****************************************************************          
+W33304* INVENTORY PARM TABLE                                                    
+W33304****************************************************************          
+W33304     EXEC SQL                                                             
+W33304         INCLUDE TINVPAR                                                  
+W33304     END-EXEC.                                                            
+W33304                                                                          
+      ****************************************************************          
+      * INVENTORY LEDGER SUBCLASS/STORE TABLE                                   
+      ****************************************************************          
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TINSCLS                                                  
+           END-EXEC.                                                            
+                                                                                
+      ****************************************************************          
+      *  COMMUNICATION AREAS FOR DB2                                            
+      ****************************************************************          
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+                                                                                
+      ******************************************************************        
+      * CURSOR TO OPEN MONTH ENDING INVENTORY FROM TINSCLS.                     
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               DECLARE END_INV_CSR CURSOR FOR                                   
+W33304             SELECT A.DEPT_NBR                                            
+W33304                   ,A.SUB_CL_NBR                                          
+W33304                   ,A.STR_NBR                                             
+W33304                   ,A.IN_LO_MDSE_LVL_ID                                   
+W33304                   ,A.END_INV_RTL_AMT                                     
+W33304             FROM TINSCLS A                                               
+W33304                 ,TINVPAR B                                               
+W33304                 ,TINCNTL C                                               
+F33304             WHERE A.FSCL_MN_NBR                                          
+F33304                              = C.OPN_FSCL_MN_NBR                         
+F33304               AND A.FSCL_MN_END_DTE                                      
+F33304                              = C.OPN_FSCL_MN_DTE                         
+W33304               AND A.STR_NBR            = B.LOC_NBR                       
+W33304               AND B.ACTL_FIN_BK_DTE    = '9999-09-09'                    
+W33304               AND B.LOC_INV_STAT_CDE   = 'IN'                            
+W33304               AND B.SCHD_PHY_CNT_CDE <> 'EI'                             
+W33304               AND B.INV_ID             = C.INV_ID                        
+W33304               AND C.ACTV_IND           = 'Y'                             
+           END-EXEC.                                                            
+                                                                                
+                                                                                
+       LINKAGE SECTION.                                                         
+                                                                                
+                                                                                
+                                                                                
+       PROCEDURE DIVISION.                                                      
+                                                                                
+                                                                                
+       1000-MAIN-MODULE.                                                        
+                                                                                
+           OPEN INPUT  SALES-BASE-CNTL-FILE                                     
+                       SALES-BASE-CUM-FILE                                      
+                OUTPUT SHORTAGE-EXTRACT-FILE.                                   
+                                                                                
+           PERFORM 1150-INIT.                                                   
+                                                                                
+           PERFORM 7050-READ-SALES-BASE-CUM-FILE.                               
+           IF PS-END-OF-CUM-FILE                                                
+                DISPLAY '** ABEND **'                                           
+W34517          DISPLAY '** PGM = VAKUT165 **'                                  
+                DISPLAY '** SALES BASE CUM FILE IS EMPTY.'              INKUT119
+                MOVE +4003 TO PV-ABEND-CODE                                CL**5
+                CALL 'ILBOABN0'  USING PV-ABEND-CODE                    INKUT119
+           END-IF.                                                              
+                                                                                
+           PERFORM 2000-PROCESS-CUM-FILE                                        
+             UNTIL PS-END-OF-CUM-FILE.                                          
+                                                                                
+           PERFORM 8400-OPEN-END-INV-CSR.                                       
+           PERFORM 8425-FETCH-END-INV-CSR.                                      
+           PERFORM 3000-PROCESS-END-INV-CSR                                     
+             UNTIL PS-END-OF-END-INV-CSR.                                       
+           PERFORM 8450-CLOSE-END-INV-CSR.                                      
+                                                                                
+           CLOSE SALES-BASE-CNTL-FILE                                           
+                 SALES-BASE-CUM-FILE                                            
+                 SHORTAGE-EXTRACT-FILE.                                         
+                                                                                
+           STOP RUN.                                                            
+                                                                                
+                                                                                
+       1150-INIT.                                                               
+                                                                                
+           PERFORM 8600-READ-OPEN-FSCL-MN-TABLE.                                
+W33304     DISPLAY 'OPEN FISCAL MONTH DATE: '                                   
+W33304         PV-MIN-INCNTL-OPN-FSCL-MN-DTE ' TO '                             
+W33304         PV-MAX-INCNTL-OPN-FSCL-MN-DTE.                                   
+W33304     DISPLAY 'OPEN FISCAL MONTH NBR:  '                                   
+W33304         PV-MIN-INCNTL-OPN-FSCL-MN-NBR ' TO '                             
+W33304         PV-MAX-INCNTL-OPN-FSCL-MN-NBR.                                   
+                                                                                
+      *    LOAD THE STORE TABLE FROM THE SALES BASE CONTROL FILE.               
+                                                                                
+           INITIALIZE ST-STORE-TABLE.                                           
+                                                                                
+           PERFORM 7000-READ-SALES-BASE-CNTL-FILE.                              
+                                                                                
+           IF PS-END-OF-CNTL-FILE                                               
+                DISPLAY '** ABEND **'                                           
+W34517          DISPLAY '** PGM = VAKUT165 **'                                  
+                DISPLAY '** SALES BASE CONTROL FILE IS EMPTY.'          INKUT119
+                MOVE +4003 TO PV-ABEND-CODE                                CL**5
+                CALL 'ILBOABN0'  USING PV-ABEND-CODE                    INKUT119
+           END-IF.                                                              
+                                                                                
+           PERFORM UNTIL PS-END-OF-CNTL-FILE                                    
+               MOVE IN022-STR-NBR TO ST-SUB                                     
+               IF ST-SUB > ST-MAX-ENTRIES                                       
+                   DISPLAY '** ABEND **'                                        
+W34517             DISPLAY '** PGM = VAKUT165 **'                               
+                   DISPLAY '** TABLE OVERFLOW ON ST-STORE-TABLE.'               
+                   MOVE +4004 TO PV-ABEND-CODE                                  
+                   CALL 'ILBOABN0'  USING PV-ABEND-CODE                 INKUT119
+               ELSE                                                             
+                   MOVE IN022-STR-NBR       TO ST-STR-NBR       (ST-SUB)        
+                   MOVE IN022-UNBKD-INV-IND TO ST-UNBKD-INV-IND (ST-SUB)        
+PHYCNT             MOVE IN022-SCHEDULED-INV-TYPE-CDE TO                         
+PHYCNT                                ST-SCHEDULED-INV-TYPE-CDE (ST-SUB)        
+W33304             MOVE IN022-INV-ID    TO ST-INV-ID            (ST-SUB)        
+W33304             MOVE IN022-SLS-BSE-MN-END-DTE                                
+W33304                                  TO ST-SLS-BSE-MN-END-DTE(ST-SUB)        
+W33304             MOVE IN022-FINCL-INV-STAT-CDE                                
+W33304                                  TO ST-FINCL-INV-STAT-CDE(ST-SUB)        
+                   PERFORM 7000-READ-SALES-BASE-CNTL-FILE                       
+               END-IF                                                           
+           END-PERFORM.                                                         
+                                                                                
+                                                                                
+       2000-PROCESS-CUM-FILE.                                                   
+                                                                                
+           MOVE IN023-STR-NBR TO ST-SUB.                                        
+                                                                                
+      *    A STORE SHOULD ONLY BE INCLUDED IN THE SHORTAGE EXTRACT FILE         
+      *    IF IT HAS AN ACTUAL UNBOOKED INVENTORY.                              
+PHYCNT*                                                                         
+PHYCNT*    IN ADDITION TO STORES DOING PHYSICAL INVENTORY,CAPTURE CLOSED        
+PHYCNT*    STORES SO THAT ANY INVENTORY DOLLARS LEFT WILL BE REVERSED           
+PHYCNT*    AND ZEROED OFF THE BOOKS                                             
+      *                                                                         
+           IF ( (ST-UNBKD-INV-IND (ST-SUB) = 'Y')  AND                          
+W33304          (ST-SCHEDULED-INV-TYPE-CDE (ST-SUB)                             
+W33304                                     = 'PI' OR 'CL' OR 'NS') )            
+               INITIALIZE IN014-SHORTAGE-EXTR-REC                               
+               MOVE IN023-DEPT-NBR         TO IN014-DEPT-NBR                    
+               MOVE IN023-SUB-CL-NBR       TO PV-MAJCL-1                        
+               MOVE PV-MAJCL               TO IN014-MAJ-CL-NBR                  
+               MOVE IN023-SUB-CL-NBR       TO IN014-SUB-CL-NBR                  
+               MOVE IN023-STR-NBR          TO IN014-STR-NBR                     
+W20445         MOVE IN023-ML-LWST-ID       TO IN014-ML-LWST-ID                  
+               MOVE IN023-CUM-SLS-RTL-AMT  TO IN014-SLS-BSE-RTL-AMT             
+               MOVE IN023-CUM-SHNK-RTL-AMT TO IN014-SHNK-RTL-AMT                
+0400RM         MOVE IN023-ESTIMATED-INV-ADJ-AMT TO                              
+0400RM              IN014-ESTIMATED-INV-ADJ-AMT                                 
+W33304         MOVE ST-SLS-BSE-MN-END-DTE(ST-SUB)                               
+W33304                                     TO IN014-OPN-FSCL-MN-DTE             
+W33304         MOVE ST-INV-ID(ST-SUB)      TO IN014-INV-ID                      
+W33304         MOVE ST-FINCL-INV-STAT-CDE(ST-SUB)                               
+W33304                                     TO IN014-FINCL-INV-STAT-CDE          
+               PERFORM 7100-WRITE-SHORTAGE-EXTRACT                              
+           END-IF.                                                              
+                                                                                
+           PERFORM 7050-READ-SALES-BASE-CUM-FILE.                               
+                                                                                
+                                                                                
+       3000-PROCESS-END-INV-CSR.                                                
+                                                                                
+           MOVE INSCLS-STR-NBR TO ST-SUB.                                       
+                                                                                
+      *    A STORE SHOULD ONLY BE INCLUDED IN THE SHORTAGE EXTRACT FILE         
+      *    IF IT HAS AN ACTUAL UNBOOKED INVENTORY.                              
+           IF  ST-UNBKD-INV-IND   (ST-SUB) = 'Y'                                
+           AND INSCLS-END-INV-RTL-AMT      NOT = ZERO                           
+               INITIALIZE IN014-SHORTAGE-EXTR-REC                               
+               MOVE INSCLS-DEPT-NBR        TO IN014-DEPT-NBR                    
+               MOVE INSCLS-SUB-CL-NBR      TO PV-MAJCL-1                        
+               MOVE PV-MAJCL               TO IN014-MAJ-CL-NBR                  
+               MOVE INSCLS-SUB-CL-NBR      TO IN014-SUB-CL-NBR                  
+               MOVE INSCLS-STR-NBR         TO IN014-STR-NBR                     
+W20445         MOVE INSCLS-IN-LO-MDSE-LVL-ID TO IN014-ML-LWST-ID                
+               MOVE INSCLS-END-INV-RTL-AMT TO IN014-BOOK-INV-RTL-AMT            
+W33304         MOVE ST-SLS-BSE-MN-END-DTE(ST-SUB)                               
+W33304                                     TO IN014-OPN-FSCL-MN-DTE             
+W33304         MOVE ST-INV-ID(ST-SUB)      TO IN014-INV-ID                      
+W33304         MOVE ST-FINCL-INV-STAT-CDE(ST-SUB)                               
+W33304                                     TO IN014-FINCL-INV-STAT-CDE          
+               PERFORM 7100-WRITE-SHORTAGE-EXTRACT                              
+           END-IF.                                                              
+                                                                                
+           PERFORM 8425-FETCH-END-INV-CSR.                                      
+                                                                                
+                                                                                
+       7000-READ-SALES-BASE-CNTL-FILE.                                          
+                                                                                
+           READ SALES-BASE-CNTL-FILE INTO IN022-SALES-BASE-CNTL-REC             
+             AT END SET PS-END-OF-CNTL-FILE TO TRUE                             
+           END-READ.                                                            
+                                                                                
+                                                                                
+       7050-READ-SALES-BASE-CUM-FILE.                                           
+                                                                                
+           READ SALES-BASE-CUM-FILE INTO IN023-SALES-BASE-CUM-REC               
+             AT END SET PS-END-OF-CUM-FILE TO TRUE                              
+           END-READ.                                                            
+                                                                                
+                                                                                
+       7100-WRITE-SHORTAGE-EXTRACT.                                             
+                                                                                
+               WRITE SHORTAGE-EXTRACT-RECORD                                    
+                   FROM IN014-SHORTAGE-EXTR-REC.                                
+                                                                                
+                                                                                
+       8400-OPEN-END-INV-CSR.                                                   
+                                                                                
+           EXEC SQL                                                             
+               OPEN END_INV_CSR                                                 
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = ZERO                                              
+                   CONTINUE                                                     
+               WHEN OTHER                                                       
+                   MOVE '8400-OPEN-END-INV-CSR' TO PV-PARAGRAPH-NAME            
+                   MOVE 'OPEN END_INV_CSR'      TO PV-DB2-OPER-ATTEMPTED        
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+                                                                                
+       8425-FETCH-END-INV-CSR.                                                  
+                                                                                
+           EXEC SQL                                                             
+               FETCH END_INV_CSR                                                
+               INTO  :INSCLS-DEPT-NBR                                           
+                    ,:INSCLS-SUB-CL-NBR                                         
+                    ,:INSCLS-STR-NBR                                            
+W20445              ,:INSCLS-IN-LO-MDSE-LVL-ID                                  
+                    ,:INSCLS-END-INV-RTL-AMT                                    
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = ZERO                                              
+                   CONTINUE                                                     
+               WHEN SQLCODE = +100                                              
+                   SET PS-END-OF-END-INV-CSR TO TRUE                            
+               WHEN OTHER                                                       
+                   MOVE '8425-FETCH-END-INV-CSR'                                
+                                                TO PV-PARAGRAPH-NAME            
+                   MOVE 'FETCH END_INV_CSR'     TO PV-DB2-OPER-ATTEMPTED        
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+                                                                                
+       8450-CLOSE-END-INV-CSR.                                                  
+                                                                                
+           EXEC SQL                                                             
+               CLOSE END_INV_CSR                                                
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = ZERO                                              
+                   CONTINUE                                                     
+               WHEN OTHER                                                       
+                   MOVE '8450-CLOSE-END-INV-CSR'                                
+                                               TO PV-PARAGRAPH-NAME             
+                   MOVE 'CLOSE END-INV-CSR'    TO PV-DB2-OPER-ATTEMPTED D       
+                   PERFORM 9999-SQL-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+                                                                                
+       8600-READ-OPEN-FSCL-MN-TABLE.                                            
+                                                                                
+           PERFORM                                                              
+               WITH TEST AFTER                                                  
+               VARYING PV-RETRY-COUNT FROM 1 BY 1                               
+                 UNTIL (PV-RETRY-COUNT > PC-MAX-RETRIES)                        
+                    OR (SQLCODE         = +000)                                 
+                                                                                
+               EXEC SQL                                                         
+W33304              SELECT  MIN(OPN_FSCL_MN_DTE)                                
+W33304                     ,MAX(OPN_FSCL_MN_DTE)                                
+W33304                     ,MIN(OPN_FSCL_MN_NBR)                                
+W33304                     ,MAX(OPN_FSCL_MN_NBR)                                
+W33304              INTO    :PV-MIN-INCNTL-OPN-FSCL-MN-DTE :PV-NULL             
+W33304                     ,:PV-MAX-INCNTL-OPN-FSCL-MN-DTE :PV-NULL             
+W33304                     ,:PV-MIN-INCNTL-OPN-FSCL-MN-NBR :PV-NULL             
+W33304                     ,:PV-MAX-INCNTL-OPN-FSCL-MN-NBR :PV-NULL             
+W33304              FROM   TINCNTL                                              
+W33304              WHERE  ACTV_IND = 'Y'                                       
+W33304              WITH UR                                                     
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE        = +000                                   
+                   WHEN SQLCODE        = +100                                   
+                        DISPLAY 'NO ACTIVE CYCLES'                              
+                   WHEN SQLCODE        = -904                                   
+                   WHEN SQLCODE        = -911                                   
+                       CONTINUE                                                 
+                   WHEN OTHER                                                   
+                       MOVE    '8600-READ-OPEN-FSCL-MN-TABLE'                   
+                                                TO PV-PARAGRAPH-NAME            
+W33304                 MOVE    'SELECT ROW FROM TINCNTL'                        
+                                                TO PV-DB2-OPER-ATTEMPTED        
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+                                                                                
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-RETRY-COUNT > PC-MAX-RETRIES                                  
+W33304         DISPLAY '** MAX RETRIES EXCEEDED ON TINCNTL **'                  
+               MOVE    '8600-READ-OPEN-FSCL-MN-TABLE'                           
+                                                TO PV-PARAGRAPH-NAME            
+W33304         MOVE    'SELECT ROW FROM TINCNTL'                                
+                                                TO PV-DB2-OPER-ATTEMPTED        
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+       9999-SQL-ABEND.                                                          
+                                                                                
+           MOVE +4013 TO PV-ABEND-CODE.                                         
+           DISPLAY '** ABEND **         ** = SQLERROR'.                         
+W34517     DISPLAY '** PROGRAM          ** = VAKUT165'.                         
+           DISPLAY '** PARAGRAPH        ** = ' PV-PARAGRAPH-NAME.               
+           DISPLAY '** OPERATION        ** = ' PV-DB2-OPER-ATTEMPTED.           
+                                                                                
+      *    THE FOLLOWING COPYBOOK UTILIZES THE DB2 ABEND MODULE                 
+      *    DSNTIAR TO CONVERT SQLCA INTO UNDERSTANDABLE VERBAGE.                
+           COPY DPPD004.                                                        
+                                                                                
+           CALL 'ILBOABN0'  USING PV-ABEND-CODE.                                

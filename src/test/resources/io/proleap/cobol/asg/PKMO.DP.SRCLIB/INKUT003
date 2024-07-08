@@ -1,0 +1,409 @@
+       IDENTIFICATION DIVISION.                                                 
+                                                                                
+       PROGRAM-ID.         INKUT003.                                            
+       AUTHOR.             P. KEBER                                     00040024
+       INSTALLATION.       KOHLS DEPARTMENT STORES.                             
+       DATE-WRITTEN.       08-24-2004.                                          
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *      INKUT003 - CUTOFF DATABASE ADJUSTMENT EXTRACT FORMATTER   *        
+      *                                                                *        
+      *  THIS PROGRAM INPUTS A FSTT_OH_RCPT_AUD UNLOAD FILE.  IT       *        
+      *  CHECKS THAT THE VERIFIED DATE ON EACH RECORD IS GREATER THAN  *        
+      *  THE LOCATION'S TINVPAR DC CUTOFF DATE AND LESS THAN OR EQUAL  *        
+      *  TO THE PLANNED INVENTORY DATE.  IF NOT, IT IS WRITTEN TO THE  *        
+      *  FSRA NOT POSTED FILE.  TSKXREF IS READ TO CONVERT THE ITEM    *        
+      *  NUMBER TO A SKU NUMBER FOR EACH UNLOAD FILE RECORD.  AN FSRA  *        
+      *  UNLOAD ERROR FILE RECORD IS CREATED WHEN THE ITEM NUMBER      *        
+      *  CANNOT BE FOUND ON TSKXREF.  ALL VALID RECORDS ARE FORMATTED  *        
+      *  INTO A CUTOFF DATABASE ADJUSTMENT EXTRACT OUTPUT FILE RECORD. *        
+      *                                                                *        
+      ******************** HISTORY OF CHANGES **************************        
+      * WR/PROJ  DATE        DESCRIPTION OF CHANGES                     00113027
+      * -------  ----------  ----------------------------------------   00114027
+      * WR26600  08/24/2004  PAUL KEBER - INITIAL INSTALLATION.         00119027
+      * WR28545  07/21/2006  J SELWITSCHKA / STRATAGEM                  00119027
+      *                      DEPARTMENT LEVEL INVENTORY. INCORPORATE    00119027
+      *                      INVENTORY ID.                              00119027
+W33304* WR33304  04/04/2008  CHUCK EBERT  / STRATAGEM                   00119027
+W33304*                      HOLDING INVENTORY LEDGER OPEN ACROSS PERIOD00119027
+      ******************************************************************        
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+                                                                                
+       CONFIGURATION SECTION.                                                   
+                                                                                
+       SOURCE-COMPUTER.    IBM-3090.                                            
+       OBJECT-COMPUTER.    IBM-3090.                                            
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT FSRA-UNLOAD-FILE        ASSIGN TO INP01.                      
+           SELECT CUTOFF-ADJUSTS-FILE     ASSIGN TO OUT01.                      
+           SELECT FSRA-NOT-POSTED-FILE    ASSIGN TO OUT02.                      
+           SELECT FSRA-UNLOAD-ERR-FILE    ASSIGN TO OUT03.                      
+                                                                                
+       DATA DIVISION.                                                           
+                                                                                
+       FILE SECTION.                                                            
+                                                                                
+       FD  FSRA-UNLOAD-FILE                                                     
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  FSRA-UNLOAD-REC                  PIC  X(24).                         
+                                                                                
+       FD  CUTOFF-ADJUSTS-FILE                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  CUTOFF-ADJUSTS-REC               PIC  X(48).                         
+                                                                                
+       FD  FSRA-NOT-POSTED-FILE                                                 
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  FSRA-NOT-POSTED-REC              PIC  X(24).                         
+                                                                                
+       FD  FSRA-UNLOAD-ERR-FILE                                                 
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS.                                            
+       01  FSRA-UNLOAD-ERR-REC              PIC  X(24).                         
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  ABEND-CODE                       PIC S9(04) COMP SYNC                
+                                                       VALUE +0.                
+                                                                                
+       01  PROGRAM-ACCUMULATORS.                                                
+           05  PA-FSRA-IN-COUNT             PIC S9(09) COMP-3 VALUE +0.         
+           05  PA-EXTRACT-OUT-COUNT         PIC S9(09) COMP-3 VALUE +0.         
+           05  PA-FSRA-NOT-POSTED-COUNT     PIC S9(09) COMP-3 VALUE +0.         
+           05  PA-FSRA-UNLOAD-ERR-COUNT     PIC S9(09) COMP-3 VALUE +0.         
+                                                                                
+       01  PROGRAM-CONSTANTS.                                                   
+           05  PC-MAX-RETRIES               PIC S9(04) COMP SYNC                
+                                                       VALUE +2.                
+           05  PC-PROGRAM-NAME              PIC  X(08) VALUE 'INKUT003'.        
+                                                                                
+       01  PROGRAM-SWITCHES.                                                    
+           05  PS-END-OF-FSRA-INPUT-SW      PIC X      VALUE 'N'.               
+               88  PS-END-OF-FSRA-INPUT                VALUE 'Y'.               
+               88  PS-NOT-END-OF-FSRA-INPUT            VALUE 'N'.               
+           05  PS-TINVPAR-FOUND-SW          PIC X      VALUE 'N'.               
+               88  PS-TINVPAR-FOUND                    VALUE 'Y'.               
+               88  PS-TINVPAR-NOT-FOUND                VALUE 'N'.               
+           05  PS-TSKXREF-FOUND-SW          PIC X      VALUE 'N'.               
+               88  PS-TSKXREF-FOUND                    VALUE 'Y'.               
+               88  PS-TSKXREF-NOT-FOUND                VALUE 'N'.               
+                                                                                
+       01  PROGRAM-VARIABLES.                                                   
+           05  PV-EXISTS                    PIC S9(04) VALUE +0 COMP.           
+           05  PV-DB2-OPER-ATTEMPTED        PIC  X(30) VALUE SPACE.             
+           05  PV-PARAGRAPH-NAME            PIC  X(30) VALUE SPACE.             
+           05  PV-SQL-SUB                   PIC  9(03) VALUE ZERO.              
+                                                                                
+      *****************************************************************         
+      * FSRA UNLOAD INPUT FILE RECORD LAYOUT                                    
+      *****************************************************************         
+       01  IN-FSRA-UNLOAD-REC.                                                  
+           05  IN-FSRA-ITEM-NBR             PIC S9(15) VALUE +0 COMP-3.         
+           05  IN-FSRA-LOC-NBR              PIC S9(04) VALUE +0 COMP.           
+           05  IN-FSRA-VRFD-DTE             PIC  X(10) VALUE SPACES.            
+           05  IN-FSRA-LOC-RCPT-QTY         PIC S9(09) VALUE +0 COMP.           
+      ****TEMPORARY MODIFICATION (SWITCH POSITIONS OF LAST TWO FIELDS)          
+      *    05  IN-FSRA-LOC-RCPT-QTY         PIC S9(09) VALUE +0 COMP.           
+      *    05  IN-FSRA-VRFD-DTE             PIC  X(10) VALUE SPACES.            
+                                                                                
+      *****************************************************************         
+      * CUTOFF DATABASE ADJUSTMENT EXTRACT OUTPUT FILE COPYBOOK                 
+      *****************************************************************         
+           COPY INRD051.                                                        
+                                                                                
+      *****************************************************************         
+      * DB2 FORMATTED ERROR MESSAGE                                             
+      *****************************************************************         
+                                                                                
+           COPY DPWS004.                                                        
+                                                                                
+      *****************************************************************         
+      * DCLGEN FOR THE INVENTORY PARAMETERS TABLE                               
+      *****************************************************************         
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TINVPAR                                                  
+           END-EXEC.                                                            
+                                                                                
+W28545*****************************************************************         
+W28545* DCLGEN FOR THE INVENTORY CYCLE CONTROL TABLE                            
+W28545*****************************************************************         
+W28545                                                                          
+W28545     EXEC SQL                                                             
+W28545         INCLUDE TINCNTL                                                  
+W28545     END-EXEC.                                                            
+W28545                                                                          
+      *****************************************************************         
+      * DCLGEN FOR THE SKU CROSS REFERENCE TABLE                                
+      *****************************************************************         
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE TSKXREF                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      * SQL COMMUNICATIONS WORK AREA                                            
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+                                                                                
+       PROCEDURE DIVISION.                                                      
+                                                                                
+       0000-MAINLINE-PROCESSING.                                                
+                                                                                
+           PERFORM 1000-INITIALIZATION.                                         
+                                                                                
+           PERFORM 2000-PROCESS-FSRA-INPUT                                      
+               UNTIL PS-END-OF-FSRA-INPUT.                                      
+                                                                                
+           PERFORM 9000-EOJ-ROUTINE.                                            
+                                                                                
+           STOP RUN.                                                            
+                                                                                
+                                                                                
+      ******************************************************************        
+      *  OPEN ALL FILES AND READ AN FSRA UNLOAD INPUT FILE RECORD.     *        
+      ******************************************************************        
+       1000-INITIALIZATION.                                                     
+                                                                                
+           OPEN INPUT  FSRA-UNLOAD-FILE                                         
+                OUTPUT CUTOFF-ADJUSTS-FILE                                      
+                       FSRA-NOT-POSTED-FILE                                     
+                       FSRA-UNLOAD-ERR-FILE.                                    
+                                                                                
+           SET IN051-TRANS-FSRA TO TRUE.                                        
+           MOVE ZERO TO INVPAR-LOC-NBR.                                         
+           MOVE ZERO TO SKXREF-ITM-NBR.                                         
+                                                                                
+           PERFORM 4000-READ-FSRA-UNLOAD-FILE.                                  
+                                                                                
+      ******************************************************************        
+      *  FOR EACH FSRA UNLOAD FILE RECORD, CONVERT THE ITEM NUMBER TO  *        
+      *  SKU NUMBER AND FORMAT A CUTOFF DATABASE ADJUSTMENT EXTRACT    *        
+      *  OUTPUT FILE RECORD.                                           *        
+      ******************************************************************        
+       2000-PROCESS-FSRA-INPUT.                                                 
+                                                                                
+           IF IN-FSRA-LOC-NBR NOT EQUAL INVPAR-LOC-NBR                          
+               MOVE IN-FSRA-LOC-NBR TO INVPAR-LOC-NBR                           
+               PERFORM 3000-SELECT-FROM-TINVPAR                                 
+           END-IF.                                                              
+                                                                                
+           IF PS-TINVPAR-FOUND                                                  
+               MOVE IN-FSRA-LOC-NBR      TO IN051-LOC-NBR                       
+               MOVE IN-FSRA-VRFD-DTE     TO IN051-VERIFIED-DATE                 
+               MOVE IN-FSRA-LOC-RCPT-QTY TO IN051-QUANTITY                      
+               MOVE IN-FSRA-ITEM-NBR     TO IN051-ITEM-NBR                      
+                                                                                
+               IF IN-FSRA-ITEM-NBR NOT EQUAL SKXREF-ITM-NBR                     
+                   MOVE IN-FSRA-ITEM-NBR TO SKXREF-ITM-NBR                      
+                   PERFORM 3100-SELECT-FROM-TSKXREF                             
+               END-IF                                                           
+                                                                                
+               IF PS-TSKXREF-FOUND                                              
+                   MOVE SKXREF-SKU TO IN051-SKU-NBR                             
+                   PERFORM 8000-WRITE-ADJUSTMT-EXTR-REC                         
+               ELSE                                                             
+                   PERFORM 8200-WRITE-FSRA-UNLD-ERR-REC                         
+               END-IF                                                           
+           ELSE                                                                 
+               PERFORM 8100-WRITE-FSRA-NOT-POSTED-REC                           
+           END-IF.                                                              
+                                                                                
+           PERFORM 4000-READ-FSRA-UNLOAD-FILE.                                  
+                                                                                
+      ******************************************************************        
+      *  FIND THE SKU NUMBER FOR EACH FSRA UNLOAD RECORD.                       
+      ******************************************************************        
+       3000-SELECT-FROM-TINVPAR.                                                
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-SQL-SUB FROM 1 BY 1                                   
+               UNTIL  (PV-SQL-SUB > PC-MAX-RETRIES                              
+                  OR   SQLCODE = 0                                              
+                  OR   SQLCODE = +100)                                          
+                                                                                
+               EXEC SQL                                                         
+                   SELECT 1                                                     
+                   INTO :PV-EXISTS                                              
+W28545             FROM TINVPAR A                                               
+W28545                 ,TINCNTL B                                               
+                   WHERE LOC_NBR = :INVPAR-LOC-NBR                              
+W28545               AND A.INV_ID   = B.INV_ID                                  
+W33304               AND A.LOC_INV_STAT_CDE = 'IN'                              
+W28545               AND B.ACTV_IND = 'Y'                                       
+                     AND ACTL_FIN_BK_DTE='9999-09-09'                           
+                     AND ACTL_DC_CTOFF_DTE  < :IN-FSRA-VRFD-DTE                 
+                     AND PLND_INV_DTE >= :IN-FSRA-VRFD-DTE                      
+W33304               AND SCHD_PHY_CNT_CDE IN ('PI','NS','CL')                   
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = +100                                          
+                       SET PS-TINVPAR-NOT-FOUND TO TRUE                         
+                   WHEN SQLCODE = 0                                             
+                       SET PS-TINVPAR-FOUND TO TRUE                             
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLWARN NOT = SPACES                                    
+                   WHEN SQLCODE NOT = ZERO                                      
+                       MOVE '3000-SELECT-FROM-TINVPAR'                          
+                           TO PV-PARAGRAPH-NAME                                 
+                       MOVE 'SELECT TINVPAR'                                    
+                           TO PV-DB2-OPER-ATTEMPTED                             
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-SQL-SUB > PC-MAX-RETRIES                                      
+               MOVE '3000-SELECT-FROM-TINVPAR' TO PV-PARAGRAPH-NAME             
+               MOVE 'MAX RETRIES EXCEEDED' TO PV-DB2-OPER-ATTEMPTED             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  FIND THE SKU NUMBER FOR EACH FSRA UNLOAD RECORD.                       
+      ******************************************************************        
+       3100-SELECT-FROM-TSKXREF.                                                
+                                                                                
+           PERFORM WITH TEST AFTER                                              
+               VARYING PV-SQL-SUB FROM 1 BY 1                                   
+               UNTIL  (PV-SQL-SUB > PC-MAX-RETRIES                              
+                  OR   SQLCODE = 0                                              
+                  OR   SQLCODE = +100)                                          
+                                                                                
+               EXEC SQL                                                         
+                   SELECT SKU                                                   
+                    INTO :SKXREF-SKU                                            
+                    FROM TSKXREF                                                
+                   WHERE ITM_NBR = :SKXREF-ITM-NBR                              
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = +100                                          
+                       SET PS-TSKXREF-NOT-FOUND TO TRUE                         
+                       DISPLAY ' TSKXREF ITEM NUMBER NOT FOUND: '               
+                             SKXREF-ITM-NBR                                     
+                   WHEN SQLCODE = 0                                             
+                       SET PS-TSKXREF-FOUND TO TRUE                             
+                   WHEN SQLCODE = -904                                          
+                   WHEN SQLCODE = -913                                          
+                       CONTINUE                                                 
+                   WHEN SQLWARN NOT = SPACES                                    
+                   WHEN SQLCODE NOT = ZERO                                      
+                       MOVE '3000-SELECT-FROM-TSKXREF'                          
+                           TO PV-PARAGRAPH-NAME                                 
+                       MOVE 'SELECT TSKXREF'                                    
+                           TO PV-DB2-OPER-ATTEMPTED                             
+                       PERFORM 9999-SQL-ABEND                                   
+               END-EVALUATE                                                     
+           END-PERFORM.                                                         
+                                                                                
+           IF  PV-SQL-SUB > PC-MAX-RETRIES                                      
+               MOVE '3000-SELECT-FROM-TSKXREF' TO PV-PARAGRAPH-NAME             
+               MOVE 'MAX RETRIES EXCEEDED' TO PV-DB2-OPER-ATTEMPTED             
+               PERFORM 9999-SQL-ABEND                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************03500024
+      * READS THE FSRA UNLOAD FILE                                      03510024
+      ******************************************************************03520024
+       4000-READ-FSRA-UNLOAD-FILE.                                      03530024
+           READ FSRA-UNLOAD-FILE INTO IN-FSRA-UNLOAD-REC                03540024
+               AT END                                                   03550024
+                   SET PS-END-OF-FSRA-INPUT TO TRUE                     03550024
+               NOT AT END                                                       
+                   ADD 1 TO PA-FSRA-IN-COUNT.                                   
+                                                                                
+      ******************************************************************        
+      *  WRITE A CUTOFF DATABASE ADJUSTMENT EXTRACT OUTPUT FILE RECORD *        
+      ******************************************************************        
+       8000-WRITE-ADJUSTMT-EXTR-REC.                                            
+                                                                                
+           WRITE CUTOFF-ADJUSTS-REC FROM IN051-CTOFF-ADJ-EXTR-RECORD.           
+           ADD +1 TO PA-EXTRACT-OUT-COUNT.                                      
+                                                                                
+      ******************************************************************        
+      *  WRITE AN FSRA NOT POSTED FILE RECORD                          *        
+      ******************************************************************        
+       8100-WRITE-FSRA-NOT-POSTED-REC.                                          
+                                                                                
+           WRITE FSRA-NOT-POSTED-REC                                            
+                 FROM IN-FSRA-UNLOAD-REC.                                       
+           ADD +1 TO PA-FSRA-NOT-POSTED-COUNT.                                  
+                                                                                
+      ******************************************************************        
+      *  WRITE AN FSRA UNLOAD ERROR FILE RECORD                        *        
+      ******************************************************************        
+       8200-WRITE-FSRA-UNLD-ERR-REC.                                            
+                                                                                
+           WRITE FSRA-UNLOAD-ERR-REC                                            
+                 FROM IN-FSRA-UNLOAD-REC.                                       
+           ADD +1 TO PA-FSRA-UNLOAD-ERR-COUNT.                                  
+                                                                                
+      ******************************************************************        
+      *    - CLOSE THE FILES PROCESSED BY PROGRAM                      *        
+      *    - DISPLAY OUTPUT RECORD COUNTS                              *        
+      ******************************************************************        
+       9000-EOJ-ROUTINE.                                                        
+                                                                                
+           CLOSE FSRA-UNLOAD-FILE                                               
+                 CUTOFF-ADJUSTS-FILE                                            
+                 FSRA-NOT-POSTED-FILE                                           
+                 FSRA-UNLOAD-ERR-FILE.                                          
+                                                                                
+           DISPLAY SPACE.                                                       
+           DISPLAY '*************************************************'. 06840000
+           DISPLAY '***********    INKUT003 RUN STATS    ************'. 06840000
+           DISPLAY '*************************************************'. 06840000
+           DISPLAY '*** NUMBER OF FSRA UNLOAD RECS READ   = '                   
+               PA-FSRA-IN-COUNT.                                                
+           DISPLAY '*** NUMBER OF EXTRACT RECORDS WRITTEN = '                   
+               PA-EXTRACT-OUT-COUNT.                                            
+           DISPLAY '*** NUMBER OF FSRA NOT POSTED RECS    = '                   
+               PA-FSRA-NOT-POSTED-COUNT.                                        
+           DISPLAY '*** NUMBER OF FSRA UNLOAD ERROR RECS  = '                   
+               PA-FSRA-UNLOAD-ERR-COUNT.                                        
+           DISPLAY SPACE.                                                       
+                                                                                
+                                                                                
+      ******************************************************************        
+      * ABEND THE PROGRAM IN THE EVENT THAT AN SQL ERROR OR WARNING             
+      * CODE OCCURS.                                                            
+      ******************************************************************        
+       9999-SQL-ABEND.                                                          
+                                                                                
+           DISPLAY '** ABEND     **'.                                           
+           DISPLAY '** PROGRAM   ** = ' PC-PROGRAM-NAME.                        
+           DISPLAY '** PARAGRAPH ** = ' PV-PARAGRAPH-NAME.                      
+           DISPLAY '** OPERATION ** = ' PV-DB2-OPER-ATTEMPTED.                  
+                                                                                
+      *-----------------------------------------------------------------        
+      * THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-            
+      * MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE                 
+      * 'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE             
+      * FORMAT.                                                                 
+      *-----------------------------------------------------------------        
+                                                                                
+           COPY DPPD004.                                                        
+                                                                                
+           MOVE +4013 TO ABEND-CODE.                                            
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    
+                                                                               

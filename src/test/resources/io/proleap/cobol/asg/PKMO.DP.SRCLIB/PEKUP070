@@ -1,0 +1,407 @@
+00004 *****************************************************************         
+00005  IDENTIFICATION DIVISION.                                                 
+00006 *****************************************************************         
+00007                                                                           
+00008  PROGRAM-ID.    PEKUP070.                                                 
+00009  AUTHOR.        AMY REILAND.                                              
+00010  INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+00011  DATE-WRITTEN.  10/17/93.                                                 
+00012  DATE-COMPILED.                                                           
+00013                                                                           
+00014 ******************************************************************        
+00015 *  IN-STORE PRICE CHANGE DOCUMENT HISTORY DELETION                        
+00016 *                                                                         
+00017 *  THIS PROGRAM WILL DELETE IN-STORE PRICE CHANGE HISTORY DOCUMENT        
+00018 *  HEADER ROWS AND DETAIL ROWS.  (DETAIL ROWS WILL BE DELETED BY          
+00019 *  THE DB2 CASCADING DELETES).                                            
+00020 *  THE DOCUMENTS WILL BE DELETED BASED ON THE RECORDS PASSED FROM         
+00021 *  THE HISTORY DELETION EXTRACT.                                          
+00022 *                                                                         
+00023 *  TABLES THAT HAVE ROWS DELETED ARE:-                                    
+00024 *      TSTRPCH IN-STORE PERMANENT PRICE HISTORY CHANGE HEADER             
+00025 *      TSPCDTH IN-STORE PERMANENT PRICE HISTORY CHANGE DETAIL             
+00026 *  RECORDS READ ARE:-                                                     
+00027 *      PERD071 IN-STORE DOCUMENT HISTORY DELETE RECORD                    
+00028 ******************************************************************        
+00029 * 01/24/96 - TCM -  WR NO. 13793                                 *        
+00030 *    - ADD THE CHECKPOINT RESTART CONTROL TABLE/COMMIT LOGIC TO  *        
+00031 *      THE PROGRAM.  BASE COMMITS ON CURRENT TIMESTAMP + THE     *        
+00032 *      NUMBER OF SECONDS IN CKPT_FRQNCY_QTY.                     *        
+00033 *    - CHANGE THE RETRY LOGIC SQLCODE CHECKING, AFTER THE        *        
+00034 *      DELETE, FROM SQLCODES -904, -911 TO SQLCODES -913, -911   *        
+00035 *    - SHORTEN THE DOCUMENT "NOT FOUND" DISPLAYED MESSAGE        *        
+00036 ******************************************************************        
+      * 03/25/05 - TCM -  WR NO. 27559                                 *        
+      *    - CHANGED ALL STORE NUMBER LENGTH REFERENCES FROM 3 TO 4    *        
+      *      DIGITS IN LENGTH                                          *        
+      *    - REMOVED THE OPERCO_NBR FIELD FROM ALL IN-STORE PERM TABLE *        
+      *      CALLS                                                     *        
+      ******************************************************************        
+00037  ENVIRONMENT DIVISION.                                                    
+00038 *****************************************************************         
+00039 *                                                                         
+00040 *                                                                         
+00041  CONFIGURATION SECTION.                                                   
+00042                                                                           
+00043  SOURCE-COMPUTER. IBM-3090.                                               
+00044  OBJECT-COMPUTER. IBM-3090.                                               
+00045 *                                                                         
+00046 *                                                                         
+00047  INPUT-OUTPUT SECTION.                                                    
+00048                                                                           
+00049  FILE-CONTROL.                                                            
+00050                                                                           
+00051      SELECT DOC-HIS-DEL-FILE                                              
+00052          ASSIGN TO INP01.                                                 
+00053                                                                           
+00054 *                                                                         
+00055 *                                                                         
+00056 *                                                                         
+00057 *****************************************************************         
+00058  DATA DIVISION.                                                           
+00059 *****************************************************************         
+00060 *                                                                         
+00061 *                                                                         
+00062  FILE SECTION.                                                            
+00063                                                                           
+00064  FD  DOC-HIS-DEL-FILE                                                     
+00065      RECORDING MODE IS F                                                  
+00066      LABEL RECORDS ARE STANDARD                                           
+00067      BLOCK  CONTAINS 0 RECORDS                                            
+00068      RECORD CONTAINS 20 CHARACTERS                                        
+00069      DATA RECORD IS DOC-HIS-DEL-RECORD.                                   
+00070                                                                           
+00071  01  DOC-HIS-DEL-RECORD                 PIC X(20).                        
+00072                                                                           
+00073 *                                                                         
+00074 *                                                                         
+00075  WORKING-STORAGE SECTION.                                                 
+00077 *****************************************************************         
+00078 *    DOCUMENT HISTORY DELETE FILE LAYOUT                                  
+00079 *****************************************************************         
+00080                                                                           
+00081      COPY PERD071.                                                        
+00082                                                                           
+00083 *****************************************************************         
+00084 *    PERM PRICE CHANGE CONSTANTS                                          
+00085 *****************************************************************         
+00086                                                                           
+00087      COPY PEWS049.                                                        
+00088                                                                           
+00089 *****************************************************************         
+00090 *    DB2 COMMUNICATION AREA                                               
+00091 *****************************************************************         
+00092                                                                           
+00093      COPY DPWS004.                                                        
+00094 *                                                                         
+00095  01  ABEND-CODE                         PIC S9(04)   VALUE +0             
+00096                                                      COMP SYNC.           
+00097      88  ABEND-4013-DB2-ERROR                        VALUE +4013.         
+00098 *                                                                         
+00099  01  PC-PROGRAM-CONSTANTS.                                                
+00100      05  PC-MAX-RETRIES                 PIC S9(04)   VALUE 3              
+00101                                                      COMP.                
+00102      05  PC-CURRENT-PROGRAM-NAME        PIC  X(08)   VALUE                
+00103                                                      'PEKUP070'.          
+00104 *                                                                         
+00105  01  PS-PROGRAM-SWITCHES.                                                 
+00106      05  PS-END-OF-DELETE-RECS-SWITCH   PIC  X(01)   VALUE 'N'.           
+00107          88 PS-END-OF-DELETE-RECS                    VALUE 'Y'.           
+00108          88 PS-NOT-END-OF-DELETE-RECS                VALUE 'N'.           
+00109 *                                                                         
+00110  01  PV-PROGRAM-VARIABLES.                                                
+00111      05  PV-DB2-OPERATION-ATTEMPTED     PIC  X(30)   VALUE SPACES.        
+00112      05  PV-DISPLAY-DOC-NBR             PIC  Z(07)9  VALUE ZEROS.         
+00113      05  PV-PARAGRAPH-NAME              PIC  X(30)   VALUE SPACES.        
+00114      05  PV-SQL-SUB                     PIC S9(4)    VALUE ZERO           
+00115                                                      COMP.                
+00116      05  PV-TODAYS-DATE.                                                  
+00117          10  PV-TODAYS-YY               PIC  9(02)   VALUE ZEROES.        
+00118          10  PV-TODAYS-MM               PIC  9(02)   VALUE ZEROES.        
+00119          10  PV-TODAYS-DD               PIC  9(02)   VALUE ZEROES.        
+00120      05  PV-TODAYS-DATE-RFMT.                                             
+00121          10  PV-TODAYS-MM-RFMT          PIC  9(02)   VALUE ZEROES.        
+00122          10  FILLER                     PIC  X(01)   VALUE '/'.           
+00123          10  PV-TODAYS-DD-RFMT          PIC  9(02)   VALUE ZEROES.        
+00124          10  FILLER                     PIC  X(01)   VALUE '/'.           
+00125          10  PV-TODAYS-YY-RFMT          PIC  9(02)   VALUE ZEROES.        
+00126 *                                                                         
+00127  01  RC-TABLE-ROW-CNTRS.                                                  
+00128      05  RC-PERD071-RECS-READ-CNTR      PIC S9(08)   VALUE +0             
+00129                                                      COMP-3.              
+00130      05  RC-TOTAL-DOCS-DELETED-CNTR     PIC S9(08)   VALUE +0             
+00131                                                      COMP-3.              
+00132 *                                                                         
+00133  01  DC-DISPLAY-CNTRS.                                                    
+00134      05  DC-PERD071-RECS-READ-CNTR      PIC Z(07)9   VALUE ZEROS.         
+00135      05  DC-TOTAL-DOCS-DELETED-CNTR     PIC Z(07)9   VALUE ZEROS.         
+00136 *                                                                         
+00137  01  WS-COUNTER.                                                          
+00138      05  WS-HOLD-TMST                   PIC  X(26)   VALUE SPACES.        
+00139      05  WS-TMST                        PIC  X(26)   VALUE SPACES.        
+00140 *****************************************************************         
+00141 *    DB2 CHECKPOINT RESTART CONTROLS                                      
+00142 *****************************************************************         
+00143      EXEC SQL                                                             
+00144          INCLUDE TCKRSTCN                                                 
+00145      END-EXEC.                                                            
+00146 *****************************************************************         
+00147 *    DB2 IN-STORE PERMANENT PRICE CHANGE HISTORY HEADER TABLE             
+00148 *****************************************************************         
+00149      EXEC SQL                                                             
+00150          INCLUDE TSTRPCH                                                  
+00151      END-EXEC.                                                            
+00152 *****************************************************************         
+00153 *    DB2 COMMUNICATION AREA.                                              
+00154 *****************************************************************         
+00155      EXEC SQL                                                             
+00156          INCLUDE SQLCA                                                    
+00157      END-EXEC.                                                            
+00158  EJECT                                                                    
+00159 *****************************************************************         
+00160  PROCEDURE DIVISION.                                                      
+00161 ******************************************************************        
+00162 *A100-MAIN-MODULE                                                *        
+00163 *  ==> PROCESSES:                                                *        
+00164 *    - CONTROLS HIGHEST LEVEL FLOW OF PROGRAM                    *        
+00165 *  ==> PERFORMED FROM:                                           *        
+00166 *                     HIGHEST LEVEL IN PROGRAM                   *        
+00167 ******************************************************************        
+00168  A100-MAIN-MODULE.                                                        
+00169                                                                           
+00170      PERFORM B100-PRE-PROCESSING.                                         
+00171                                                                           
+00172      PERFORM                                                              
+00173          UNTIL PS-END-OF-DELETE-RECS                                      
+00174                                                                           
+00175              PERFORM D200-DELETE-DOCUMENT                                 
+00176              PERFORM C100-READ-DOCUMENT-DELETE-FILE                       
+00177                                                                           
+00178      END-PERFORM.                                                         
+00179                                                                           
+00180      PERFORM E100-DISPLAY-CONTROL-INFO.                                   
+00181                                                                           
+00182      CLOSE DOC-HIS-DEL-FILE.                                              
+00183                                                                           
+00184      STOP RUN.                                                            
+00185  SKIP1                                                                    
+00186 ******************************************************************        
+00187 *B100-PRE-PROCESSING                                             *        
+00188 *  ==> PROCESSES:                                                *        
+00189 *    - OPENS FILES, CONTROLS FIRST READ OF IN-STORE DOCUMENT     *        
+00190 *      DELETE RECORD.                                            *        
+00191 *  ==> PERFORMED FROM:                                           *        
+00192 *                     A100-MAIN-MODULE.                          *        
+00193 ******************************************************************        
+00194  B100-PRE-PROCESSING.                                                     
+00195                                                                           
+00196      ACCEPT PV-TODAYS-DATE                                                
+00197          FROM DATE.                                                       
+00198                                                                           
+00199      MOVE PV-TODAYS-YY              TO PV-TODAYS-YY-RFMT.                 
+00200      MOVE PV-TODAYS-MM              TO PV-TODAYS-MM-RFMT.                 
+00201      MOVE PV-TODAYS-DD              TO PV-TODAYS-DD-RFMT.                 
+00202                                                                           
+00203      PERFORM D100-SELECT-COMMIT-TIME.                                     
+00204                                                                           
+00205      OPEN INPUT DOC-HIS-DEL-FILE.                                         
+00206                                                                           
+00207      PERFORM C100-READ-DOCUMENT-DELETE-FILE.                              
+00208  SKIP1                                                                    
+00209 ******************************************************************        
+00210 *C100-READ-DOCUMENT-DELETE-FILE                                  *        
+00211 *  ==> PROCESSES:                                                *        
+00212 *    - PERFORMS READ OF DOCUMENT DELETE RECORD                   *        
+00213 *  ==> PERFORMED FROM:                                           *        
+00214 *                    B100-PRE-PROCESSING                         *        
+00215 ******************************************************************        
+00216  C100-READ-DOCUMENT-DELETE-FILE.                                          
+00217                                                                           
+00218      READ DOC-HIS-DEL-FILE                                                
+00219           INTO PE071-INSTR-DOC-HST-DELETE-REC                             
+00220               AT END                                                      
+00221                   SET PS-END-OF-DELETE-RECS TO TRUE                       
+00222      END-READ.                                                            
+00223                                                                           
+00224      IF  PS-NOT-END-OF-DELETE-RECS                                        
+00225          ADD 1                      TO RC-PERD071-RECS-READ-CNTR          
+00226      END-IF.                                                              
+00227  SKIP1                                                                    
+00228 ******************************************************************        
+00229 * CALCULATES THE TIME INTERVAL FOR A COMMIT                      *        
+00230 ******************************************************************        
+00231  D100-SELECT-COMMIT-TIME.                                                 
+00232      EXEC SQL                                                             
+00233           SELECT (CURRENT TIMESTAMP + CKPT_FRQNCY_QTY SECONDS)            
+00234           INTO :WS-HOLD-TMST                                              
+00235           FROM TCKRSTCNTL                                                 
+00236           WHERE PLAN_NAME = :PC-CURRENT-PROGRAM-NAME                      
+00237      END-EXEC.                                                            
+00238                                                                           
+00239      EVALUATE TRUE                                                        
+00240          WHEN SQLCODE = 0                                                 
+00241              CONTINUE                                                     
+00242          WHEN SQLCODE NOT EQUAL ZERO                                      
+00243              MOVE 'SELECT COMMIT TIME  '                                  
+00244                                  TO PV-DB2-OPERATION-ATTEMPTED            
+00245              MOVE 'D100-SELECT-COMMIT-TIME'                               
+00246                                  TO PV-PARAGRAPH-NAME                     
+00247              PERFORM Z900-DB2-ABEND                                       
+00248      END-EVALUATE.                                                        
+00249  SKIP1                                                                    
+00250 ******************************************************************        
+00251 *D200-DELETE-DOCUMENT                                            *        
+00252 *  ==> PROCESSES:                                                *        
+00253 *    - DELETES ONE TSTRPCH ROW AND ALL RELATED ROWS FROM TSPCDTH *        
+00254 *  ==> PERFORMED FROM: B200-PROCESS-RECORDS                      *        
+00255 ******************************************************************        
+00256  D200-DELETE-DOCUMENT.                                                    
+00257      PERFORM                                                              
+00258          WITH TEST AFTER                                                  
+00259          VARYING PV-SQL-SUB                                               
+00260          FROM 1 BY 1                                                      
+00261          UNTIL (PV-SQL-SUB GREATER PC-MAX-RETRIES                         
+00262                    OR  SQLCODE = 0                                        
+00263                    OR  SQLCODE = +100)                                    
+00264                                                                           
+00265          EXEC SQL                                                         
+00266               DELETE FROM TSTRPCH                                         
+00268                  WHERE (DEST_LOC_NBR = :PE071-INSTR-DEST-LOC-NBR          
+00269                  AND    DOC_NBR      = :PE071-INSTR-DOC-NBR               
+00270                  AND    DOC_TYP_CDE  = :PE049-STORE-DOC-TYPE-CDE)         
+00271          END-EXEC                                                         
+00272                                                                           
+00273          EVALUATE TRUE                                                    
+00274              WHEN SQLCODE = -911                                          
+00275              WHEN SQLCODE = -913                                          
+00276                  CONTINUE                                                 
+00277              WHEN SQLCODE = +100                                          
+00278                   PERFORM D500-DISP-DOC-NOT-FOUND-MESS                    
+00279              WHEN SQLCODE = 0                                             
+00280                  ADD +1          TO RC-TOTAL-DOCS-DELETED-CNTR            
+00281                  PERFORM D300-CHECK-FOR-COMMIT                            
+00282                                                                           
+00283              WHEN SQLWARN NOT EQUAL SPACES                                
+00284              WHEN SQLCODE NOT EQUAL ZERO                                  
+00285                  MOVE 'DELETE TSTRPCH ROW  '                              
+00286                                  TO PV-DB2-OPERATION-ATTEMPTED            
+00287                  MOVE 'D200-DELETE-DOCUMENT'                              
+00288                                  TO PV-PARAGRAPH-NAME                     
+00289                  PERFORM Z900-DB2-ABEND                                   
+00290          END-EVALUATE                                                     
+00291      END-PERFORM.                                                         
+00292                                                                           
+00293      IF  PV-SQL-SUB GREATER PC-MAX-RETRIES                                
+00294          PERFORM D500-DISP-DOC-NOT-FOUND-MESS                             
+00295          MOVE 'RETRYS EXCEEDED ON DELETE-TSTRPCH'                         
+00296                                     TO PV-DB2-OPERATION-ATTEMPTED         
+00297          MOVE 'D200-DELETE-DOCUMENT'                                      
+00298                                     TO PV-PARAGRAPH-NAME                  
+00299          PERFORM Z900-DB2-ABEND                                           
+00300      END-IF.                                                              
+00301  SKIP1                                                                    
+00302 ******************************************************************        
+00303 * CHECK IF A COMMIT SHOULD BE TAKEN                              *        
+00304 ******************************************************************        
+00305  D300-CHECK-FOR-COMMIT.                                                   
+00306      EXEC SQL                                                             
+00307           SET :WS-TMST = CURRENT TIMESTAMP                                
+00308      END-EXEC.                                                            
+00309                                                                           
+00310      EVALUATE TRUE                                                        
+00311          WHEN SQLCODE = 0                                                 
+00312              IF WS-TMST > WS-HOLD-TMST                                    
+00313                  PERFORM D400-TAKE-COMMIT                                 
+00314                  PERFORM D100-SELECT-COMMIT-TIME                          
+00315              END-IF                                                       
+00316          WHEN SQLCODE NOT EQUAL ZERO                                      
+00317              MOVE 'CHECK FOR COMMIT'                                      
+00318                                  TO PV-DB2-OPERATION-ATTEMPTED            
+00319              MOVE 'D300-CHECK-FOR-COMMIT'                                 
+00320                                  TO PV-PARAGRAPH-NAME                     
+00321              PERFORM Z900-DB2-ABEND                                       
+00322      END-EVALUATE.                                                        
+00323  SKIP1                                                                    
+00324 ******************************************************************        
+00325 * TAKE COMMIT                                                    *        
+00326 ******************************************************************        
+00327  D400-TAKE-COMMIT.                                                        
+00328      EXEC SQL                                                             
+00329          COMMIT                                                           
+00330      END-EXEC.                                                            
+00331                                                                           
+00332      EVALUATE TRUE                                                        
+00333          WHEN SQLCODE = 0                                                 
+00334              CONTINUE                                                     
+00335          WHEN OTHER                                                       
+00336              MOVE 'TAKE COMMIT'  TO PV-DB2-OPERATION-ATTEMPTED            
+00337              MOVE 'D400-TAKE-COMMIT'                                      
+00338                                  TO PV-PARAGRAPH-NAME                     
+00339              PERFORM Z900-DB2-ABEND                                       
+00340      END-EVALUATE.                                                        
+00341  SKIP1                                                                    
+00342 ******************************************************************        
+00343 *D500-DISP-DOC-NOT-FOUND-MESS                                    *        
+00344 *  ==> PROCESSES:                                                *        
+00345 *    - DISPLAYS MESSGAE WHEN DOCUMENT IS ON THE DOCUMENT DELETE  *        
+00346 *    - FILE BUT NOT ON THE STRPCH TABLE.                         *        
+00347 *  ==> PERFORMED FROM: B200-PROCESS-RECORDS                      *        
+00348 ******************************************************************        
+00349  D500-DISP-DOC-NOT-FOUND-MESS.                                            
+00350      MOVE PE071-INSTR-DOC-NBR       TO PV-DISPLAY-DOC-NBR.                
+00351                                                                           
+00352      DISPLAY 'DELETE DOCUMENT NOT FOUND ON DB2 TABLE: '                   
+00354      DISPLAY 'STORE NUMBER - ' PE071-INSTR-DEST-LOC-NBR.                  
+00355      DISPLAY 'DOCUMENT NUMBER - ' PV-DISPLAY-DOC-NBR.                     
+00356  SKIP1                                                                    
+00357 ******************************************************************        
+00358 *E100-DISPLAY-CONTROL-INFO                                       *        
+00359 *  ==> PROCESSES:                                                *        
+00360 *    - DISPLAYS CONTROL INFORMATION AT END OF JOB                *        
+00361 *  ==> PERFORMED FROM: A100-MAIN-MODULE                          *        
+00362 *                      Z900-DB2-ABEND                            *        
+00363 ******************************************************************        
+00364  E100-DISPLAY-CONTROL-INFO.                                               
+00365                                                                           
+00366      MOVE RC-TOTAL-DOCS-DELETED-CNTR                                      
+00367                                     TO DC-TOTAL-DOCS-DELETED-CNTR.        
+00368                                                                           
+00369      MOVE RC-PERD071-RECS-READ-CNTR TO DC-PERD071-RECS-READ-CNTR.         
+00370                                                                           
+00371      DISPLAY '************** CONTROL DATA START **************'.          
+00372      DISPLAY '************** CONTROL DATA START **************'.          
+00373      DISPLAY 'DC-PERD071-RECS-READ-CNTR'.                                 
+00374      DISPLAY '===>' DISPLAY DC-PERD071-RECS-READ-CNTR.                    
+00375      DISPLAY 'DC-TOTAL-DOCS-DELETED-CNTR'.                                
+00376      DISPLAY '===>' DISPLAY DC-TOTAL-DOCS-DELETED-CNTR.                   
+00377      DISPLAY 'PV-TODAYS-DATE-RFMT: ' PV-TODAYS-DATE-RFMT.                 
+00378      DISPLAY '************** CONTROL DATA END **************'.            
+00379      DISPLAY '************** CONTROL DATA END **************'.            
+00380  SKIP1                                                                    
+00381 ******************************************************************        
+00382 *Z900-DB2-ABEND.                                                 *        
+00383 *  ==> PROCESSES:                                                *        
+00384 *    - PERFORMS ABENDS AFTER UNEXPECTED SQLCODE                  *        
+00385 *  ==> PERFORMED FROM:                                           *        
+00386 *                    BY ANY PARA THAT MAKES AN EXEC SQL CALL     *        
+00387 *                    AND HAS AN UNEXPECTED RETURN CODE           *        
+00388 ******************************************************************        
+00389  Z900-DB2-ABEND.                                                          
+00390                                                                           
+00391      DISPLAY '** ABEND **'.                                               
+00392      DISPLAY '** PROGRAM   ** = ' PC-CURRENT-PROGRAM-NAME.                
+00393      DISPLAY '** PARAGRAPH ** = ' PV-PARAGRAPH-NAME.                      
+00394      DISPLAY '** OPERATION ** = ' PV-DB2-OPERATION-ATTEMPTED.             
+00395                                                                           
+00396      PERFORM E100-DISPLAY-CONTROL-INFO.                                   
+00397                                                                           
+00398 * ROUTINE TO DISPLAY ABEND IN READABLE FORMAT                             
+00399      COPY DPPD004.                                                        
+00400                                                                           
+00401                                                                           
+00402      EXEC SQL                                                             
+00403          ROLLBACK                                                         
+00404      END-EXEC.                                                            
+00405                                                                           
+00406      SET ABEND-4013-DB2-ERROR TO TRUE.                                    
+00407      CALL 'ILBOABN0' USING ABEND-CODE.                                    

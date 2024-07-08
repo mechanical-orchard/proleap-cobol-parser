@@ -1,0 +1,1572 @@
+       IDENTIFICATION DIVISION.                                                 
+       PROGRAM-ID.    SDKUP021.                                                 
+       AUTHOR.        CHERI KRYSIAK                                             
+       INSTALLATION.  KOHLS DEPARTMENT STORES.                                  
+       DATE-WRITTEN.  07-16-07.                                                 
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *    COBOL/DB2 PROGRAM                                                    
+      *                                                                         
+      *    LOAD SDT_STR_RCVG AND SDT_STR_RCVG_MDSE FROM THE ACTUAL              
+      *    MANIFEST DATABASES. LOADS ACTUAL TRAILER ARRIVAL DATE                
+      *    ALONG WITH TRAILER SIZE, VEHICLE #, TYPE OF MERCH CATEGORY           
+      *    AND HOW MANY UNITS.                                                  
+      ******************************************************************        
+      *   CHANGE HISTORY                                                        
+      ******************************************************************        
+      *  07/16/07  C.KRYSIAK        WR32675   INITIAL WRITE                     
+      *  10/15/07  C.PARMLEY        WR32675   IN DAILY RUN SUBTRACT 1           
+      *                                       FROM CURRENT DATE                 
+033108* 03/31/2008 J.HELING         WR34499   ADD NEW INPUT FILE.               
+033108*       FILE HOLDS A NUMBER OF DAYS TO BE SUBTRACTED FROM WEEK            
+033108*       END DATE.  IF OPEN DATE GREATER THAN RESULTING DATE, DO           
+033108*       NOT INCLUDE IN THE DATA UPLOAD.                                   
+041508* 04/15/2008 J.HELING         WR34513                                     
+041508*       LOAD DATA FOR HALLMARK AND COSMETICS                              
+110509* 11/05/2009 J.HELING         INC000001022699                             
+110509*       CORRECTION TO PREVIOUS WEEK DATE LOGIC                            
+350649* 08/05/2010 COGNIZANT        INC000001350649                             
+350649*       MODIFIED THE CODE TO SKIP DUPLICATE ROWS WHEN INSERTING           
+350649*       IN SDT_STR_RCVG_MDSE TABLE.                                       
+      ******************************************************************        
+       ENVIRONMENT DIVISION.                                                    
+       CONFIGURATION SECTION.                                                   
+       SOURCE-COMPUTER.  IBM-3090.                                              
+       OBJECT-COMPUTER.  IBM-3090.                                              
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT DATE-FILE                                                     
+               ASSIGN TO INP01.                                                 
+                                                                                
+033108     SELECT CONTROL-FILE                                                  
+033108         ASSIGN TO INP02.                                                 
+                                                                                
+       DATA DIVISION.                                                           
+       FILE SECTION.                                                            
+                                                                                
+       FD  DATE-FILE                                                            
+           RECORDING MODE IS F                                                  
+           LABEL RECORDS ARE STANDARD                                           
+           RECORD CONTAINS 80 CHARACTERS                                        
+           BLOCK CONTAINS 0 RECORDS                                             
+           DATA RECORD IS DATE-RECORD.                                          
+                                                                                
+       01  DATE-RECORD                    PIC X(80).                            
+                                                                                
+033108 FD  CONTROL-FILE                                                         
+033108     RECORDING MODE IS F                                                  
+033108     LABEL RECORDS ARE STANDARD                                           
+033108     RECORD CONTAINS 80 CHARACTERS                                        
+033108     BLOCK CONTAINS 0 RECORDS                                             
+033108     DATA RECORD IS DATE-RECORD.                                          
+                                                                                
+033108 01  CONTROL-RECORD                 PIC X(80).                            
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-PROGRAM                  PIC X(08) VALUE 'SDKUP021'.          
+           05  PC-ACTUAL-RECEIV            PIC X(02) VALUE 'AC'.                
+                                                                                
+       01  WORK-FIELDS.                                                         
+           05  WS-DATE.                                                         
+               10 WS-YEAR                  PIC 9(02) VALUE ZEROES.              
+               10 WS-MONTH                 PIC 9(02) VALUE ZEROES.              
+               10 WS-DAY                   PIC 9(02) VALUE ZEROES.              
+                                                                                
+       01  PV-PROGRAM-VARIABLES.                                                
+           05  PV-PARA-NAME                PIC X(25) VALUE SPACES.              
+           05  PV-ABEND-NOTE               PIC X(40) VALUE SPACES.              
+           05  PV-STR-NBR                  PIC S9(4) COMP-3 VALUE 0.            
+           05  PV-ADJ-AMT                  PIC S9(6) COMP-3 VALUE 0.            
+           05  PV-RECORDS-READ             PIC 9(09) VALUE ZEROES.              
+           05  PV-RECORDS-READ2            PIC 9(09) VALUE ZEROES.              
+041508     05  PV-RECORDS-READ3            PIC 9(09) VALUE ZEROES.              
+041508     05  PV-RECORDS-READ4            PIC 9(09) VALUE ZEROES.              
+           05  PV-RECS-INSERTED            PIC 9(09) VALUE ZEROES.              
+           05  PV-RECS-INSERTED2           PIC 9(09) VALUE ZEROES.              
+           05  PV-RECS-UPDATED             PIC 9(09) VALUE ZEROES.              
+           05  PV-HOLD-STR-NBR             PIC S9(04) COMP VALUE 0.             
+           05  PV-HOLD-TRLR-SIZE-MU        PIC S9(04) COMP VALUE 0.             
+           05  PV-HOLD-TRLR-ID             PIC X(12) VALUE SPACES.              
+           05  NUM-ROWS-MDSE               PIC S9(9) VALUE ZEROS                
+                                                     COMP SYNC.                 
+           05  NUM-ROWS-RCVG               PIC S9(9) VALUE ZEROS                
+                                                     COMP SYNC.                 
+           05  ACCUM-UNIT-SL               PIC 9(09) VALUE ZERO.                
+           05  ACCUM-UNIT-HL               PIC 9(09) VALUE ZERO.                
+           05  ACCUM-UNIT-JEW              PIC 9(09) VALUE ZERO.                
+041508     05  ACCUM-UNIT-HALL             PIC 9(09) VALUE ZERO.                
+041508     05  ACCUM-UNIT-COS              PIC 9(09) VALUE ZERO.                
+           05  PV-HOLD-ARRVL-DATE          PIC X(10) VALUE SPACES.              
+           05  PV-ARRVL-TMST.                                                   
+               10  PV-ARRVL-DATE           PIC X(10) VALUE SPACES.              
+               10  FILLER                  PIC X(16).                           
+                                                                                
+           05  PV-START-TMSTX              PIC X(26) VALUE SPACES.              
+           05  PV-START-TMST.                                                   
+               10  PV-START-DATE           PIC X(10) VALUE SPACES.              
+               10  FILLER                  PIC X(16)                            
+                                              VALUE '-00.00.00.000000'.         
+                                                                                
+           05  PV-END-TMSTX                PIC X(26) VALUE SPACES.              
+           05  PV-END-TMST.                                                     
+               10  PV-END-DATE             PIC X(10) VALUE SPACES.              
+               10  FILLER                  PIC X(16)                            
+                                              VALUE '-23.59.00.000000'.         
+                                                                                
+033108     05  PV-PRE-OPEN-MIN-DATE        PIC X(10) VALUE SPACES.              
+                                                                                
+           05  CC-DATE-CONTROL.                                                 
+               10  CC-RUN-INDICATOR        PIC X(01) VALUE SPACES.              
+               10  FILLER                  PIC X(01) VALUE SPACES.              
+               10  CC-START-DATE           PIC X(10) VALUE SPACES.              
+               10  FILLER                  PIC X(01) VALUE SPACES.              
+               10  CC-END-DATE             PIC X(10) VALUE SPACES.              
+               10  FILLER                  PIC X(57) VALUE SPACES.              
+                                                                                
+033108     05  CC-CONTROL.                                                      
+033108         10  CC-NUM-DAYS             PIC 9(01) VALUE ZEROES.              
+033108         10  FILLER                  PIC X(79) VALUE SPACES.              
+                                                                                
+           05  ASC-DATE.                                                        
+               10  ASC-YY                  PIC X(04) VALUE SPACES.              
+               10  ASC-MM                  PIC X(02) VALUE SPACES.              
+               10  ASC-DD                  PIC X(02) VALUE SPACES.              
+                                                                                
+       01  SD-TIME-STAMP                   PIC  X(26)  VALUE SPACES.            
+       01  FILLER REDEFINES SD-TIME-STAMP.                                      
+           05  SD-CURR-DTE                 PIC  X(10).                          
+           05  FILLER                      PIC  X(01).                          
+           05  SD-HOUR                     PIC  X(02).                          
+           05  FILLER                      PIC  X(01).                          
+           05  SD-MINUTE                   PIC  X(02).                          
+           05  FILLER                      PIC  X(01).                          
+           05  SD-SECOND                   PIC  X(02).                          
+           05  FILLER                      PIC  X(01).                          
+           05  SD-MICROSEC                 PIC  X(06).                          
+                                                                                
+       01  ABEND-CODE                  PIC S9(04)  VALUE +0 COMP SYNC.          
+           88  AC-OPEN-FILE-ERROR                  VALUE +4005.                 
+           88  AC-CLOSE-FILE-ERROR                 VALUE +4006.                 
+           88  AC-DB2-ERROR                        VALUE +4013.                 
+           88  AC-DATE-ROUTINE-ERROR               VALUE +4019.                 
+           88  AC-LOGIC-ERROR                      VALUE +4020.                 
+                                                                                
+       01  PS-CURSOR-SW                    PIC  X(01) VALUE 'N'.                
+           88 PS-NOT-END-OF-CSR                       VALUE 'N'.                
+           88 PS-END-OF-CSR                           VALUE 'Y'.                
+       01  IS-NEW-RECORD                   PIC X(01) VALUE 'N'.                 
+           88  NEW-RECORD                            VALUE 'Y'.                 
+           88  NOT-NEW-RECORD                        VALUE 'N'.                 
+       01  IS-CC-CONTROL                   PIC X(01) VALUE 'N'.                 
+           88  CC-CONTROL-END                        VALUE 'Y'.                 
+           88  CC-CONTROL-NOT-END                    VALUE 'N'.                 
+                                                                                
+                                                                                
+      *----------------------------------------------------------------*        
+      * PARAMETER LIST FOR THE CALENDAR ROUTINE                                 
+      *----------------------------------------------------------------*        
+           COPY DPWS500.                                                        
+                                                                                
+      *----------------------------------------------------------------*        
+      *    VARIABLES REQUIRED FOR THE FORMAT SQLCA ROUTINE DPPD004     *        
+      *----------------------------------------------------------------*        
+           COPY DPWS004.                                                        
+                                                                                
+      *----------------------------------------------------------------*        
+      * DB2 MESSAGE AREA                                                        
+      *----------------------------------------------------------------*        
+           COPY SQLCA2.                                                         
+                                                                                
+      *----------------------------------------------------------------*        
+      * STANDARD LAYOUT FOR THE SQL COMMUNICATIONS AREA                         
+      *----------------------------------------------------------------*        
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+      *----------------------------------------------------------------*        
+      * SDT_STR_RCVG TABLE                                                      
+      *----------------------------------------------------------------*        
+           EXEC SQL                                                             
+               INCLUDE SDT00032                                                 
+           END-EXEC.                                                            
+      *----------------------------------------------------------------*        
+      * SDT_STR_RCVG_MDSE TABLE                                                 
+      *----------------------------------------------------------------*        
+           EXEC SQL                                                             
+               INCLUDE SDT00033                                                 
+           END-EXEC.                                                            
+      *----------------------------------------------------------------*        
+      * TSUOBTR TABLE                                                           
+      *----------------------------------------------------------------*        
+           EXEC SQL                                                             
+               INCLUDE TSUOBTR                                                  
+           END-EXEC.                                                            
+      *----------------------------------------------------------------*        
+      * TSUOBTS TABLE                                                           
+      *----------------------------------------------------------------*        
+           EXEC SQL                                                             
+               INCLUDE TSUOBTS                                                  
+           END-EXEC.                                                            
+      *----------------------------------------------------------------*        
+      * TCNTRID TABLE                                                           
+      *----------------------------------------------------------------*        
+           EXEC SQL                                                             
+               INCLUDE TCNTRID                                                  
+           END-EXEC.                                                            
+      *----------------------------------------------------------------*        
+      * SUT_TRIP_SUM TABLE                                                      
+      *----------------------------------------------------------------*        
+           EXEC SQL                                                             
+               INCLUDE SUT00007                                                 
+           END-EXEC.                                                            
+                                                                                
+      *----------------------------------------------------------------*        
+      * SUT_DEPT_SUM TABLE                                                      
+      *----------------------------------------------------------------*        
+           EXEC SQL                                                             
+               INCLUDE SUT00009                                                 
+           END-EXEC.                                                            
+                                                                                
+      *----------------------------------------------------------------*        
+      * XST_LOC TABLE                                                           
+      *----------------------------------------------------------------*        
+030807     EXEC SQL                                                             
+030807         INCLUDE XST00001                                                 
+030807     END-EXEC.                                                            
+                                                                                
+      *----------------------------------------------------------------*        
+      * MBT_MDSE_HIER TABLE                                                     
+      *----------------------------------------------------------------*        
+030807     EXEC SQL                                                             
+030807         INCLUDE MBT00001                                                 
+030807     END-EXEC.                                                            
+                                                                                
+      *----------------------------------------------------------------*        
+      * MBT_MDSE_CLLCTN TABLE                                                   
+      *----------------------------------------------------------------*        
+030807     EXEC SQL                                                             
+030807         INCLUDE MBT00004                                                 
+030807     END-EXEC.                                                            
+                                                                                
+      *----------------------------------------------------------------*        
+      * DECLARE CURSOR                                                          
+      *----------------------------------------------------------------*        
+                                                                                
+      *--SELECT HARD LINE / SOFT LINE UNITS COUNTS BY TRUCK                     
+                                                                                
+           EXEC SQL                                                             
+              DECLARE TRUCK-HLSL CURSOR FOR                                     
+              SELECT C.TRLR_ID                                                  
+                    ,B.DEST_OPER_UNT_ID                                         
+                    ,A.OTBND_STAT_TMST                                          
+                    ,C.TRLR_SIZE_MU                                             
+                    ,M3.MDSE_VAL_TXT                                            
+                    ,SUM(E.UNT_QTY)                                             
+              FROM  TSUOBTR B                                                   
+                   ,TSUOBTS A                                                   
+                   ,TCNTRID C                                                   
+                   ,SUT_TRIP_SUM D                                              
+                   ,SUT_DEPT_SUM E                                              
+                   ,XST_LOC X                                                   
+                   ,MBT_MDSE_CLLCTN M0                                          
+                   ,MBT_MDSE_HIER   M1                                          
+                   ,MBT_MDSE_HIER   M2                                          
+                   ,MBT_MDSE_CLLCTN M3                                          
+              WHERE A.OTBND_TRIP_ID = B.OTBND_TRIP_ID                           
+              AND   B.OTBND_TRIP_ID = D.OTBND_TRIP_ID                           
+              AND   D.TRIP_OCRNC_ID = E.TRIP_OCRNC_ID                           
+              AND   B.TRLR_SRL_NBR = C.TRLR_SRL_NBR                             
+              AND   B.DEST_OPER_UNT_ID = X.LOC_NBR                              
+              AND   E.BUS_AREA_ID = SMALLINT(RTRIM(M0.MDSE_VAL_TXT))            
+              AND   M0.MDSE_CLLCTN_ID = M1.MDSE_CLLCTN_ID                       
+              AND   M1.PRNT_CLLCTN_ID = M2.MDSE_CLLCTN_ID                       
+              AND   M2.PRNT_CLLCTN_ID = M3.MDSE_CLLCTN_ID                       
+              AND   M0.MDSE_LVL_CDE = 'BSA'                                     
+              AND   M1.HIER_TYP_CDE = 'WP'                                      
+              AND   M2.HIER_TYP_CDE = 'WP'                                      
+              AND   M3.MDSE_LVL_CDE = 'WPG'                                     
+              AND   TRIP_STAT_CDE = 'SO'                                        
+              AND   B.DOOR_TYP_CDE = 'SH'                                       
+      ***    -- PRIOR WEEK START/END DATES                                      
+              AND   OTBND_STAT_TMST >= :PV-START-TMSTX                          
+              AND   OTBND_STAT_TMST <= :PV-END-TMSTX                            
+033108        AND   X.OPN_DTE <= :PV-PRE-OPEN-MIN-DATE                          
+              AND   C.TRLR_SIZE_MU <> 1                                         
+              AND   DEPT_NBR NOT IN (26,126)                                    
+              AND   E.BUS_AREA_ID NOT IN (99)                                   
+      ***    --REMOVE IN PRODUCTION.  WILL PULL DATA FOR STORE 101 ONLY         
+      ***     AND   B.DEST_OPER_UNT_ID = 0101                                   
+              AND   D.CRE_TMST IN                                               
+                    (SELECT MAX (F.CRE_TMST)                                    
+                     FROM SUT_TRIP_SUM F                                        
+                     WHERE D.OTBND_TRIP_ID = F.OTBND_TRIP_ID)                   
+              GROUP BY                                                          
+                 B.DEST_OPER_UNT_ID                                             
+                ,A.OTBND_STAT_TMST                                              
+                ,C.TRLR_ID                                                      
+                ,M3.MDSE_VAL_TXT                                                
+                ,C.TRLR_SIZE_MU                                                 
+              ORDER BY                                                          
+                       B.DEST_OPER_UNT_ID                                       
+                      ,A.OTBND_STAT_TMST                                        
+                      ,C.TRLR_ID                                                
+                      ,M3.MDSE_VAL_TXT                                          
+                      ,C.TRLR_SIZE_MU                                           
+               END-EXEC.                                                        
+                                                                                
+      *--SELECT JEWELRY UNIT COUNTS BY TRUCK/STORE/DATE                         
+                                                                                
+           EXEC SQL                                                             
+              DECLARE TRUCK-JEW CURSOR FOR                                      
+              SELECT C.TRLR_ID                                                  
+                    ,B.DEST_OPER_UNT_ID                                         
+                    ,A.OTBND_STAT_TMST                                          
+                    ,C.TRLR_SIZE_MU                                             
+                    ,SUM(E.UNT_QTY)                                             
+              FROM  TSUOBTR B                                                   
+                   ,TSUOBTS A                                                   
+                   ,TCNTRID C                                                   
+                   ,SUT_TRIP_SUM D                                              
+                   ,SUT_DEPT_SUM E                                              
+                   ,XST_LOC X                                                   
+              WHERE A.OTBND_TRIP_ID = B.OTBND_TRIP_ID                           
+              AND   B.OTBND_TRIP_ID = D.OTBND_TRIP_ID                           
+              AND   D.TRIP_OCRNC_ID = E.TRIP_OCRNC_ID                           
+              AND   B.TRLR_SRL_NBR = C.TRLR_SRL_NBR                             
+              AND   B.DEST_OPER_UNT_ID = X.LOC_NBR                              
+              AND   TRIP_STAT_CDE = 'SO'                                        
+              AND   B.DOOR_TYP_CDE = 'SH'                                       
+      ***    -- PRIOR WEEK START AND END DATES                                  
+              AND   OTBND_STAT_TMST >= :PV-START-TMSTX                          
+              AND   OTBND_STAT_TMST <= :PV-END-TMSTX                            
+033108        AND   X.OPN_DTE <= :PV-PRE-OPEN-MIN-DATE                          
+              AND   C.TRLR_SIZE_MU <> 1                                         
+         AND DEPT_NBR IN (27,29,122,127,129,227,327,427,522,527,627,727)27,727) 
+      ***    --REMOVE IN PRODUCTION - WILL ONLY PULL DATA FOR STORE 0101        
+      ***     AND   B.DEST_OPER_UNT_ID = 0101                                   
+              AND   D.CRE_TMST IN                                               
+                    (SELECT MAX (F.CRE_TMST)                                    
+                     FROM SUT_TRIP_SUM F                                        
+                     WHERE D.OTBND_TRIP_ID = F.OTBND_TRIP_ID)                   
+              GROUP BY                                                          
+                 B.DEST_OPER_UNT_ID                                             
+                ,A.OTBND_STAT_TMST                                              
+                ,C.TRLR_ID                                                      
+                ,E.BUS_AREA_ID                                                  
+                ,C.TRLR_SIZE_MU                                                 
+              ORDER BY                                                          
+                       B.DEST_OPER_UNT_ID                                       
+                      ,A.OTBND_STAT_TMST                                        
+                      ,C.TRLR_ID                                                
+                      ,E.BUS_AREA_ID                                            
+                      ,C.TRLR_SIZE_MU                                           
+           END-EXEC.                                                            
+                                                                                
+041508*--SELECT HALLMARK UNIT COUNTS BY TRUCK/STORE/DATE                        
+041508                                                                          
+041508     EXEC SQL                                                             
+041508        DECLARE TRUCK-HALL CURSOR FOR                                     
+041508        SELECT C.TRLR_ID                                                  
+041508              ,B.DEST_OPER_UNT_ID                                         
+041508              ,A.OTBND_STAT_TMST                                          
+041508              ,C.TRLR_SIZE_MU                                             
+041508              ,SUM(E.UNT_QTY)                                             
+041508        FROM  TSUOBTR B                                                   
+041508             ,TSUOBTS A                                                   
+041508             ,TCNTRID C                                                   
+041508             ,SUT_TRIP_SUM D                                              
+041508             ,SUT_DEPT_SUM E                                              
+041508             ,XST_LOC X                                                   
+041508        WHERE A.OTBND_TRIP_ID = B.OTBND_TRIP_ID                           
+041508        AND   B.OTBND_TRIP_ID = D.OTBND_TRIP_ID                           
+041508        AND   D.TRIP_OCRNC_ID = E.TRIP_OCRNC_ID                           
+041508        AND   B.TRLR_SRL_NBR = C.TRLR_SRL_NBR                             
+041508        AND   B.DEST_OPER_UNT_ID = X.LOC_NBR                              
+041508        AND   TRIP_STAT_CDE = 'SO'                                        
+041508        AND   B.DOOR_TYP_CDE = 'SH'                                       
+041508        AND   OTBND_STAT_TMST >= :PV-START-TMSTX                          
+041508        AND   OTBND_STAT_TMST <= :PV-END-TMSTX                            
+041508        AND   X.OPN_DTE <= :PV-PRE-OPEN-MIN-DATE                          
+041508        AND   C.TRLR_SIZE_MU <> 1                                         
+041508        AND   DEPT_NBR IN (26, 126)                               27,727) 
+041508        AND   D.CRE_TMST IN                                               
+041508              (SELECT MAX (F.CRE_TMST)                                    
+041508               FROM SUT_TRIP_SUM F                                        
+041508               WHERE D.OTBND_TRIP_ID = F.OTBND_TRIP_ID)                   
+041508        GROUP BY                                                          
+041508           B.DEST_OPER_UNT_ID                                             
+041508          ,A.OTBND_STAT_TMST                                              
+041508          ,C.TRLR_ID                                                      
+041508          ,E.BUS_AREA_ID                                                  
+041508          ,C.TRLR_SIZE_MU                                                 
+041508        ORDER BY                                                          
+041508                 B.DEST_OPER_UNT_ID                                       
+041508                ,A.OTBND_STAT_TMST                                        
+041508                ,C.TRLR_ID                                                
+041508                ,E.BUS_AREA_ID                                            
+041508                ,C.TRLR_SIZE_MU                                           
+041508     END-EXEC.                                                            
+041508                                                                          
+041508*--SELECT COSMETIC UNIT COUNTS BY TRUCK/STORE/DATE                        
+041508                                                                          
+041508     EXEC SQL                                                             
+041508        DECLARE TRUCK-COS CURSOR FOR                                      
+041508        SELECT C.TRLR_ID                                                  
+041508              ,B.DEST_OPER_UNT_ID                                         
+041508              ,A.OTBND_STAT_TMST                                          
+041508              ,C.TRLR_SIZE_MU                                             
+041508              ,SUM(E.UNT_QTY)                                             
+041508        FROM  TSUOBTR B                                                   
+041508             ,TSUOBTS A                                                   
+041508             ,TCNTRID C                                                   
+041508             ,SUT_TRIP_SUM D                                              
+041508             ,SUT_DEPT_SUM E                                              
+041508             ,XST_LOC X                                                   
+041508        WHERE A.OTBND_TRIP_ID = B.OTBND_TRIP_ID                           
+041508        AND   B.OTBND_TRIP_ID = D.OTBND_TRIP_ID                           
+041508        AND   D.TRIP_OCRNC_ID = E.TRIP_OCRNC_ID                           
+041508        AND   B.TRLR_SRL_NBR = C.TRLR_SRL_NBR                             
+041508        AND   B.DEST_OPER_UNT_ID = X.LOC_NBR                              
+041508        AND   TRIP_STAT_CDE = 'SO'                                        
+041508        AND   B.DOOR_TYP_CDE = 'SH'                                       
+041508        AND   OTBND_STAT_TMST >= :PV-START-TMSTX                          
+041508        AND   OTBND_STAT_TMST <= :PV-END-TMSTX                            
+041508        AND   X.OPN_DTE <= :PV-PRE-OPEN-MIN-DATE                          
+041508        AND   C.TRLR_SIZE_MU <> 1                                         
+041508        AND   DEPT_NBR IN (022,222,322,422)                       27,727) 
+041508        AND   D.CRE_TMST IN                                               
+041508              (SELECT MAX (F.CRE_TMST)                                    
+041508               FROM SUT_TRIP_SUM F                                        
+041508               WHERE D.OTBND_TRIP_ID = F.OTBND_TRIP_ID)                   
+041508        GROUP BY                                                          
+041508           B.DEST_OPER_UNT_ID                                             
+041508          ,A.OTBND_STAT_TMST                                              
+041508          ,C.TRLR_ID                                                      
+041508          ,E.BUS_AREA_ID                                                  
+041508          ,C.TRLR_SIZE_MU                                                 
+041508        ORDER BY                                                          
+041508                 B.DEST_OPER_UNT_ID                                       
+041508                ,A.OTBND_STAT_TMST                                        
+041508                ,C.TRLR_ID                                                
+041508                ,E.BUS_AREA_ID                                            
+041508                ,C.TRLR_SIZE_MU                                           
+041508     END-EXEC.                                                            
+                                                                                
+       PROCEDURE DIVISION.                                                      
+      ******************************************************************        
+       0000-MAIN.                                                               
+      ******************************************************************        
+                                                                                
+           PERFORM 1000-INITIALIZE.                                             
+                                                                                
+           PERFORM 2000-PROCESS                                                 
+                                                                                
+           PERFORM 5400-COMMIT.                                                 
+           PERFORM 9999-FINAL-HSKP.                                             
+                                                                                
+           STOP RUN.                                                            
+                                                                                
+      ******************************************************************        
+       1000-INITIALIZE.                                                         
+      ******************************************************************        
+                                                                                
+           DISPLAY 'START SDKUP021'.                                            
+                                                                                
+           OPEN INPUT DATE-FILE                                                 
+033108                CONTROL-FILE.                                             
+                                                                                
+           PERFORM 1100-GET-TIMESTAMP.                                          
+                                                                                
+           MOVE SD-CURR-DTE(1:4) TO ASC-YY.                                     
+           MOVE SD-CURR-DTE(6:2) TO ASC-MM.                                     
+           MOVE SD-CURR-DTE(9:2) TO ASC-DD.                                     
+                                                                                
+           PERFORM 2010-READ-FILE.                                              
+033108     PERFORM 2100-READ-CONTROL.                                           
+                                                                                
+           IF CC-START-DATE = SPACES                                            
+              DISPLAY 'CC-RUN-INDICATOR = ' CC-RUN-INDICATOR                    
+              IF CC-RUN-INDICATOR = 'W'                                         
+      *           PROCESS WEEK PRIOR                                            
+                  PERFORM 1200-GET-DATES                                        
+110509*           PERFORM 1250-GET-END-DATE                                     
+              ELSE                                                              
+      *           PROCESS CURRENT FISCAL WEEK                                   
+                  PERFORM 1400-GET-ACTUAL-DATE                                  
+              END-IF                                                            
+           ELSE                                                                 
+              DISPLAY 'DATE OVERRIDE USED'                                      
+              MOVE CC-START-DATE TO PV-START-DATE                               
+              MOVE CC-END-DATE   TO PV-END-DATE                                 
+           END-IF.                                                              
+                                                                                
+           MOVE PV-START-TMST TO PV-START-TMSTX.                                
+           MOVE PV-END-TMST   TO PV-END-TMSTX.                                  
+           DISPLAY 'PV-START-TMSTX = ' PV-START-TMSTX.                          
+           DISPLAY 'PV-END-TMSTX   = ' PV-END-TMSTX.                            
+                                                                                
+           PERFORM 1500-CLEAR-TABLES.                                           
+                                                                                
+           DISPLAY 'PROCESSING FOR : ' PV-START-DATE ' - ' PV-END-DATE.         
+           IF CC-RUN-INDICATOR = 'D'                                            
+             DISPLAY ' *** DAILY RUN *** '                                      
+           ELSE                                                                 
+             DISPLAY ' *** WEEKLY RUN *** '                                     
+           END-IF.                                                              
+                                                                                
+033108     PERFORM 1150-DETERMINE-PRE-OPEN-MIN.                                 
+                                                                                
+      ******************************************************************        
+       1100-GET-TIMESTAMP.                                                      
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+             SET :SD-TIME-STAMP = CURRENT TIMESTAMP                             
+           END-EXEC.                                                            
+           DISPLAY SD-TIME-STAMP ' TIME JOB RAN'.                               
+           IF SQLCODE EQUAL ZERO                                                
+               CONTINUE                                                         
+           ELSE                                                                 
+               MOVE '1100-GET-TIMESTAMP' TO PV-PARA-NAME                        
+               MOVE 'UNSUCCESSFUL GET TIMESTAMP' TO PV-ABEND-NOTE               
+               PERFORM 9000-DB2-ABEND                                           
+           END-IF.                                                              
+                                                                                
+                                                                                
+      ******************************************************************        
+033108 1150-DETERMINE-PRE-OPEN-MIN.                                             
+      ******************************************************************        
+                                                                                
+033108     INITIALIZE DPG51 DPG52 DPG53 DPG54 DPG55 DPG56.                      
+033108     SET DPG51-VALID-FISCAL-CALENDAR TO TRUE.                             
+033108     SET DPG52-LK-DTE-ISO-FMT        TO TRUE.                             
+033108     SET DPG51-DECREMENT-DATE        TO TRUE                              
+033108     MOVE CC-NUM-DAYS                TO DPG51-INCR-DECR-DAYS-9            
+033108     MOVE PV-END-DATE                TO DPG52-DB2-ISO-DATE-FMT.           
+                                                                                
+033108     PERFORM 1300-CALL-DATE-ROUTINE.                                      
+                                                                                
+033108     EVALUATE TRUE                                                        
+033108       WHEN DPG54-NO-ERROR                                                
+033108         MOVE DPG55-DB2-ISO-DATE-FMT TO PV-PRE-OPEN-MIN-DATE              
+033108         DISPLAY 'PV-PRE-OPEN-MIN-DATE = ' PV-PRE-OPEN-MIN-DATE           
+033108       WHEN OTHER                                                         
+033108          SET AC-DATE-ROUTINE-ERROR          TO TRUE                      
+033108          MOVE '1150-DETERMINE-PRE-OPEN-MIN' TO PV-PARA-NAME              
+033108          MOVE 'DATE ROUTINE ERROR'          TO PV-ABEND-NOTE             
+033108          PERFORM 8000-NON-DB2-ABEND                                      
+033108     END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+       1200-GET-DATES.                                                          
+      ******************************************************************        
+                                                                                
+           DISPLAY '1200-'.                                                     
+      *    SUBTRACTING THE SEVEN DAYS PUT YOU IN THE MIDDLE OF LAST WEEK        
+      *    IF WE RUN ON A WEDNESDAY, THEN RETURNS THE WEEK START AND            
+      *    WEEK END FOR THE WEEK YOU LAND IN BY SUBTRACTING 7.                  
+                                                                                
+      * --- ACTUALS ARE LOADED FOR PRIOR WEEK ---                               
+                                                                                
+           INITIALIZE DPG51 DPG52 DPG53 DPG54 DPG55 DPG56.                      
+           SET DPG51-VALID-FISCAL-CALENDAR TO TRUE.                             
+           SET DPG52-LK-DTE-ISO-FMT        TO TRUE.                             
+           SET DPG51-DECREMENT-DATE        TO TRUE                              
+           MOVE -7                         TO DPG51-INCR-DECR-DAYS-9            
+           MOVE SD-CURR-DTE                TO DPG52-DB2-ISO-DATE-FMT.           
+                                                                                
+           PERFORM 1300-CALL-DATE-ROUTINE.                                      
+                                                                                
+           EVALUATE TRUE                                                        
+             WHEN DPG54-NO-ERROR                                                
+               MOVE DPG55-1ST-WKDY-DB2ISO-FMT TO PV-START-DATE                  
+               MOVE DPG55-LAST-WKDY-DB2ISO-FMT TO PV-END-DATE                   
+               DISPLAY 'PV-START-DATE = ' PV-START-DATE                         
+               DISPLAY 'PV-END-DATE   = ' PV-END-DATE                           
+             WHEN OTHER                                                         
+                SET AC-DATE-ROUTINE-ERROR TO TRUE                               
+                MOVE '1200-GET-DATES' TO PV-PARA-NAME                           
+                MOVE 'DATE ROUTINE ERROR' TO PV-ABEND-NOTE                      
+                PERFORM 8000-NON-DB2-ABEND                                      
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+110509*1250-GET-END-DATE.                                                       
+      ******************************************************************        
+      *                                                                         
+      *    DISPLAY '1250-'.                                                     
+      *    INITIALIZE DPG51 DPG52 DPG53 DPG54 DPG55 DPG56.                      
+      *    SET DPG51-VALID-FISCAL-CALENDAR TO TRUE.                             
+      *    SET DPG52-LK-DTE-ISO-FMT        TO TRUE.                             
+      *    SET DPG51-INCREMENT-DATE        TO TRUE                              
+      *    MOVE +1                         TO DPG51-INCR-DECR-DAYS-9            
+      *    MOVE PV-END-DATE                TO DPG52-DB2-ISO-DATE-FMT.           
+      *                                                                         
+      *    PERFORM 1300-CALL-DATE-ROUTINE.                                      
+      *                                                                         
+      *    EVALUATE TRUE                                                        
+      *      WHEN DPG54-NO-ERROR                                                
+      *        MOVE DPG55-1ST-WKDY-DB2ISO-FMT TO PV-END-DATE                    
+      *        DISPLAY 'PV-END-DATE = ' PV-END-DATE                             
+      *      WHEN OTHER                                                         
+      *         SET AC-DATE-ROUTINE-ERROR TO TRUE                               
+      *         MOVE '1200-GET-DATES' TO PV-PARA-NAME                           
+      *         MOVE 'DATE ROUTINE ERROR' TO PV-ABEND-NOTE                      
+      *         PERFORM 8000-NON-DB2-ABEND                                      
+      *    END-EVALUATE.                                                        
+      *                                                                         
+      ******************************************************************        
+       1300-CALL-DATE-ROUTINE.                                                  
+      ******************************************************************        
+                                                                                
+           CALL DP500-KOHLS-CALENDAR-ROUTINE USING DPG51                        
+                                                   DPG52                        
+                                                   DPG53                        
+                                                   DPG54                        
+                                                   DPG55                        
+                                                   DPG56.                       
+                                                                                
+                                                                                
+      ******************************************************************        
+      * GET TODAYS ACTUAL DATE AND CALCULATE THE FISCAL WEEK                    
+      ******************************************************************        
+       1400-GET-ACTUAL-DATE.                                                    
+                                                                                
+           DISPLAY '1400-'.                                                     
+                                                                                
+           DISPLAY 'ASC-DATE = ' ASC-DATE.                                      
+                                                                                
+           INITIALIZE DPG51 DPG52 DPG53 DPG54 DPG55 DPG56.                      
+                                                                                
+           SET DPG51-VALID-FISCAL-CALENDAR TO TRUE.                             
+           SET DPG52-LK-DTE-ISO            TO TRUE.                             
+                                                                                
+           MOVE ASC-YY TO DPG52-DB2-ISO-DATE-YR.                                
+           MOVE ASC-MM TO DPG52-DB2-ISO-DATE-MO.                                
+           MOVE ASC-DD TO DPG52-DB2-ISO-DATE-DY.                                
+                                                                                
+           PERFORM 1300-CALL-DATE-ROUTINE.                                      
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN DPG54-NO-ERROR                                              
+                    DISPLAY DPG55-1ST-WKDY-DB2ISO-FMT                           
+                    DISPLAY DPG55-LAST-WKDY-DB2ISO-FMT                          
+                    MOVE DPG55-1ST-WKDY-DB2ISO-FMT TO PV-START-DATE             
+                    MOVE DPG55-LAST-WKDY-DB2ISO-FMT TO PV-END-DATE              
+                    DISPLAY 'PV-START-DATE = ' PV-START-DATE                    
+                    DISPLAY 'PV-END-DATE   = ' PV-END-DATE                      
+                                                                                
+               WHEN OTHER                                                       
+                SET AC-DATE-ROUTINE-ERROR TO TRUE                               
+                MOVE '1400-GET-ACTUAL-DATE' TO PV-PARA-NAME                     
+                MOVE 'DATE ROUTINE ERROR' TO PV-ABEND-NOTE                      
+                PERFORM 8000-NON-DB2-ABEND                                      
+           END-EVALUATE.                                                        
+                                                                                
+      *    NOW SUBTRACT 1 AND GET 1 DAY PRIOR                                   
+      *                                                                         
+           INITIALIZE DPG51 DPG52 DPG53 DPG54 DPG55 DPG56.                      
+           SET DPG51-VALID-FISCAL-CALENDAR TO TRUE.                             
+           SET DPG52-LK-DTE-ISO-FMT        TO TRUE.                             
+           SET DPG51-DECREMENT-DATE        TO TRUE                              
+           MOVE -1                         TO DPG51-INCR-DECR-DAYS-9            
+           MOVE SD-CURR-DTE                TO DPG52-DB2-ISO-DATE-FMT.           
+           DISPLAY 'SD-CURR-DTE = ' SD-CURR-DTE.                                
+                                                                                
+           PERFORM 1300-CALL-DATE-ROUTINE.                                      
+                                                                                
+           EVALUATE TRUE                                                        
+             WHEN DPG54-NO-ERROR                                                
+               MOVE DPG55-DB2-ISO-DATE-FMT  TO PV-END-DATE                      
+               DISPLAY '**** PV-END-DATE   = ' PV-END-DATE                      
+               DISPLAY 'DATE MINUS ONE **** ' DPG55-DB2-ISO-DATE-FMT            
+             WHEN OTHER                                                         
+                SET AC-DATE-ROUTINE-ERROR TO TRUE                               
+                MOVE '#2 1400-GET-ACTUAL-DATE' TO PV-PARA-NAME                  
+                MOVE 'DATE ROUTINE ERROR' TO PV-ABEND-NOTE                      
+                PERFORM 8000-NON-DB2-ABEND                                      
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+       1500-CLEAR-TABLES.                                                       
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+             SELECT COUNT(*)                                                    
+               INTO :NUM-ROWS-MDSE                                              
+             FROM SDT_STR_RCVG_MDSE                                             
+             WHERE (TRLR_ARRVL_DTE BETWEEN :PV-START-DATE AND                   
+                                              :PV-END-DATE)                     
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = ZERO                                               
+                  CONTINUE                                                      
+              WHEN SQLCODE = -904                                               
+              WHEN SQLCODE = -913                                               
+              WHEN SQLCODE = +100                                               
+                  CONTINUE                                                      
+                                                                                
+              WHEN SQLWARN0 NOT = SPACES                                        
+              WHEN SQLCODE < ZERO                                               
+              WHEN SQLCODE > ZERO                                               
+                  MOVE '1500-CLEAR-TABLE, COUNT MDSE' TO PV-PARA-NAME           
+                  PERFORM 9000-DB2-ABEND                                        
+           END-EVALUATE.                                                        
+                                                                                
+           EXEC SQL                                                             
+             DELETE FROM SDT_STR_RCVG_MDSE                                      
+             WHERE (TRLR_ARRVL_DTE BETWEEN :PV-START-DATE AND                   
+                                              :PV-END-DATE)                     
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = ZERO                                               
+                  CONTINUE                                                      
+              WHEN SQLCODE = -904                                               
+              WHEN SQLCODE = -913                                               
+              WHEN SQLCODE = +100                                               
+                  CONTINUE                                                      
+                                                                                
+              WHEN SQLWARN0 NOT = SPACES                                        
+              WHEN SQLCODE < ZERO                                               
+              WHEN SQLCODE > ZERO                                               
+                  MOVE '1500-CLEAR-TABLE, DELETE MDSE' TO PV-PARA-NAME          
+                  PERFORM 9000-DB2-ABEND                                        
+           END-EVALUATE.                                                        
+                                                                                
+           EXEC SQL                                                             
+             SELECT COUNT(*)                                                    
+               INTO :NUM-ROWS-RCVG                                              
+             FROM SDT_STR_RCVG                                                  
+             WHERE (TRLR_ARRVL_DTE BETWEEN :PV-START-DATE AND                   
+                                              :PV-END-DATE)                     
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = ZERO                                               
+                  CONTINUE                                                      
+              WHEN SQLCODE = -904                                               
+              WHEN SQLCODE = -913                                               
+              WHEN SQLCODE = +100                                               
+                  CONTINUE                                                      
+                                                                                
+              WHEN SQLWARN0 NOT = SPACES                                        
+              WHEN SQLCODE < ZERO                                               
+              WHEN SQLCODE > ZERO                                               
+                  MOVE '1500-CLEAR-TABLE, COUNT RCVG' TO PV-PARA-NAME           
+                  PERFORM 9000-DB2-ABEND                                        
+           END-EVALUATE.                                                        
+                                                                                
+           EXEC SQL                                                             
+             DELETE FROM SDT_STR_RCVG                                           
+             WHERE (TRLR_ARRVL_DTE BETWEEN :PV-START-DATE AND                   
+                                              :PV-END-DATE)                     
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = ZERO                                               
+                  CONTINUE                                                      
+              WHEN SQLCODE = -904                                               
+              WHEN SQLCODE = -913                                               
+              WHEN SQLCODE = +100                                               
+                  CONTINUE                                                      
+                                                                                
+              WHEN SQLWARN0 NOT = SPACES                                        
+              WHEN SQLCODE < ZERO                                               
+              WHEN SQLCODE > ZERO                                               
+                  MOVE '1500-CLEAR-TABLE, DELETE RCVG' TO PV-PARA-NAME          
+                  PERFORM 9000-DB2-ABEND                                        
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+       2000-PROCESS.                                                            
+      ******************************************************************        
+                                                                                
+      * ----------------------------------------------------------------        
+      *    THIS CURSOR FOR HARDLINE/SOFTLINE                                    
+      * ----------------------------------------------------------------        
+           PERFORM 4000-OPEN-CURSOR.                                            
+           PERFORM 4100-FETCH-CURSOR.                                           
+                                                                                
+           MOVE SUOBTR-DEST-OPER-UNT-ID TO PV-HOLD-STR-NBR                      
+                                           SDT00032-STR-NBR.                    
+           MOVE SUOBTS-OTBND-STAT-TMST  TO PV-ARRVL-TMST.                       
+112806     MOVE PV-ARRVL-DATE           TO PV-HOLD-ARRVL-DATE                   
+                                           SDT00032-TRLR-ARRVL-DTE.             
+           MOVE CNTRID-TRLR-ID          TO PV-HOLD-TRLR-ID                      
+                                           SDT00032-TRLR-VEH-NBR.               
+           MOVE CNTRID-TRLR-SIZE-MU     TO SDT00032-TRLR-SIZE-MU.               
+                                                                                
+           IF PV-RECORDS-READ > 0                                               
+               PERFORM 5000-INSERT                                              
+           END-IF.                                                              
+                                                                                
+           PERFORM UNTIL PS-END-OF-CSR                                          
+              IF SUOBTR-DEST-OPER-UNT-ID = PV-HOLD-STR-NBR AND                  
+                 PV-ARRVL-DATE           = PV-HOLD-ARRVL-DATE AND               
+                 CNTRID-TRLR-ID          = PV-HOLD-TRLR-ID                      
+                    PERFORM 4300-CHECK-MSDE-CAT                                 
+              ELSE                                                              
+      *             NEW RECORD - INSERT ACCUM RECS                              
+      *                          INSERT NEW HEADER                              
+      *                          BEGIN ACCUM AGAIN                              
+                    PERFORM 6000-MDSE-INSERT                                    
+                    MOVE SUOBTR-DEST-OPER-UNT-ID TO PV-HOLD-STR-NBR             
+                    MOVE SUOBTS-OTBND-STAT-TMST  TO PV-ARRVL-TMST               
+                    MOVE PV-ARRVL-DATE           TO PV-HOLD-ARRVL-DATE          
+                    MOVE CNTRID-TRLR-ID          TO PV-HOLD-TRLR-ID             
+                    MOVE ZERO                    TO ACCUM-UNIT-SL               
+                                                    ACCUM-UNIT-HL               
+                                                    ACCUM-UNIT-JEW              
+041508                                              ACCUM-UNIT-HALL             
+041508                                              ACCUM-UNIT-COS              
+112806              MOVE SUOBTR-DEST-OPER-UNT-ID TO SDT00032-STR-NBR            
+                    MOVE SUOBTS-OTBND-STAT-TMST  TO PV-ARRVL-TMST               
+112806              MOVE PV-ARRVL-DATE        TO SDT00032-TRLR-ARRVL-DTE        
+                    MOVE CNTRID-TRLR-ID        TO SDT00032-TRLR-VEH-NBR         
+                    MOVE CNTRID-TRLR-SIZE-MU   TO SDT00032-TRLR-SIZE-MU         
+                    PERFORM 5000-INSERT                                         
+                    PERFORM 4300-CHECK-MSDE-CAT                                 
+              END-IF                                                            
+                                                                                
+              PERFORM 4100-FETCH-CURSOR                                         
+           END-PERFORM.                                                         
+                                                                                
+      *    LAST RECORD RCVG_MDSE INSERT                                         
+           IF PV-RECORDS-READ > 0                                               
+               PERFORM 6000-MDSE-INSERT                                         
+           END-IF.                                                              
+                                                                                
+           PERFORM 4200-CLOSE-CURSOR.                                           
+                                                                                
+      * ----------------------------------------------------------------        
+      *    NOW BEGIN JEWELRY COUNT                                              
+      * ----------------------------------------------------------------        
+      *    DISPLAY 'BEGIN JEWELRY CURSOR'.                                      
+                                                                                
+           SET PS-NOT-END-OF-CSR TO TRUE.                                       
+           MOVE ZERO TO ACCUM-UNIT-SL                                           
+                        ACCUM-UNIT-HL                                           
+                        ACCUM-UNIT-JEW                                          
+                        ACCUM-UNIT-HALL                                         
+                        ACCUM-UNIT-COS.                                         
+                                                                                
+           PERFORM 5100-OPEN-CURSOR.                                            
+           PERFORM 5200-FETCH-CURSOR.                                           
+                                                                                
+112806     MOVE SUOBTR-DEST-OPER-UNT-ID TO PV-HOLD-STR-NBR                      
+                                           SDT00032-STR-NBR.                    
+           MOVE SUOBTS-OTBND-STAT-TMST  TO PV-ARRVL-TMST.                       
+112806     MOVE PV-ARRVL-DATE           TO PV-HOLD-ARRVL-DATE                   
+                                           SDT00032-TRLR-ARRVL-DTE.             
+           MOVE CNTRID-TRLR-ID          TO PV-HOLD-TRLR-ID                      
+                                           SDT00032-TRLR-VEH-NBR.               
+           MOVE CNTRID-TRLR-SIZE-MU     TO SDT00032-TRLR-SIZE-MU.               
+                                                                                
+           IF PV-RECORDS-READ2 > 0                                              
+               PERFORM 5000-INSERT                                              
+           END-IF.                                                              
+                                                                                
+           PERFORM UNTIL PS-END-OF-CSR                                          
+              IF SUOBTR-DEST-OPER-UNT-ID = PV-HOLD-STR-NBR AND                  
+                 PV-ARRVL-DATE           = PV-HOLD-ARRVL-DATE AND               
+                 CNTRID-TRLR-ID          = PV-HOLD-TRLR-ID                      
+                    ADD SUT00009-UNT-QTY TO ACCUM-UNIT-JEW                      
+      *             DISPLAY 'ADD TO JEW = ' ACCUM-UNIT-JEW ' '                  
+      *               SUT00009-UNT-QTY                                          
+              ELSE                                                              
+      *             NEW RECORD - INSERT ACCUM RECS                              
+      *                          INSERT NEW HEADER                              
+      *                          BEGIN ACCUM AGAIN                              
+                    PERFORM 6000-MDSE-INSERT                                    
+                    MOVE SUOBTR-DEST-OPER-UNT-ID TO PV-HOLD-STR-NBR             
+                    MOVE SUOBTS-OTBND-STAT-TMST  TO PV-ARRVL-TMST               
+                    MOVE PV-ARRVL-DATE           TO PV-HOLD-ARRVL-DATE          
+                    MOVE CNTRID-TRLR-ID          TO PV-HOLD-TRLR-ID             
+                    MOVE ZERO                    TO ACCUM-UNIT-SL               
+                                                    ACCUM-UNIT-HL               
+                                                    ACCUM-UNIT-JEW              
+041508                                              ACCUM-UNIT-HALL             
+041508                                              ACCUM-UNIT-COS              
+                    MOVE SUOBTR-DEST-OPER-UNT-ID TO SDT00032-STR-NBR            
+                    MOVE SUOBTS-OTBND-STAT-TMST  TO PV-ARRVL-TMST               
+                    MOVE PV-ARRVL-DATE        TO SDT00032-TRLR-ARRVL-DTE        
+                    MOVE CNTRID-TRLR-ID        TO SDT00032-TRLR-VEH-NBR         
+                    MOVE CNTRID-TRLR-SIZE-MU   TO SDT00032-TRLR-SIZE-MU         
+                    PERFORM 5000-INSERT                                         
+                    ADD SUT00009-UNT-QTY TO ACCUM-UNIT-JEW                      
+      *             DISPLAY 'ADD TO JEW = ' ACCUM-UNIT-JEW ' '                  
+      *               SUT00009-UNT-QTY                                          
+              END-IF                                                            
+                                                                                
+              PERFORM 5200-FETCH-CURSOR                                         
+           END-PERFORM.                                                         
+                                                                                
+      *    LAST RECORD RCVG_MDSE INSERT                                         
+           IF PV-RECORDS-READ2 > 0                                              
+               PERFORM 6000-MDSE-INSERT                                         
+           END-IF.                                                              
+                                                                                
+           PERFORM 5300-CLOSE-CURSOR.                                           
+                                                                                
+      * ----------------------------------------------------------------        
+041508*    BEGIN HALLMARK COUNT                                                 
+      * ----------------------------------------------------------------        
+                                                                                
+041508     SET PS-NOT-END-OF-CSR TO TRUE.                                       
+041508     MOVE ZERO TO ACCUM-UNIT-SL                                           
+041508                  ACCUM-UNIT-HL                                           
+041508                  ACCUM-UNIT-JEW                                          
+041508                  ACCUM-UNIT-HALL                                         
+041508                  ACCUM-UNIT-COS                                          
+                                                                                
+041508     PERFORM 7000-OPEN-CURSOR.                                            
+041508     PERFORM 7100-FETCH-CURSOR.                                           
+                                                                                
+041508     MOVE SUOBTR-DEST-OPER-UNT-ID TO PV-HOLD-STR-NBR                      
+041508                                     SDT00032-STR-NBR.                    
+041508     MOVE SUOBTS-OTBND-STAT-TMST  TO PV-ARRVL-TMST.                       
+041508     MOVE PV-ARRVL-DATE           TO PV-HOLD-ARRVL-DATE                   
+041508                                     SDT00032-TRLR-ARRVL-DTE.             
+041508     MOVE CNTRID-TRLR-ID          TO PV-HOLD-TRLR-ID                      
+041508                                     SDT00032-TRLR-VEH-NBR.               
+041508     MOVE CNTRID-TRLR-SIZE-MU     TO SDT00032-TRLR-SIZE-MU.               
+                                                                                
+041508     IF PV-RECORDS-READ3 > 0                                              
+041508         PERFORM 5000-INSERT                                              
+041508     END-IF.                                                              
+                                                                                
+041508     PERFORM UNTIL PS-END-OF-CSR                                          
+041508        IF SUOBTR-DEST-OPER-UNT-ID = PV-HOLD-STR-NBR AND                  
+041508           PV-ARRVL-DATE           = PV-HOLD-ARRVL-DATE AND               
+041508           CNTRID-TRLR-ID          = PV-HOLD-TRLR-ID                      
+041508              ADD SUT00009-UNT-QTY TO ACCUM-UNIT-HALL                     
+041508        ELSE                                                              
+041508              PERFORM 6000-MDSE-INSERT                                    
+041508              MOVE SUOBTR-DEST-OPER-UNT-ID TO PV-HOLD-STR-NBR             
+041508              MOVE SUOBTS-OTBND-STAT-TMST  TO PV-ARRVL-TMST               
+041508              MOVE PV-ARRVL-DATE           TO PV-HOLD-ARRVL-DATE          
+041508              MOVE CNTRID-TRLR-ID          TO PV-HOLD-TRLR-ID             
+041508              MOVE ZERO                    TO ACCUM-UNIT-SL               
+041508                                              ACCUM-UNIT-HL               
+041508                                              ACCUM-UNIT-JEW              
+041508                                              ACCUM-UNIT-HALL             
+041508                                              ACCUM-UNIT-COS              
+041508              MOVE SUOBTR-DEST-OPER-UNT-ID TO SDT00032-STR-NBR            
+041508              MOVE SUOBTS-OTBND-STAT-TMST  TO PV-ARRVL-TMST               
+041508              MOVE PV-ARRVL-DATE        TO SDT00032-TRLR-ARRVL-DTE        
+041508              MOVE CNTRID-TRLR-ID        TO SDT00032-TRLR-VEH-NBR         
+041508              MOVE CNTRID-TRLR-SIZE-MU   TO SDT00032-TRLR-SIZE-MU         
+041508              PERFORM 5000-INSERT                                         
+041508              ADD SUT00009-UNT-QTY TO ACCUM-UNIT-HALL                     
+041508        END-IF                                                            
+                                                                                
+041508        PERFORM 7100-FETCH-CURSOR                                         
+041508     END-PERFORM.                                                         
+                                                                                
+041508*    LAST RECORD RCVG_MDSE INSERT                                         
+041508     IF PV-RECORDS-READ3 > 0                                              
+041508         PERFORM 6000-MDSE-INSERT                                         
+041508     END-IF.                                                              
+                                                                                
+041508     PERFORM 7200-CLOSE-CURSOR.                                           
+                                                                                
+      * ----------------------------------------------------------------        
+041508*    BEGIN COSMETIC COUNT                                                 
+      * ----------------------------------------------------------------        
+                                                                                
+041508     SET PS-NOT-END-OF-CSR TO TRUE.                                       
+041508     MOVE ZERO TO ACCUM-UNIT-SL                                           
+041508                  ACCUM-UNIT-HL                                           
+041508                  ACCUM-UNIT-JEW                                          
+041508                  ACCUM-UNIT-HALL                                         
+041508                  ACCUM-UNIT-COS                                          
+                                                                                
+041508     PERFORM 7300-OPEN-CURSOR.                                            
+041508     PERFORM 7400-FETCH-CURSOR.                                           
+                                                                                
+041508     MOVE SUOBTR-DEST-OPER-UNT-ID TO PV-HOLD-STR-NBR                      
+041508                                     SDT00032-STR-NBR.                    
+041508     MOVE SUOBTS-OTBND-STAT-TMST  TO PV-ARRVL-TMST.                       
+041508     MOVE PV-ARRVL-DATE           TO PV-HOLD-ARRVL-DATE                   
+041508                                     SDT00032-TRLR-ARRVL-DTE.             
+041508     MOVE CNTRID-TRLR-ID          TO PV-HOLD-TRLR-ID                      
+041508                                     SDT00032-TRLR-VEH-NBR.               
+041508     MOVE CNTRID-TRLR-SIZE-MU     TO SDT00032-TRLR-SIZE-MU.               
+                                                                                
+041508     IF PV-RECORDS-READ4 > 0                                              
+041508         PERFORM 5000-INSERT                                              
+041508     END-IF.                                                              
+                                                                                
+041508     PERFORM UNTIL PS-END-OF-CSR                                          
+041508        IF SUOBTR-DEST-OPER-UNT-ID = PV-HOLD-STR-NBR AND                  
+041508           PV-ARRVL-DATE           = PV-HOLD-ARRVL-DATE AND               
+041508           CNTRID-TRLR-ID          = PV-HOLD-TRLR-ID                      
+041508              ADD SUT00009-UNT-QTY TO ACCUM-UNIT-COS                      
+041508        ELSE                                                              
+041508              PERFORM 6000-MDSE-INSERT                                    
+041508              MOVE SUOBTR-DEST-OPER-UNT-ID TO PV-HOLD-STR-NBR             
+041508              MOVE SUOBTS-OTBND-STAT-TMST  TO PV-ARRVL-TMST               
+041508              MOVE PV-ARRVL-DATE           TO PV-HOLD-ARRVL-DATE          
+041508              MOVE CNTRID-TRLR-ID          TO PV-HOLD-TRLR-ID             
+041508              MOVE ZERO                    TO ACCUM-UNIT-SL               
+041508                                              ACCUM-UNIT-HL               
+041508                                              ACCUM-UNIT-JEW              
+041508                                              ACCUM-UNIT-HALL             
+041508                                              ACCUM-UNIT-COS              
+041508              MOVE SUOBTR-DEST-OPER-UNT-ID TO SDT00032-STR-NBR            
+041508              MOVE SUOBTS-OTBND-STAT-TMST  TO PV-ARRVL-TMST               
+041508              MOVE PV-ARRVL-DATE        TO SDT00032-TRLR-ARRVL-DTE        
+041508              MOVE CNTRID-TRLR-ID        TO SDT00032-TRLR-VEH-NBR         
+041508              MOVE CNTRID-TRLR-SIZE-MU   TO SDT00032-TRLR-SIZE-MU         
+041508              PERFORM 5000-INSERT                                         
+041508              ADD SUT00009-UNT-QTY TO ACCUM-UNIT-COS                      
+041508        END-IF                                                            
+                                                                                
+041508        PERFORM 7400-FETCH-CURSOR                                         
+041508     END-PERFORM.                                                         
+                                                                                
+041508*    LAST RECORD RCVG_MDSE INSERT                                         
+041508     IF PV-RECORDS-READ4 > 0                                              
+041508         PERFORM 6000-MDSE-INSERT                                         
+041508     END-IF.                                                              
+                                                                                
+041508     PERFORM 7500-CLOSE-CURSOR.                                           
+      * ----------------------------------------------------------------        
+                                                                                
+      * THERE WILL BE 2 CONTROL CARDS - THIS PROGRAM WILL BE RUN DAILY          
+      * AND WEEKLY.  IF THERE IS A DATE ON THE EITHER CARD - USE THE            
+      * DATE ON THE CARD.                                                       
+      * IF THE D - CONTROL CARD USE THE CURRENT WEEK                            
+      * IF THE W - CONTROL CARD USE THE PREVIOUS WEEK                           
+                                                                                
+      ******************************************************************        
+       2010-READ-FILE.                                                          
+      ******************************************************************        
+                                                                                
+           READ DATE-FILE INTO CC-DATE-CONTROL.                                 
+                                                                                
+      ******************************************************************        
+033108 2100-READ-CONTROL.                                                       
+      ******************************************************************        
+                                                                                
+033108     READ CONTROL-FILE INTO CC-CONTROL.                                   
+                                                                                
+      ******************************************************************        
+       4000-OPEN-CURSOR.                                                        
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+                OPEN TRUCK-HLSL                                                 
+           END-EXEC                                                             
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = ZERO                                               
+              WHEN SQLCODE = -904                                               
+              WHEN SQLCODE = -913                                               
+                  CONTINUE                                                      
+                                                                                
+              WHEN SQLWARN0 NOT = SPACES                                        
+              WHEN SQLCODE < ZERO                                               
+              WHEN SQLCODE > ZERO                                               
+                  MOVE '4000-OPEN-CURSOR' TO PV-PARA-NAME                       
+                  PERFORM 9000-DB2-ABEND                                        
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+       4100-FETCH-CURSOR.                                                       
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+              FETCH TRUCK-HLSL                                                  
+                INTO  :CNTRID-TRLR-ID                                           
+                     ,:SUOBTR-DEST-OPER-UNT-ID                                  
+                     ,:SUOBTS-OTBND-STAT-TMST                                   
+                     ,:CNTRID-TRLR-SIZE-MU                                      
+                     ,:MBT00004-MDSE-VAL-TXT                                    
+                     ,:SUT00009-UNT-QTY                                         
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = ZERO                                              
+                 ADD 1 TO PV-RECORDS-READ                                       
+               WHEN SQLCODE = +100                                              
+                 SET PS-END-OF-CSR TO TRUE                                      
+               WHEN SQLWARN0 NOT = SPACE                                        
+               WHEN SQLCODE NOT = ZERO                                          
+                  MOVE '4100-FETCH-CURSOR'    TO PV-PARA-NAME                   
+                  MOVE 'FETCH TRUCK CURSOR' TO PV-ABEND-NOTE                    
+                  SET AC-DB2-ERROR            TO TRUE                           
+                  PERFORM 9000-DB2-ABEND                                        
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+       4200-CLOSE-CURSOR.                                                       
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               CLOSE TRUCK-HLSL                                                 
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = ZERO                                              
+                   CONTINUE                                                     
+                                                                                
+               WHEN SQLWARN0 NOT = SPACES                                       
+               WHEN SQLCODE < ZERO                                              
+               WHEN SQLCODE > ZERO                                              
+                   SET AC-DB2-ERROR TO TRUE                                     
+                   MOVE '4200-CLOSE-CURSOR' TO PV-PARA-NAME                     
+                   PERFORM 9000-DB2-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+      *    FOR HARDLINE/SOFTLINE                                                
+      ******************************************************************        
+                                                                                
+       4300-CHECK-MSDE-CAT.                                                     
+                                                                                
+           EVALUATE MBT00004-MDSE-VAL-TXT                                       
+               WHEN '1'                                                         
+                  ADD SUT00009-UNT-QTY TO ACCUM-UNIT-HL                         
+               WHEN '2'                                                         
+                  ADD SUT00009-UNT-QTY TO ACCUM-UNIT-SL                         
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+       5000-INSERT.                                                             
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+           INSERT INTO SDT_STR_RCVG                                             
+             (STR_NBR                                                           
+             ,TRLR_ARRVL_DTE                                                    
+             ,TRLR_VEH_NBR                                                      
+             ,TRLR_SIZE_MU)                                                     
+           VALUES ( :SDT00032-STR-NBR                                           
+                   ,:SDT00032-TRLR-ARRVL-DTE                                    
+                   ,:SDT00032-TRLR-VEH-NBR                                      
+                   ,:SDT00032-TRLR-SIZE-MU)                                     
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = +0                                                
+                   ADD +1 TO PV-RECS-INSERTED                                   
+               WHEN SQLCODE = -803                                              
+                   CONTINUE                                                     
+      *            DISPLAY 'ROW ADDED THRU HLSL CURSOR'                         
+      ***          ROW ADDED THRU HLSL CURSOR - JUST ADD MDSE ROW               
+               WHEN SQLCODE = -913                                              
+               WHEN SQLCODE = -904                                              
+                   MOVE '5000-INSERT' TO PV-PARA-NAME                           
+                   MOVE 'RESOURCE UNAVAILABLE' TO PV-ABEND-NOTE                 
+                   PERFORM 9000-DB2-ABEND                                       
+               WHEN OTHER                                                       
+                   MOVE '5000-INSERT' TO PV-PARA-NAME                           
+                   DISPLAY '                                          '         
+                   DISPLAY '******************************************'         
+                   DISPLAY 'STR           = ' SDT00032-STR-NBR                  
+                   DISPLAY 'ARRIVAL DATE  = ' SDT00032-TRLR-ARRVL-DTE           
+                   DISPLAY 'TRLR-VEH-NBR  = ' SDT00032-TRLR-VEH-NBR             
+                   DISPLAY 'TRUCK SIZE    = ' SDT00032-TRLR-SIZE-MU             
+                   DISPLAY '******************************************'         
+                   PERFORM 9000-DB2-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+       5100-OPEN-CURSOR.                                                        
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+                OPEN TRUCK-JEW                                                  
+           END-EXEC                                                             
+                                                                                
+           EVALUATE TRUE                                                        
+              WHEN SQLCODE = ZERO                                               
+              WHEN SQLCODE = -904                                               
+              WHEN SQLCODE = -913                                               
+                  CONTINUE                                                      
+                                                                                
+              WHEN SQLWARN0 NOT = SPACES                                        
+              WHEN SQLCODE < ZERO                                               
+              WHEN SQLCODE > ZERO                                               
+                   MOVE '5100-OPEN-CURSOR' TO PV-PARA-NAME                      
+                  PERFORM 9000-DB2-ABEND                                        
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+       5200-FETCH-CURSOR.                                                       
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+              FETCH TRUCK-JEW                                                   
+                INTO  :CNTRID-TRLR-ID                                           
+                     ,:SUOBTR-DEST-OPER-UNT-ID                                  
+                     ,:SUOBTS-OTBND-STAT-TMST                                   
+                     ,:CNTRID-TRLR-SIZE-MU                                      
+                     ,:SUT00009-UNT-QTY                                         
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = ZERO                                              
+                 ADD 1 TO PV-RECORDS-READ2                                      
+               WHEN SQLCODE = +100                                              
+                 SET PS-END-OF-CSR TO TRUE                                      
+               WHEN SQLWARN0 NOT = SPACE                                        
+               WHEN SQLCODE NOT = ZERO                                          
+                  MOVE '5200-FETCH-CURSOR'    TO PV-PARA-NAME                   
+                  MOVE 'FETCH JEW TRUCK CURSOR' TO PV-ABEND-NOTE                
+                  SET AC-DB2-ERROR            TO TRUE                           
+                  PERFORM 9000-DB2-ABEND                                        
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+       5300-CLOSE-CURSOR.                                                       
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+               CLOSE TRUCK-JEW                                                  
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = ZERO                                              
+                   CONTINUE                                                     
+                                                                                
+               WHEN SQLWARN0 NOT = SPACES                                       
+               WHEN SQLCODE < ZERO                                              
+               WHEN SQLCODE > ZERO                                              
+                   SET AC-DB2-ERROR TO TRUE                                     
+                   MOVE '5300-CLOSE-CURSOR' TO PV-PARA-NAME                     
+                   PERFORM 9000-DB2-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+       6000-MDSE-INSERT.                                                        
+      ******************************************************************        
+                                                                                
+           MOVE PV-HOLD-STR-NBR     TO SDT00033-STR-NBR.                        
+           MOVE PV-HOLD-ARRVL-DATE  TO SDT00033-TRLR-ARRVL-DTE.                 
+           MOVE PV-HOLD-TRLR-ID     TO SDT00033-TRLR-VEH-NBR.                   
+                                                                                
+      *    DISPLAY 'ACCUM-UNIT-SL = ' ACCUM-UNIT-SL.                            
+           IF ACCUM-UNIT-SL > 0                                                 
+              MOVE 'SL '           TO SDT00033-MDSE-CTG-CDE                     
+              MOVE ACCUM-UNIT-SL   TO SDT00033-MDSE-ITM-QTY                     
+              PERFORM 6100-INSERT                                               
+           END-IF.                                                              
+                                                                                
+      *    DISPLAY 'ACCUM-UNIT-HL = ' ACCUM-UNIT-HL.                            
+           IF ACCUM-UNIT-HL > 0                                                 
+               MOVE 'HL '           TO SDT00033-MDSE-CTG-CDE                    
+               MOVE ACCUM-UNIT-HL   TO SDT00033-MDSE-ITM-QTY                    
+               PERFORM 6100-INSERT                                              
+           END-IF.                                                              
+                                                                                
+      *    DISPLAY 'ACCUM-UNIT-JEW = ' ACCUM-UNIT-JEW.                          
+           IF ACCUM-UNIT-JEW > 0                                                
+               MOVE 'JEW'           TO SDT00033-MDSE-CTG-CDE                    
+               MOVE ACCUM-UNIT-JEW  TO SDT00033-MDSE-ITM-QTY                    
+               PERFORM 6100-INSERT                                              
+           END-IF.                                                              
+                                                                                
+041508*    DISPLAY 'ACCUM-UNIT-HALL = ' ACCUM-UNIT-HALL.                        
+041508     IF ACCUM-UNIT-HALL > 0                                               
+041508         MOVE 'HAL'            TO SDT00033-MDSE-CTG-CDE                   
+041508         MOVE ACCUM-UNIT-HALL  TO SDT00033-MDSE-ITM-QTY                   
+041508         PERFORM 6100-INSERT                                              
+041508     END-IF.                                                              
+                                                                                
+041508*    DISPLAY 'ACCUM-UNIT-COS = ' ACCUM-UNIT-COS.                          
+041508     IF ACCUM-UNIT-COS > 0                                                
+041508         MOVE 'COS'            TO SDT00033-MDSE-CTG-CDE                   
+041508         MOVE ACCUM-UNIT-COS  TO SDT00033-MDSE-ITM-QTY                    
+041508         PERFORM 6100-INSERT                                              
+041508     END-IF.                                                              
+                                                                                
+      ******************************************************************        
+       6100-INSERT.                                                             
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+           INSERT INTO SDT_STR_RCVG_MDSE                                        
+             (STR_NBR                                                           
+             ,TRLR_ARRVL_DTE                                                    
+             ,TRLR_VEH_NBR                                                      
+             ,MDSE_CTG_CDE                                                      
+             ,MDSE_ITM_QTY)                                                     
+           VALUES ( :SDT00033-STR-NBR                                           
+                   ,:SDT00033-TRLR-ARRVL-DTE                                    
+                   ,:SDT00033-TRLR-VEH-NBR                                      
+                   ,:SDT00033-MDSE-CTG-CDE                                      
+                   ,:SDT00033-MDSE-ITM-QTY)                                     
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = +0                                                
+                   ADD +1 TO PV-RECS-INSERTED2                                  
+               WHEN SQLCODE = -913                                              
+               WHEN SQLCODE = -904                                              
+                   MOVE '5000-INSERT' TO PV-PARA-NAME                           
+                   MOVE 'RESOURCE UNAVAILABLE' TO PV-ABEND-NOTE                 
+                   PERFORM 9000-DB2-ABEND                                       
+350649         WHEN SQLCODE = -803                                              
+350649             DISPLAY ' DUPLICATE ROW EXIST'                               
+350649             DISPLAY 'STR-NBR       = ' SDT00033-STR-NBR                  
+350649             DISPLAY 'ARRIVAL-DATE  = ' SDT00033-TRLR-ARRVL-DTE           
+350649             DISPLAY 'TRLR-VEH-NBR  = ' SDT00033-TRLR-VEH-NBR             
+350649              CONTINUE                                                    
+               WHEN OTHER                                                       
+                   MOVE '6100-INSERT' TO PV-PARA-NAME                           
+                   DISPLAY '                                          '         
+                   DISPLAY '******************************************'         
+                   DISPLAY 'STR           = ' SDT00033-STR-NBR                  
+                   DISPLAY 'ARRIVAL DATE  = ' SDT00033-TRLR-ARRVL-DTE           
+                   DISPLAY 'TRLR-VEH-NBR  = ' SDT00033-TRLR-VEH-NBR             
+                   DISPLAY 'CTG CDE       = ' SDT00033-MDSE-CTG-CDE             
+                   DISPLAY 'ITEM QTY      = ' SDT00033-MDSE-ITM-QTY             
+                   DISPLAY '******************************************'         
+                   PERFORM 9000-DB2-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+       5400-COMMIT.                                                             
+      ******************************************************************        
+                                                                                
+           EXEC SQL                                                             
+              COMMIT                                                            
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = +0                                                
+                 CONTINUE                                                       
+               WHEN OTHER                                                       
+                   MOVE '9500-COMMIT' TO PV-PARA-NAME                           
+                   PERFORM 9000-DB2-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+041508 7000-OPEN-CURSOR.                                                        
+      ******************************************************************        
+                                                                                
+041508     EXEC SQL                                                             
+041508          OPEN TRUCK-HALL                                                 
+041508     END-EXEC                                                             
+                                                                                
+041508     EVALUATE TRUE                                                        
+041508        WHEN SQLCODE = ZERO                                               
+041508        WHEN SQLCODE = -904                                               
+041508        WHEN SQLCODE = -913                                               
+041508            CONTINUE                                                      
+                                                                                
+041508        WHEN SQLWARN0 NOT = SPACES                                        
+041508        WHEN SQLCODE < ZERO                                               
+041508        WHEN SQLCODE > ZERO                                               
+041508             MOVE '7000-OPEN-CURSOR' TO PV-PARA-NAME                      
+041508            PERFORM 9000-DB2-ABEND                                        
+041508     END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+041508 7100-FETCH-CURSOR.                                                       
+      ******************************************************************        
+                                                                                
+041508     EXEC SQL                                                             
+041508        FETCH TRUCK-HALL                                                  
+041508          INTO  :CNTRID-TRLR-ID                                           
+041508               ,:SUOBTR-DEST-OPER-UNT-ID                                  
+041508               ,:SUOBTS-OTBND-STAT-TMST                                   
+041508               ,:CNTRID-TRLR-SIZE-MU                                      
+041508               ,:SUT00009-UNT-QTY                                         
+041508     END-EXEC.                                                            
+                                                                                
+041508     EVALUATE TRUE                                                        
+041508         WHEN SQLCODE = ZERO                                              
+041508           ADD 1 TO PV-RECORDS-READ3                                      
+041508         WHEN SQLCODE = +100                                              
+041508           SET PS-END-OF-CSR TO TRUE                                      
+041508         WHEN SQLWARN0 NOT = SPACE                                        
+041508         WHEN SQLCODE NOT = ZERO                                          
+041508            MOVE '7100-FETCH-CURSOR'    TO PV-PARA-NAME                   
+041508            MOVE 'FETCH HALLMARK TRUCK CURSOR' TO PV-ABEND-NOTE           
+041508            SET AC-DB2-ERROR            TO TRUE                           
+041508            PERFORM 9000-DB2-ABEND                                        
+041508     END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+041508 7200-CLOSE-CURSOR.                                                       
+      ******************************************************************        
+                                                                                
+041508     EXEC SQL                                                             
+041508         CLOSE TRUCK-HALL                                                 
+041508     END-EXEC.                                                            
+                                                                                
+041508     EVALUATE TRUE                                                        
+041508         WHEN SQLCODE = ZERO                                              
+041508             CONTINUE                                                     
+                                                                                
+041508         WHEN SQLWARN0 NOT = SPACES                                       
+041508         WHEN SQLCODE < ZERO                                              
+041508         WHEN SQLCODE > ZERO                                              
+041508             SET AC-DB2-ERROR TO TRUE                                     
+041508             MOVE '7200-CLOSE-CURSOR' TO PV-PARA-NAME                     
+041508             PERFORM 9000-DB2-ABEND                                       
+041508     END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+041508 7300-OPEN-CURSOR.                                                        
+      ******************************************************************        
+                                                                                
+041508     EXEC SQL                                                             
+041508          OPEN TRUCK-COS                                                  
+041508     END-EXEC                                                             
+                                                                                
+041508     EVALUATE TRUE                                                        
+041508        WHEN SQLCODE = ZERO                                               
+041508        WHEN SQLCODE = -904                                               
+041508        WHEN SQLCODE = -913                                               
+041508            CONTINUE                                                      
+                                                                                
+041508        WHEN SQLWARN0 NOT = SPACES                                        
+041508        WHEN SQLCODE < ZERO                                               
+041508        WHEN SQLCODE > ZERO                                               
+041508             MOVE '7300-OPEN-CURSOR' TO PV-PARA-NAME                      
+041508            PERFORM 9000-DB2-ABEND                                        
+041508     END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+041508 7400-FETCH-CURSOR.                                                       
+      ******************************************************************        
+                                                                                
+041508     EXEC SQL                                                             
+041508        FETCH TRUCK-COS                                                   
+041508          INTO  :CNTRID-TRLR-ID                                           
+041508               ,:SUOBTR-DEST-OPER-UNT-ID                                  
+041508               ,:SUOBTS-OTBND-STAT-TMST                                   
+041508               ,:CNTRID-TRLR-SIZE-MU                                      
+041508               ,:SUT00009-UNT-QTY                                         
+041508     END-EXEC.                                                            
+                                                                                
+041508     EVALUATE TRUE                                                        
+041508         WHEN SQLCODE = ZERO                                              
+041508           ADD 1 TO PV-RECORDS-READ4                                      
+041508         WHEN SQLCODE = +100                                              
+041508           SET PS-END-OF-CSR TO TRUE                                      
+041508         WHEN SQLWARN0 NOT = SPACE                                        
+041508         WHEN SQLCODE NOT = ZERO                                          
+041508            MOVE '7400-FETCH-CURSOR'    TO PV-PARA-NAME                   
+041508            MOVE 'FETCH COSMETIC TRUCK CURSOR' TO PV-ABEND-NOTE           
+041508            SET AC-DB2-ERROR            TO TRUE                           
+041508            PERFORM 9000-DB2-ABEND                                        
+041508     END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+041508 7500-CLOSE-CURSOR.                                                       
+      ******************************************************************        
+                                                                                
+041508     EXEC SQL                                                             
+041508         CLOSE TRUCK-COS                                                  
+041508     END-EXEC.                                                            
+                                                                                
+041508     EVALUATE TRUE                                                        
+041508         WHEN SQLCODE = ZERO                                              
+041508             CONTINUE                                                     
+                                                                                
+041508         WHEN SQLWARN0 NOT = SPACES                                       
+041508         WHEN SQLCODE < ZERO                                              
+041508         WHEN SQLCODE > ZERO                                              
+041508             SET AC-DB2-ERROR TO TRUE                                     
+041508             MOVE '7500-CLOSE-CURSOR' TO PV-PARA-NAME                     
+041508             PERFORM 9000-DB2-ABEND                                       
+041508     END-EVALUATE.                                                        
+                                                                                
+      ******************************************************************        
+       8000-NON-DB2-ABEND.                                                      
+      ******************************************************************        
+                                                                                
+           PERFORM 9999-FINAL-HSKP.                                             
+                                                                                
+           DISPLAY '***************************************************'        
+           DISPLAY '** ABEND IN PROGRAM ' PC-PROGRAM                            
+           DISPLAY '** PARAGRAPH        ' PV-PARA-NAME                          
+           DISPLAY '**' PV-ABEND-NOTE                                           
+           DISPLAY '***************************************************'        
+                                                                                
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    
+                                                                                
+                                                                                
+      ******************************************************************        
+       9000-DB2-ABEND.                                                          
+      ******************************************************************        
+                                                                                
+           MOVE SQLCODE TO SQLCODE2.                                            
+           MOVE SQLERRD(3) TO SQLERRD3.                                         
+                                                                                
+           PERFORM 9999-FINAL-HSKP.                                             
+                                                                                
+           DISPLAY '**************************************************'         
+           DISPLAY '** ABEND IN PROGRAM ' PC-PROGRAM                            
+           DISPLAY '** PARAGRAPH        ' PV-PARA-NAME                          
+           DISPLAY '** ' PV-ABEND-NOTE                                          
+           DISPLAY '** SQL ERROR      = ' SQLCODE2.                             
+           DISPLAY '** SQLERRM        = ' SQLERRM.                              
+           DISPLAY '**************************************************'.        
+                                                                                
+      *----------------------------------------------------------------*        
+      *  THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-           
+      *  MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE                
+      * 'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE             
+      *  FORMAT.                                                                
+      *----------------------------------------------------------------*        
+           COPY DPPD004.                                                        
+                                                                                
+           CALL 'DSNTIAR' USING SQLCA                                           
+                                DP004-FORMATTED-MESSAGE                         
+                                DP004-ERROR-LINE-LENGTH.                        
+                                                                                
+           DISPLAY DP004-ASTERISK-LINE.                                         
+                                                                                
+           PERFORM                                                              
+              VARYING DP004-MSG-IDX                                             
+              FROM 1 BY 1                                                       
+              UNTIL DP004-MSG-IDX > DP004-MAX-MESSAGE-LINES                     
+                  DISPLAY '**'                                                  
+                          DP004-MESSAGE-LINE (DP004-MSG-IDX)                    
+                          ' **'                                                 
+           END-PERFORM.                                                         
+                                                                                
+           DISPLAY DP004-ASTERISK-LINE.                                         
+                                                                                
+           IF SQLCODE NOT = -911                                                
+               EXEC SQL                                                         
+                   COMMIT                                                       
+               END-EXEC                                                         
+           END-IF.                                                              
+                                                                                
+           SET AC-DB2-ERROR TO TRUE.                                            
+                                                                                
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    
+                                                                                
+      ******************************************************************        
+       9999-FINAL-HSKP.                                                         
+      ******************************************************************        
+                                                                                
+           CLOSE DATE-FILE                                                      
+033108           CONTROL-FILE.                                                  
+                                                                                
+           DISPLAY '                    '.                                      
+           DISPLAY '********************'.                                      
+           DISPLAY '  SDKUP021 CONTROLS '.                                      
+           DISPLAY '===================='.                                      
+           DISPLAY 'PROCESSING FOR : ' PV-START-DATE ' - ' PV-END-DATE.         
+           DISPLAY '# ROWS DELETED ON RCVG     = ' NUM-ROWS-RCVG.               
+           DISPLAY '# ROWS DELETED ON MDSE     = ' NUM-ROWS-MDSE.               
+           DISPLAY '# INSERTS RCVG      = ' PV-RECS-INSERTED.                   
+           DISPLAY '# INSERTS RCVG MDSE = ' PV-RECS-INSERTED2.                  
+           DISPLAY '===================='.                                      
+           DISPLAY 'END SDKUP021'.                                              
+                                                                                

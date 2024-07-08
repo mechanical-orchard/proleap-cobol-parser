@@ -1,0 +1,856 @@
+      *****************************************************************         
+       IDENTIFICATION DIVISION.                                                 
+      *****************************************************************         
+       PROGRAM-ID.      WSKUT051.                                               
+       AUTHOR.          Cognizant.                                              
+       INSTALLATION.    KOHLS DEPARTMENT STORES.                                
+       DATE-WRITTEN.    JUL       2014                                          
+                                                                                
+      ******************************************************************        
+      *When compiling check 'MQSERIES PROGRAM(Y/N)' with 'Y' on second *        
+      *compile screen.                                                 *        
+      *****************************************************************         
+      *           WM/GIV inventory sync process Check.                *         
+      *****************************************************************         
+      *  THE INVENTORY SYNC PROCESS JOB WSK439 WILL BE TRIGGERED WHEN *         
+      *  SYNC TIMESTAMP IS SENT TO THE MAINFRAME QUEUE GV.EFC.SYNCTS. *         
+      *  PUBLISH.Q.                                                   *         
+      *                                                               *         
+      *  ~> THIS PROGRAM READS THE MESSAGE QUEUE AND GET THE SYNC     *         
+      *     TIME STAMP AND EFC OR 3PL NUMBER.                         *         
+      *                                                               *         
+      *  ~> CREATES A TRIGGER FILE CONTAINING THE EFC OR 3PL NUMBER   *         
+      *     TO INDICATE THAT THE SYNC PROCESS IS COMPLETED FOR THAT   *         
+      *     NODE.                                                     *         
+      *                                                               *         
+      *  ~> THIS PROGRAM WILL CREATE JOB WITH 3 STEPS IN IT. THE JOB  *         
+      *     WILL BE SUBMITTED THROUGH INTERNAL READER INTRDR BY COPY  *         
+      *     IEBGENER STEP.                                            *         
+      *                                                               *         
+      *  ~> THE JOB HAS FOLLOWING STEPS:                              *         
+      *     ~> IDCAMS STEP FOR CREATE TRIGGER FILE                    *         
+      *     ~> 30 SECONDS WAIT STEP                                   *         
+      *     ~> DELETE TRIGGER FILE STEP                               *         
+      *                                                               *         
+      *  ~> Return Code:                                              *         
+      *     -----------                                               *         
+      *                                                               *         
+      *  ~> SET RETURN CODE TO ZERO - When program completes without  *         
+      *                               any Error                       *         
+      *                                                               *         
+      *  ~> SET RETURN CODE TO 4003 - When program receives invalid   *         
+      *                               parm value                      *         
+      *                                                               *         
+      *  ~> SET RETURN CODE TO 4013 - When program faces any SQL Error*         
+      *                                                               *         
+      *  ~> SET RETURN CODE TO 4020 - When program faces any MQ Queue *         
+      *                               operational Error               *         
+      *                                                               *         
+      *  ~> SET RETURN CODE TO 4095 - When program Triggered without  *         
+      *                               any message in MQ Queue         *         
+      *****************************************************************         
+      *  CHANGE LOG                                                             
+      *  DATE       CHANGED BY    DESC                                          
+      *  ---------- ------------- --------------------------------------        
+      *  07/30/2014 Cognizant     GIV Changes for                               
+      *                           GIV_R1 1 0_End of Inven Sync Changes          
+      ******************************************************************        
+       ENVIRONMENT DIVISION.                                                    
+      *****************************************************************         
+                                                                                
+       CONFIGURATION SECTION.                                                   
+                                                                                
+       SOURCE-COMPUTER.       IBM-3090.                                         
+       OBJECT-COMPUTER.       IBM-3090.                                         
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+                                                                                
+       FILE-CONTROL.                                                            
+                                                                                
+           SELECT INVSYNC-DSN-FILE ASSIGN TO OUT01.                             
+                                                                                
+      *****************************************************************         
+       DATA DIVISION.                                                           
+      *****************************************************************         
+       FILE SECTION.                                                            
+                                                                                
+       FD  INVSYNC-DSN-FILE                                                     
+           RECORDING MODE F                                                     
+           LABEL RECORDS ARE STANDARD                                           
+           RECORD CONTAINS 80 CHARACTERS                                        
+           BLOCK CONTAINS  0 RECORDS                                            
+           DATA RECORD IS INVSYNC-DSN-REC.                                      
+       01  INVSYNC-DSN-REC                   PIC X(80).                         
+                                                                                
+      *****************************************************************         
+       WORKING-STORAGE SECTION.                                                 
+      *****************************************************************         
+      *    API CONTROL BLOCKS                                                   
+                                                                                
+       01  MQM-OBJECT-DESCRIPTOR.                                               
+           COPY CMQODV.                                                         
+       01  MQM-MESSAGE-DESCRIPTOR.                                              
+           COPY CMQMDV.                                                         
+       01  MQM-GET-MESSAGE-OPTIONS.                                             
+           COPY CMQGMOV.                                                        
+       01  MQM-PUT-MESSAGE-OPTIONS.                                             
+           COPY CMQPMOV.                                                        
+                                                                                
+      *    MQV CONTAINS CONSTANTS (FOR FILLING IN THE CONTROL BLOCKS)           
+      *    AND RETURN CODES (FOR TESTING THE RESULT OF A CALL)                  
+                                                                                
+       01  MQM-CONSTANTS.                                                       
+           COPY CMQV.                                                           
+      *                                                                         
+      *****************************************************************         
+      *    PROGRAM ACCUMULATORS                                                 
+      *****************************************************************         
+       01  PA-PROGRAM-ACCUMULATORS.                                             
+           05  PA-Q-MESSAGES             PIC 9(06) VALUE ZEROES.                
+                                                                                
+      *****************************************************************         
+      *    PROGRAM CONSTANTS                                                    
+      *****************************************************************         
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-PGM-NAME               PIC X(09) VALUE 'WSKUT051 '.           
+           05  PC-FIFTY-STARS            PIC X(50)  VALUE ALL '*'.              
+           05  PC-01-72-COMMENT-LINE01.                                         
+               10  FILLER                  PIC X(02) VALUE  '//'.               
+               10  FILLER                  PIC X(70) VALUE ALL '*'.             
+           05  PC-01-72-COMMENT-LINE02.                                         
+               10  FILLER                  PIC X(03) VALUE  '//*'.              
+               10  FILLER                  PIC X(69) VALUE SPACE.               
+           05  PC-JOB-SUBMITBY-LINE01.                                          
+               10  FILLER                  PIC X(03) VALUE  '//*'.              
+               10  FILLER                  PIC X(19) VALUE SPACE.               
+               10  FILLER                  PIC X(30) VALUE                      
+                   'THIS JOB SUBMITTED BY WSKUT051'.                            
+               10  FILLER                  PIC X(20) VALUE SPACE.               
+                                                                                
+      *        10  FILLER                  PIC X(70) VALUE ALL '*'.             
+                                                                                
+      *****************************************************************         
+      *    PROGRAM SWITCHES                                                     
+      *****************************************************************         
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-INVSYNC-TS-FND-SW      PIC X(01) VALUE 'N'.                   
+               88  PS-INVSYNC-TS-FND-YES           VALUE 'Y'.                   
+               88  PS-INVSYNC-TS-FND-NO            VALUE 'N'.                   
+                                                                                
+      *****************************************************************         
+      *    PROGRAM VARIABLES                                                    
+      *****************************************************************         
+       01  PV-PROGRAM-VARIABLES.                                                
+           05  PV-ERROR-MESSAGE           PIC X(48)    VALUE SPACES.            
+           05  PV-RUN-PASS-VALUE          PIC X(04).                            
+           05  PV-JOBCARD-VALUE           PIC X(08).                            
+                                                                                
+       01  PV-MQ-VARIABLES.                                                     
+           05  PV-INVSYNC-QM-NAME      PIC X(48).                               
+           05  PV-INVSYNC-Q-NAME       PIC X(48).                               
+           05  PV-PARAGRAPH            PIC X(50).                               
+           05  PV-MSGBUFFER            PIC X(999) VALUE SPACES.                 
+           05  PV-MSGLENGTH            PIC S9(9)  BINARY VALUE +999.            
+           05  PV-DATA-LENGTH          PIC S9(9)  BINARY.                       
+           05  PV-MSGLENGTH-PIC9       PIC S9(9)  VALUE 0.                      
+           05  PV-HCONN                PIC S9(9)  BINARY VALUE 0.               
+           05  PV-GQ-HANDLE            PIC S9(9)  BINARY VALUE 0.               
+           05  PV-OPEN-OPTIONS         PIC S9(9)  BINARY.                       
+           05  PV-COMPLETION-CODE      PIC S9(9)  BINARY.                       
+           05  PV-REASON               PIC S9(9)  BINARY.                       
+           05  PV-CON-REASON           PIC S9(9)  BINARY.                       
+           05  PV-PRO-CNT              PIC  9(9)  VALUE ZEROES.                 
+           05  PV-SYNCTS-CNT           PIC  9(9)  VALUE ZEROES.                 
+           05  PV-MQ-STR-NBR           PIC X(03)  VALUE SPACES.                 
+           05  PV-MQ-STR-SYNCTS        PIC X(19)  VALUE SPACES.                 
+                                                                                
+           05  PV-Q-INVSYNC-DETAILS.                                            
+               10  FILLER              PIC  X(15)  VALUE                        
+                   "Store Number : ".                                           
+               10  PV-Q-STR-NBR        PIC  X(03)  VALUE SPACES.                
+               10  FILLER              PIC  X(30)  VALUE                        
+                   "   Inventory Sync Timestamp : ".                            
+               10  PV-Q-INVSYNC-TS     PIC  X(19)  VALUE SPACES.                
+               10  FILLER              PIC  X(13)  VALUE SPACES.                
+                                                                                
+           05  PV-Q-GET-REC      PIC  X(999)  VALUE SPACES.                     
+                                                                                
+           05  PV-SAVE-DSNAME.                                                  
+               10  PV-DSN-PROD-TEST    PIC  X(04)  VALUE SPACES.                
+               10  PV-DSN-TXT1         PIC  X(05)  VALUE SPACES.                
+               10  PV-DSN-STRNBR       PIC  X(03)  VALUE SPACES.                
+               10  PV-DSN-TXT2         PIC  X(12)  VALUE SPACES.                
+                                                                                
+       01  INVSYNC-DSN-WS-REC          PIC X(80).                               
+                                                                                
+       01  PH-PROGRAM-HOLD-VARIABLES.                                           
+           05  PH-COMPLETION-CODE          PIC  S9(09) BINARY.                  
+           05  PH-REASON                   PIC  S9(09) BINARY.                  
+                                                                                
+       01  PV-ABEND-VARIABLES.                                                  
+           05  PV-SQLCODE                  PIC S9(9).                           
+           05  PV-DISPLAY-SQLCODE          PIC -------999.                      
+           05  PV-ABEND-PROGRAM            PIC X(08) VALUE 'WSKUT051'.          
+           05  PV-ABEND-PARAGRAPH          PIC X(25) VALUE SPACES.              
+           05  PV-ABEND-OPERATION          PIC X(20) VALUE SPACES.              
+           05  PV-ABEND-CODE               PIC S9(4) VALUE +0 COMP SYNC.        
+                                                                                
+      ******************************************************************        
+      *****************************************************************         
+      *    MQ WORKING STORAGE VARIABLES                                         
+      *****************************************************************         
+       01  WS-MQCONN                 PIC X(8)  VALUE 'CSQBCONN'.                
+       01  WS-MQOPEN                 PIC X(8)  VALUE 'CSQBOPEN'.                
+       01  WS-MQGET                  PIC X(8)  VALUE 'CSQBGET'.                 
+       01  WS-MQBACK                 PIC X(8)  VALUE 'CSQBBACK'.                
+       01  WS-MQCMIT                 PIC X(8)  VALUE 'CSQBCOMM'.                
+       01  WS-MQCLOSE                PIC X(8)  VALUE 'CSQBCLOS'.                
+       01  WS-MQDISC                 PIC X(8)  VALUE 'CSQBDISC'.                
+                                                                                
+      *****************************************************************         
+      *    ABEND CODES THE ARE APPLICATION DEFINED                              
+      *****************************************************************         
+       01  ABEND-CODE                  PIC S9(4)    VALUE ZEROS                 
+                                                    COMP SYNC.                  
+           88  AC-CONTROL-CARD-ERROR                VALUE +4003.                
+           88  AC-MQ-ERROR                          VALUE +4020.                
+           88  AC-MQ-NOMSG-ERROR                    VALUE +4095.                
+      ******************************************************************        
+      *  DB2 FORMATTED MESSAGE AREA                                             
+      ******************************************************************        
+           COPY DPWS004.                                                        
+                                                                                
+      ******************************************************************        
+      *    COMMUNICATION AREA FOR DB2                                           
+      ******************************************************************        
+           EXEC SQL                                                             
+                INCLUDE SQLCA                                                   
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *  DB2 DECLARATION - WMOS - Provider Queue information (Put/Write)        
+      *      TABLE (WSV_PRVDR_QUE)                                              
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE WSV00005                                                 
+           END-EXEC.                                                            
+                                                                                
+      *****************************************************************         
+      *    Linkage section                                                      
+      *****************************************************************         
+                                                                                
+       LINKAGE SECTION.                                                         
+                                                                                
+       01  LS-RUN-PASS.                                                         
+           05  LS-RUN-PASS-VALUE-LEN         PIC S9(04) COMP.                   
+           05  LS-RUN-PASS-VALUE             PIC  X(04).                        
+           05  FILLER                        PIC  X(01).                        
+           05  LS-JOBCARD-VALUE              PIC  X(08).                        
+      *****************************************************************         
+       PROCEDURE DIVISION USING LS-RUN-PASS.                                    
+      *****************************************************************         
+       0000-MAINLINE.                                                           
+                                                                                
+           DISPLAY 'ENTERING 0000-MAINLINE'.                                    
+           PERFORM 1000-INITIALIZE.                                             
+                                                                                
+           IF PS-INVSYNC-TS-FND-YES THEN                                        
+              PERFORM 2000-PROCESS-MQ-MESSAGES                                  
+           END-IF.                                                              
+                                                                                
+           PERFORM 3000-EOJ-PROCESSING.                                         
+                                                                                
+           DISPLAY PC-FIFTY-STARS.                                              
+           DISPLAY '      *****  END OF PROGRAM WSKUT051  *****'.               
+           DISPLAY PC-FIFTY-STARS.                                              
+                                                                                
+           STOP RUN.                                                            
+                                                                                
+      *****************************************************************         
+      *  INITIALIZATION ROUTINE.                                                
+      *****************************************************************         
+       1000-INITIALIZE.                                                         
+                                                                                
+           DISPLAY 'ENTERING 1000-INITIALIZE'.                                  
+           DISPLAY PC-FIFTY-STARS.                                              
+           DISPLAY '      ***** START OF PROGRAM WSKUT051 *****'.               
+                                                                                
+           DISPLAY PC-FIFTY-STARS.                                              
+           MOVE LS-RUN-PASS-VALUE    TO PV-RUN-PASS-VALUE.                      
+                                                                                
+      *Validate the run indicator parm value                                    
+           EVALUATE PV-RUN-PASS-VALUE                                           
+              WHEN 'PROD'                                                       
+                 MOVE 'PKMO'      TO PV-DSN-PROD-TEST                           
+              WHEN 'TEST'                                                       
+                 MOVE 'TKMA'      TO PV-DSN-PROD-TEST                           
+              WHEN OTHER                                                        
+                 MOVE '1000-INITIALIZE'      TO  PV-PARAGRAPH                   
+                 DISPLAY 'INVALID RUN INDICATOR'                                
+                 DISPLAY 'RUN INDICATOR VALUE IN PARM IS = '                    
+                                     PV-RUN-PASS-VALUE                          
+                 SET AC-CONTROL-CARD-ERROR   TO TRUE                            
+                 CALL 'ILBOABN0' USING ABEND-CODE                               
+           END-EVALUATE.                                                        
+                                                                                
+           DISPLAY PC-PGM-NAME                                                  
+                   '- PROCESSING FOR RUN IN  : '                                
+                   PV-RUN-PASS-VALUE.                                           
+           DISPLAY ' '.                                                         
+                                                                                
+           MOVE LS-JOBCARD-VALUE     TO PV-JOBCARD-VALUE.                       
+                                                                                
+      *Validate the job name in parm value                                      
+           EVALUATE TRUE                                                        
+              WHEN PV-JOBCARD-VALUE(1:1) = ' '                                  
+                 MOVE '1000-INITIALIZE'      TO  PV-PARAGRAPH                   
+                 DISPLAY 'INVALID JOBCARD VALUE'                                
+                 DISPLAY 'JOBCARD VALUE IN PARM HAS SPACE'                      
+                 SET AC-CONTROL-CARD-ERROR   TO TRUE                            
+                 CALL 'ILBOABN0' USING ABEND-CODE                               
+              WHEN PV-JOBCARD-VALUE(1:1) IS NUMERIC                             
+                 MOVE '1000-INITIALIZE'      TO  PV-PARAGRAPH                   
+                 DISPLAY 'INVALID JOBCARD VALUE'                                
+                 DISPLAY 'JOBCARD VALUE IN PARM IS = '                          
+                                    PV-JOBCARD-VALUE                            
+                 SET AC-CONTROL-CARD-ERROR   TO TRUE                            
+                 CALL 'ILBOABN0' USING ABEND-CODE                               
+              WHEN OTHER                                                        
+                 CONTINUE                                                       
+           END-EVALUATE.                                                        
+                                                                                
+           DISPLAY PC-PGM-NAME                                                  
+                   '- JOBCARD VALUE IS       : '                                
+                   PV-JOBCARD-VALUE.                                            
+           DISPLAY PC-FIFTY-STARS.                                              
+                                                                                
+           OPEN OUTPUT INVSYNC-DSN-FILE.                                        
+                                                                                
+      *Get Queue information                                                    
+           PERFORM 1100-GET-QUEUE-INFO.                                         
+                                                                                
+      *Queue Initial read for further processing                                
+           PERFORM 1100-MQ-CONNECT.                                             
+           PERFORM 1500-MQ-INVSYNC-INPUT-OPEN.                                  
+           PERFORM 8100-MQGET-MSG.                                              
+                                                                                
+      *****************************************************************         
+      *    Get the information about the queue                                  
+      *****************************************************************         
+       1100-GET-QUEUE-INFO.                                                     
+                                                                                
+           DISPLAY 'ENTERING 1100-GET-QUEUE-INFO'.                              
+           EXEC SQL                                                             
+              SELECT LCL_QUE_MGR,                                               
+                     QUE_NM                                                     
+               INTO :WSV00005-LCL-QUE-MGR                                       
+                   ,:WSV00005-QUE-NM                                            
+               FROM WSV_PRVDR_QUE                                               
+              WHERE APPL_FUNC_DESC  = 'QUEUE'                                   
+                AND INTGRTN_TYP_CDE = 'GIVEFCSYNC'                              
+           END-EXEC.                                                            
+                                                                                
+           EVALUATE TRUE                                                        
+               WHEN SQLCODE = 0                                                 
+                   MOVE WSV00005-LCL-QUE-MGR-TEXT TO PV-INVSYNC-QM-NAME         
+                   MOVE WSV00005-QUE-NM-TEXT TO PV-INVSYNC-Q-NAME               
+               WHEN OTHER                                                       
+                   MOVE 'SELECT QUEUE NAME'     TO PV-ABEND-OPERATION           
+                   MOVE '1100-GET-QUEUE-INFO'   TO PV-ABEND-PARAGRAPH           
+                   PERFORM 9900-DB2-ABEND                                       
+           END-EVALUATE.                                                        
+                                                                                
+      *****************************************************************         
+      *  MQ - CONNECT TO THE QUEUE MANAGER.                                     
+      *****************************************************************         
+       1100-MQ-CONNECT.                                                         
+                                                                                
+           DISPLAY 'ENTERING 1100-MQ-CONNECT'.                                  
+      *    CONNECT TO THE QUEUE MANAGER                                         
+                                                                                
+           CALL WS-MQCONN USING PV-INVSYNC-QM-NAME                              
+                                PV-HCONN                                        
+                                PV-COMPLETION-CODE                              
+                                PV-REASON.                                      
+                                                                                
+      *    IF CONNECTION FAILED THEN DISPLAY ERROR MESSAGE                      
+      *    AND EXIT                                                             
+                                                                                
+           MOVE PV-REASON TO PV-CON-REASON.                                     
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK) THEN                           
+              MOVE 'MQCONN ERROR'   TO PV-ERROR-MESSAGE                         
+              MOVE '1100-MQ-CONNECT' TO  PV-PARAGRAPH                           
+              PERFORM 9000-DISPLAY-MQ-ERROR                                     
+           ELSE                                                                 
+              DISPLAY 'MQCONN SUCCESSFUL  - ', PV-INVSYNC-QM-NAME               
+           END-IF.                                                              
+                                                                                
+      *****************************************************************         
+      *  MQ - OPEN THE INVENTORY SYNC TIMESTAMP QUEUE FOR INPUT.                
+      *****************************************************************         
+       1500-MQ-INVSYNC-INPUT-OPEN.                                              
+                                                                                
+           DISPLAY 'ENTERING 1500-MQ-INVSYNC-INPUT-OPEN'.                       
+      *Open the INVSYNC TS Queue for input                                      
+           COMPUTE PV-OPEN-OPTIONS = MQOO-INPUT-SHARED +                        
+                                     MQOO-FAIL-IF-QUIESCING.                    
+           MOVE MQOT-Q                   TO MQOD-OBJECTTYPE.                    
+           MOVE PV-INVSYNC-QM-NAME       TO MQOD-OBJECTQMGRNAME.                
+           MOVE PV-INVSYNC-Q-NAME        TO MQOD-OBJECTNAME.                    
+      *                                                                         
+           CALL WS-MQOPEN USING PV-HCONN                                        
+                                MQM-OBJECT-DESCRIPTOR                           
+                                PV-OPEN-OPTIONS                                 
+                                PV-GQ-HANDLE                                    
+                                PV-COMPLETION-CODE                              
+                                PV-REASON.                                      
+      *                                                                         
+      *    IF OPEN FAILED THEN DISPLAY ERROR MESSAGE                            
+      *    AND EXIT.                                                            
+      *                                                                         
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK) THEN                           
+              MOVE 'MQOPEN ERROR'   TO PV-ERROR-MESSAGE                         
+              MOVE '1500-MQ-INVSYNC-INPUT-OPEN' TO PV-PARAGRAPH                 
+              MOVE PV-COMPLETION-CODE TO PH-COMPLETION-CODE                     
+              MOVE PV-REASON          TO PH-REASON                              
+              PERFORM 1700-DISCONNECT-QMGR                                      
+              MOVE PH-COMPLETION-CODE TO PV-COMPLETION-CODE                     
+              MOVE PH-REASON          TO PV-REASON                              
+              PERFORM 9000-DISPLAY-MQ-ERROR                                     
+           ELSE                                                                 
+              DISPLAY                                                           
+               'MQOPEN SUCCESSFUL  - Inventory Sync TS Q INPUT'                 
+           END-IF.                                                              
+                                                                                
+      *****************************************************************         
+      *  MQ - CLOSE THE INVENTORY SYNC TIMESTAMP QUEUE FOR INPUT.               
+      *****************************************************************         
+       1600-MQ-INVSYNC-INPUT-CLOSE.                                             
+                                                                                
+           DISPLAY 'ENTERING 1600-MQ-INVSYNC-INPUT-CLOSE'.                      
+           CALL WS-MQCLOSE USING PV-HCONN                                       
+                                 PV-GQ-HANDLE                                   
+                                 MQCO-NONE                                      
+                                 PV-COMPLETION-CODE                             
+                                 PV-REASON.                                     
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK) THEN                           
+              MOVE 'MQCLOSE ERROR' TO PV-ERROR-MESSAGE                          
+              MOVE '1600-MQ-INVSYNC-INPUT-CLOSE' TO PV-PARAGRAPH                
+              MOVE PV-COMPLETION-CODE TO PH-COMPLETION-CODE                     
+              MOVE PV-REASON          TO PH-REASON                              
+              PERFORM 1700-DISCONNECT-QMGR                                      
+              MOVE PH-COMPLETION-CODE TO PV-COMPLETION-CODE                     
+              MOVE PH-REASON          TO PV-REASON                              
+              PERFORM 9000-DISPLAY-MQ-ERROR                                     
+           ELSE                                                                 
+              DISPLAY PC-FIFTY-STARS                                            
+              DISPLAY                                                           
+               'MQCLOSE SUCCESSFUL - Inventory Sync TS Q INPUT'                 
+           END-IF.                                                              
+                                                                                
+      *****************************************************************         
+      *  DISCONNECT QUEUE MANAGER                                               
+      *****************************************************************         
+       1700-DISCONNECT-QMGR.                                                    
+                                                                                
+           DISPLAY 'ENTERING 1700-DISCONNECT-QMGR'.                             
+           IF PV-CON-REASON IS NOT EQUAL TO MQRC-ALREADY-CONNECTED              
+              CALL WS-MQDISC USING PV-HCONN                                     
+                                   PV-COMPLETION-CODE                           
+                                   PV-REASON                                    
+              IF (PV-COMPLETION-CODE NOT = MQCC-OK) THEN                        
+                 MOVE 'MQDISC ERROR'   TO PV-ERROR-MESSAGE                      
+                 MOVE '1700-DISCONNECT-QMGR' TO PV-PARAGRAPH                    
+                 PERFORM 9000-DISPLAY-MQ-ERROR                                  
+              ELSE                                                              
+                 DISPLAY 'MQDISC SUCCESSFUL  - ', PV-INVSYNC-QM-NAME            
+              END-IF                                                            
+           END-IF.                                                              
+                                                                                
+      *****************************************************************         
+      *  PROCESS MQ MESSAGES.                                                   
+      *****************************************************************         
+       2000-PROCESS-MQ-MESSAGES.                                                
+                                                                                
+           DISPLAY 'ENTERING 2000-PROCESS-MQ-MESSAGES'.                         
+           MOVE '.WS.L'                TO PV-DSN-TXT1.                          
+                                                                                
+           MOVE PV-Q-STR-NBR           TO PV-DSN-STRNBR.                        
+                                                                                
+           MOVE '.GIV.TS.TRIG'         TO PV-DSN-TXT2.                          
+                                                                                
+           DISPLAY PC-PGM-NAME                                                  
+           '- Inventory Sync Completed for Store : '                            
+                   PV-Q-STR-NBR.                                                
+           DISPLAY ' '.                                                         
+                                                                                
+      **************                                                            
+      *Populate job card for PROD/TEST run based on parm value                  
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           STRING "//",                                                         
+                   PV-JOBCARD-VALUE,                                            
+                   " JOB KOHLS,'CREATE TRIGGER FILE',"                          
+           DELIMITED BY SIZE INTO INVSYNC-DSN-WS-REC.                           
+                                                                                
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           EVALUATE PV-RUN-PASS-VALUE                                           
+              WHEN 'PROD'                                                       
+                 MOVE "//             CLASS=P,MSGCLASS=P"                       
+                              TO INVSYNC-DSN-WS-REC                             
+              WHEN 'TEST'                                                       
+                 MOVE "//             CLASS=E,MSGCLASS=X"                       
+                              TO INVSYNC-DSN-WS-REC                             
+           END-EVALUATE.                                                        
+                                                                                
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+      *Formatting for Comment block                                             
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE PC-01-72-COMMENT-LINE01                                         
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE PC-JOB-SUBMITBY-LINE01                                          
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+      *Formatting for Step S100                                                 
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE PC-01-72-COMMENT-LINE01                                         
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE "//* S100 - CREATE TRIGGER FILE"                                
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE PC-01-72-COMMENT-LINE01                                         
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE "//S100     EXEC PGM=IDCAMS"                                    
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE PC-01-72-COMMENT-LINE02                                         
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE "//SYSUT1   DD DUMMY"                                           
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE PC-01-72-COMMENT-LINE02                                         
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           STRING "//SYSUT11  DD DSN=",                                         
+                   PV-DSN-PROD-TEST,                                            
+                   ".WS.L",                                                     
+                   PV-DSN-STRNBR,                                               
+                  ".GIV.TS.TRIG,"                                               
+           DELIMITED BY SIZE INTO INVSYNC-DSN-WS-REC.                           
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE "//             DISP=(NEW,CATLG,DELETE),UNIT=SYSDA,"            
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE "//             AVGREC=K,SPACE=(80,(10,5),RLSE),"               
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE "//             RECFM=FB,LRECL=60"                              
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE PC-01-72-COMMENT-LINE02                                         
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE "//SYSIN    DD DSN=PKMO.CONTROL(REPROD1),DISP=SHR"              
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE "//*"                                                           
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE "//         INCLUDE MEMBER=SYSOUT"                              
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+      *Formatting for Step S200                                                 
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE PC-01-72-COMMENT-LINE01                                         
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE "//* S200 - WAIT 30 SECONDS"                                    
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE PC-01-72-COMMENT-LINE01                                         
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE "//S200     EXEC PGM=SYSWAIT,PARM='00003000'"                   
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+      *Formatting for Step S300                                                 
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE PC-01-72-COMMENT-LINE01                                         
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE "//*  S300 IDCAMS  - DELETE TRIGGER FILE"                       
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE PC-01-72-COMMENT-LINE01                                         
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           MOVE "//S300     EXEC PGM=SMARTDEL,"                                 
+                              TO INVSYNC-DSN-WS-REC.                            
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+                                                                                
+           INITIALIZE INVSYNC-DSN-WS-REC.                                       
+           STRING "//         PARM='",                                          
+                   PV-DSN-PROD-TEST,                                            
+                  ".WS.L",                                                      
+                   PV-DSN-STRNBR,                                               
+                  ".GIV.TS.TRIG'"                                               
+           DELIMITED BY SIZE INTO INVSYNC-DSN-WS-REC.                           
+           WRITE INVSYNC-DSN-REC  FROM INVSYNC-DSN-WS-REC.                      
+     **************                                                             
+           PERFORM 8200-COMMIT-MQ.                                              
+      *****************************************************************         
+      *  CLOSE FILES AND DISPLAY PROGRAM TOTALS.                                
+      *  DISCONNECT FROM QUEUE MANAGER.                                         
+      *****************************************************************         
+       3000-EOJ-PROCESSING.                                                     
+                                                                                
+           DISPLAY 'ENTERING 3000-EOJ-PROCESSING'.                              
+           PERFORM 1700-DISCONNECT-QMGR.                                        
+                                                                                
+           CLOSE INVSYNC-DSN-FILE.                                              
+                                                                                
+           DISPLAY PC-FIFTY-STARS.                                              
+           DISPLAY                                                              
+           '                END OF JOB COUNTERS               '.                
+           DISPLAY PC-FIFTY-STARS.                                              
+                                                                                
+           DISPLAY 'NO OF INVSYNC TS MSGS READ FROM GIV QUEUE : '               
+                                                 PA-Q-MESSAGES.                 
+                                                                                
+      *****************************************************************         
+      * GET INVENTORY SYNC TIMESTAMP MESSAGE FROM MQ SERIES.                    
+      *****************************************************************         
+       8100-MQGET-MSG.                                                          
+                                                                                
+           DISPLAY 'ENTERING 8100-MQGET-MSG'.                                   
+           INITIALIZE PV-MSGBUFFER                                              
+                      PV-Q-GET-REC.                                             
+                                                                                
+           MOVE MQMI-NONE              TO MQMD-MSGID.                           
+           MOVE MQCI-NONE              TO MQMD-CORRELID.                        
+           MOVE PV-INVSYNC-Q-NAME      TO MQOD-OBJECTNAME.                      
+                                                                                
+           COMPUTE MQGMO-OPTIONS  = MQGMO-SYNCPOINT +                           
+                                    MQGMO-CONVERT +                             
+                                    MQGMO-WAIT.                                 
+                                                                                
+      * Get Inventory Sync Timestamp Msg from MQ Queue.                         
+      *                                                                         
+           CALL WS-MQGET USING PV-HCONN                                         
+                               PV-GQ-HANDLE                                     
+                               MQM-MESSAGE-DESCRIPTOR                           
+                               MQM-GET-MESSAGE-OPTIONS                          
+                               PV-MSGLENGTH                                     
+                               PV-MSGBUFFER                                     
+                               PV-DATA-LENGTH                                   
+                               PV-COMPLETION-CODE                               
+                               PV-REASON.                                       
+                                                                                
+      *        IF GET FAILED THEN DISPLAY ERROR MESSAGE                         
+      *        AND BREAK OUT OF LOOP                                            
+                                                                                
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK)                                
+              IF (PV-REASON NOT = MQRC-NO-MSG-AVAILABLE)                        
+                  MOVE PV-COMPLETION-CODE TO PH-COMPLETION-CODE                 
+                  MOVE PV-REASON          TO PH-REASON                          
+                  MOVE '8100-MQGET-MSG  ' TO PV-PARAGRAPH                       
+                  PERFORM 8300-BACK-OUT-MQ                                      
+                  PERFORM 1600-MQ-INVSYNC-INPUT-CLOSE                           
+                  PERFORM 1700-DISCONNECT-QMGR                                  
+                  MOVE 'MQGET ERROR'      TO PV-ERROR-MESSAGE                   
+                  MOVE PH-COMPLETION-CODE TO PV-COMPLETION-CODE                 
+                  MOVE PH-REASON          TO PV-REASON                          
+                  DISPLAY 'PV-MSGLENGTH = ' PV-MSGLENGTH                        
+                  DISPLAY 'PV-MSGBUFFER = ' PV-MSGBUFFER                        
+                  DISPLAY 'PV-DATA-LENGTH = ' PV-DATA-LENGTH                    
+                  PERFORM 9000-DISPLAY-MQ-ERROR                                 
+              ELSE                                                              
+                  DISPLAY 'MQGET - NO MESSAGE IN QUEUE TO PROCESS'              
+                  SET PS-INVSYNC-TS-FND-NO TO TRUE                              
+                                                                                
+                  SET AC-MQ-NOMSG-ERROR    TO TRUE                              
+                  CALL 'ILBOABN0' USING ABEND-CODE                              
+              END-IF                                                            
+           ELSE                                                                 
+              DISPLAY '8100-MQGET-MSG - GET SUCCESSFUL'                         
+              SET PS-INVSYNC-TS-FND-YES TO TRUE                                 
+              MOVE PV-MSGBUFFER TO PV-Q-GET-REC                                 
+                                                                                
+      *Get Shipnode value                                                       
+              INITIALIZE PV-PRO-CNT                                             
+                                                                                
+              INSPECT PV-Q-GET-REC TALLYING PV-PRO-CNT                          
+              FOR CHARACTERS BEFORE "ShipNode="                                 
+                                                                                
+              MOVE PV-Q-GET-REC((PV-PRO-CNT + 11):3)                            
+                                     TO PV-MQ-STR-NBR                           
+      *Get Sync Timestamp                                                       
+                                                                                
+              INITIALIZE PV-SYNCTS-CNT                                          
+                                                                                
+              INSPECT PV-Q-GET-REC TALLYING PV-SYNCTS-CNT                       
+              FOR CHARACTERS BEFORE "ReasonText="                               
+                                                                                
+              MOVE PV-Q-GET-REC((PV-SYNCTS-CNT + 13):19)                        
+                                      TO PV-MQ-STR-SYNCTS                       
+                                                                                
+              MOVE PV-MQ-STR-NBR      TO PV-Q-STR-NBR                           
+              MOVE PV-MQ-STR-SYNCTS   TO PV-Q-INVSYNC-TS                        
+              DISPLAY ' '                                                       
+              DISPLAY 'MQGET SUCCESSFUL   - Inventory Sync TS Details'          
+                                                                                
+              DISPLAY PV-Q-INVSYNC-DETAILS                                      
+              DISPLAY ' '                                                       
+              ADD +1 TO PA-Q-MESSAGES                                           
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *  COMMIT MQ PROCESSING SINCE THE POINT OF THE LAST COMMIT       *        
+      ******************************************************************        
+       8200-COMMIT-MQ.                                                          
+                                                                                
+           DISPLAY 'ENTERING 8200-COMMIT-MQ'.                                   
+           CALL WS-MQCMIT USING PV-HCONN                                        
+                                PV-COMPLETION-CODE                              
+                                PV-REASON.                                      
+                                                                                
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK)                                
+              MOVE '8200-COMMIT-MQ'  TO PV-PARAGRAPH                            
+              MOVE 'MQCMIT ERROR'    TO PV-ERROR-MESSAGE                        
+              MOVE PV-COMPLETION-CODE TO PH-COMPLETION-CODE                     
+              MOVE PV-REASON          TO PH-REASON                              
+              PERFORM 8300-BACK-OUT-MQ                                          
+              PERFORM 1600-MQ-INVSYNC-INPUT-CLOSE                               
+              PERFORM 1700-DISCONNECT-QMGR                                      
+              MOVE PH-COMPLETION-CODE TO PV-COMPLETION-CODE                     
+              MOVE PH-REASON          TO PV-REASON                              
+              PERFORM 9000-DISPLAY-MQ-ERROR                                     
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      * BACK OUT MQ PROCESSING SINCE THE POINT OF THE LAST COMMIT      *        
+      ******************************************************************        
+       8300-BACK-OUT-MQ.                                                        
+                                                                                
+           DISPLAY 'ENTERING 8300-BACK-OUT-MQ'.                                 
+           CALL WS-MQBACK USING PV-HCONN                                        
+                                PV-COMPLETION-CODE                              
+                                PV-REASON.                                      
+                                                                                
+           IF (PV-COMPLETION-CODE NOT = MQCC-OK) THEN                           
+              MOVE '8300-BACK-OUT-MQ'  TO PV-PARAGRAPH                          
+              MOVE 'MQBACK ERROR'    TO PV-ERROR-MESSAGE                        
+              MOVE PV-COMPLETION-CODE TO PH-COMPLETION-CODE                     
+              MOVE PV-REASON          TO PH-REASON                              
+              PERFORM 1600-MQ-INVSYNC-INPUT-CLOSE                               
+              PERFORM 1700-DISCONNECT-QMGR                                      
+              MOVE PH-COMPLETION-CODE TO PV-COMPLETION-CODE                     
+              MOVE PH-REASON          TO PV-REASON                              
+              PERFORM 9000-DISPLAY-MQ-ERROR                                     
+           END-IF.                                                              
+                                                                                
+      *****************************************************************         
+      * DISPLAY THE VALUES OF A FAILED MQ API COMMAND                           
+      *****************************************************************         
+       9000-DISPLAY-MQ-ERROR.                                                   
+                                                                                
+           DISPLAY 'ENTERING 9000-DISPLAY-MQ-ERROR'.                            
+           DISPLAY '**************************************************'.        
+           DISPLAY '****** ABEND *************************************'.        
+           DISPLAY '**************************************************'.        
+           DISPLAY '** MQSERIES ERROR **'                                       
+           DISPLAY '** PROGRAM:    ', PC-PGM-NAME                               
+           DISPLAY '** PARAGRAPH:  ', PV-PARAGRAPH                              
+           DISPLAY '** MESSAGE:    ', PV-ERROR-MESSAGE.                         
+           DISPLAY '** COMP CODE:  ', PV-COMPLETION-CODE.                       
+           DISPLAY '** RSN CODE:   ', PV-REASON.                                
+           DISPLAY '**************************************************'.        
+           DISPLAY '****** PROGRAM COUNTERS AT TIME OF ABEND *********'.        
+           DISPLAY '**************************************************'.        
+           DISPLAY 'NO OF INVSYNC TS MSGS READ FROM GIV QUEUE : '               
+                                                 PA-Q-MESSAGES.                 
+           DISPLAY '**************************************************'.        
+           SET AC-MQ-ERROR TO TRUE.                                             
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    
+                                                                                
+      *****************************************************************         
+      * DISPLAY THE VALUES OF A FAILED DB2 COMMAND                              
+      *****************************************************************         
+       9900-DB2-ABEND.                                                          
+                                                                                
+           DISPLAY 'ENTERING 9900-DB2-ABEND'.                                   
+           MOVE SQLCODE    TO PV-SQLCODE.                                       
+           MOVE PV-SQLCODE TO PV-DISPLAY-SQLCODE.                               
+           DISPLAY '*** DB2 ERROR ***'.                                         
+           DISPLAY '*** SQLCODE   = ' PV-DISPLAY-SQLCODE.                       
+           DISPLAY '*** PROGRAM   = ' PV-ABEND-PROGRAM.                         
+           DISPLAY '*** PARAGRAPH = ' PV-ABEND-PARAGRAPH.                       
+           DISPLAY '*** OPERATION = ' PV-ABEND-OPERATION.                       
+      ******************************************************************        
+      * THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-            
+      * MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE                 
+      * 'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE             
+      * FORMAT.                                                                 
+      ******************************************************************        
+           COPY DPPD004.                                                        
+                                                                                
+           IF SQLCODE NOT = -911                                                
+               EXEC SQL                                                         
+                   ROLLBACK                                                     
+               END-EXEC                                                         
+           END-IF.                                                              
+                                                                                
+           MOVE +4013         TO PV-ABEND-CODE.                                 
+           CALL 'ILBOABN0' USING PV-ABEND-CODE.                                 

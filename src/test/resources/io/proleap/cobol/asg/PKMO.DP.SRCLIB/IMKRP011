@@ -1,0 +1,1222 @@
+       IDENTIFICATION DIVISION.                                                 
+       PROGRAM-ID.         IMKRP011.                                            
+       AUTHOR.             D. THEEL.                                            
+       INSTALLATION.       KOHLS DEPARTMENT STORES.                             
+       DATE-WRITTEN.       JUNE 2008.                                           
+       DATE-COMPILED.                                                           
+                                                                                
+      ******************************************************************        
+      *  WHITE TICKET PRICE CHANGE REPORT                                       
+      *  THIS REPORT WILL RUN WEEKLY WITH AN INPUT FILE CONTAINING ALL          
+      *  WHITE TICKET PRICE CHANGES FOR STYLES THAT ARE REGULAR BRAND.          
+      *  IT INCLUDES WHITE TICKET PRICE CHANGES UP TO A MONTH PRIOR TO          
+      *  CURRENT DATE THRU ALL FUTURE DATES.  THE INPUT FILE IS SORTED          
+      *  AND SUMMED BY DEPT, MCL, SCL, STYLE NUMBER, PRICE CHANGE ID,           
+      *  RETAIL DESCENDING.                                                     
+      ******************************************************************        
+      ******************************************************************        
+      *  CHANGES:                                                               
+      *                                                                         
+      *  06/17/2008 D. THEEL   WR34843                                          
+      *     INITIAL PROGRAM                                                     
+      *  07/23/2008 D. THEEL   WR35087                                          
+      *     ADDED LOGIC TO DROP STYLE IF ANY SKU IS WEB EXCLUSIVE OR            
+      *     THE HIGHEST RETAIL <= 5 CENTS. UNLOAD FILE WILL NOW LOOK            
+      *     AT PRICE CHANGES THAT ARE EFFECTIVE UP TO 7 DAYS PRIOR TO           
+      *     CURRENT DATE THROUGH 28 DAYS IN THE FUTURE.  THE PROCESS            
+      *     NOW BRINGS IN AN INPUT FILE OF ONLY THOSE PRICE CHANGES             
+      *     THAT WERE NOT ON LAST WEEKS FILE OR WERE ON LAST WEEKS FILE         
+      *     AND NOT ON THIS WEEKS FILE.                                         
+W39690*  12/26/2011 COGNIZANT  WR39690                                          
+W39690*     REMOVED LOGIC TO DROP STYLE IF ANY SKU IS WEB EXCLUSIVE.            
+W39690*     REMOVED THE MAJOR CLASS FIELD IN EXTRACT FILE.                      
+W39690*     FOLLOWING NEW FIELDS ADDED TO THE EXTRACT FILE.                     
+W39690*       - DIVISION NUMBER                                                 
+W39690*       - SKU                                                             
+W39690*       - COST                                                            
+W39690*       - CREATION DATE                                                   
+W39690*       - BRAND                                                           
+W39690*       - STYLE                                                           
+W39690*       - WEB EXCLUSIVE IND                                               
+W39690*     PRODUCTION BUG FIX - TO REMOVE ',' INSIDE THE RETAIL AND            
+W39690*     COST FIELD OF EXTRACT FILE RECORD STRUCTURE.                        
+      *                                                                         
+216771*  01/28/2019 J. HUNTER  CHG0216771                                       
+216771*     MAINFRAME REFACTORING - DB2 LUW HANDLES CALLS WITH                  
+216771*     CHAR FORMATTING DIFFERENTLY THAN THE MAINFRAME VERSION              
+216771*     OF DB2.  REPLACING THE CHAR FORMATTING WITH DIGITS.                 
+216771*     SINCE CHAR RETURNS A LEADING SPACE AND TRAILING DECIMAL             
+216771*     POINT AND DIGITS DOESN'T THE POSITIONAL PARMS IN THE CALL           
+216771*     MUST BE SHIFTED ONE TO THE LEFT.                                    
+216771*     SEE THE SELECT IN PARA D700-GET-MIN-FIRST-RCVD.                     
+      ******************************************************************        
+                                                                                
+       ENVIRONMENT DIVISION.                                                    
+       CONFIGURATION SECTION.                                                   
+                                                                                
+       SOURCE-COMPUTER.    IBM-3090.                                            
+       OBJECT-COMPUTER.    IBM-3090.                                            
+                                                                                
+       INPUT-OUTPUT SECTION.                                                    
+       FILE-CONTROL.                                                            
+           SELECT PRICE-CHG-FILE            ASSIGN TO INP01.                    
+                                                                                
+           SELECT REPORT-FILE               ASSIGN TO RPT01.                    
+                                                                                
+      ******************************************************************        
+       DATA DIVISION.                                                           
+      ******************************************************************        
+                                                                                
+       FILE SECTION.                                                            
+                                                                                
+       FD  PRICE-CHG-FILE                                                       
+           LABEL RECORDS ARE STANDARD                                           
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS                                             
+           RECORD CONTAINS 62 CHARACTERS                                        
+           DATA RECORD IS PRIC-CHG-RECORD.                                      
+       01  PRICE-CHG-RECORD            PIC  X(62).                              
+                                                                                
+       FD  REPORT-FILE                                                          
+           RECORDING MODE IS F                                                  
+           BLOCK CONTAINS 0 RECORDS                                             
+           LABEL RECORDS ARE OMITTED.                                           
+                                                                                
+W39690*01  REPORT-RECORD                    PIC X(112).                         
+      *CHG0202950-START                                                         
+W39690 01  REPORT-RECORD                    PIC X(201).                         
+      *CHG0202950-END                                                           
+                                                                                
+       WORKING-STORAGE SECTION.                                                 
+                                                                                
+       01  ABEND-CODE                  PIC S9(04)  VALUE +0 COMP SYNC.          
+           88  PV-ABEND-4001                   VALUE +4001.                     
+      *        EMPTY CONTROL CARD                                               
+                                                                                
+                                                                                
+      ******************************************************************        
+      *    PC-PROGRAM CONSTANTS                                        *        
+      ******************************************************************        
+       01  PC-PROGRAM-CONSTANTS.                                                
+           05  PC-PROGRAM-NAME              PIC X(08)  VALUE 'IMKRP011'.        
+           05  PC-BUYER-NOT-FOUND           PIC X(18)  VALUE                    
+                   'BUYER NOT FOUND   '.                                        
+010700     05  PC-MAXIMUM-RETRY-COUNT       PIC S9(04)  VALUE +2                
+010800                                                  COMP SYNC.              
+                                                                                
+                                                                                
+      ******************************************************************        
+      *       PROGRAM VARIABLES                                        *        
+      ******************************************************************        
+       01  PV-PROGRAM-VARIABLES.                                                
+           05  PV-PARAGRAPH-NAME            PIC X(30)  VALUE SPACES.            
+           05  PV-DB2-OPERATION-ATTEMPTED   PIC X(30)  VALUE SPACES.            
+           05  PV-CURRENT-DATE              PIC X(10)  VALUE SPACES.            
+           05  PV-MIN-FIRST-RCVD            PIC X(10)  VALUE SPACES.            
+007000     05  PV-RETRY-COUNT               PIC S9(04) VALUE ZERO               
+007100                                                 COMP SYNC.               
+W39690     05  PV-DB2-NUM-SKUS              PIC S9(04) VALUE ZEROES             
+W39690                                      COMP.                               
+W39690     05  PV-DB2-NUM-COSTS             PIC S9(04) VALUE ZEROES             
+W39690                                      COMP.                               
+W39690     05  PV-DB2-NUM-WEB-SKUS          PIC S9(04) VALUE ZEROES             
+W39690                                      COMP.                               
+           05  PV-PREV-DEPT                 PIC S9(4)V COMP-3                   
+                                                       VALUE ZERO.              
+           05  PV-PREV-VS-ID                PIC S9(9) COMP VALUE +0.            
+           05  PV-PREV-SUB-CL-MDSEAR-ID     PIC S9(6)V COMP-3                   
+                                                       VALUE ZERO.              
+           05  PV-PREV-PRCHG-ID             PIC S9(9) COMP VALUE +0.            
+           05  PV-DEPT-NBR                  PIC 9(03)  VALUE ZERO.              
+W39690*    05  PV-MCL-NBR                   PIC 9(03)  VALUE ZERO.              
+           05  PV-SCL-NBR                   PIC 9(03)  VALUE ZERO.              
+W39690     05  PV-SKU-NBR                   PIC 9(08)  VALUE ZERO.              
+           05  PV-RETAIL                    PIC S9(7)V9(02) COMP-3              
+                                                       VALUE ZERO.              
+           05  PV-DOC-NBR-10-COMP           PIC S9(10) COMP VALUE ZERO.         
+           05  PV-DOC-NBR                   PIC 9(10)  VALUE ZERO.              
+W39690     05  PV-HOLD-DIVISN-NUM           PIC X(02)  VALUE ZERO.              
+           05  PV-HOLD-BUYER-NUM            PIC X(03)  VALUE SPACES.            
+           05  PV-HOLD-BUYER-NAME           PIC X(18)  VALUE SPACES.            
+           05  PV-HOLD-DEPT                 PIC X(03)  VALUE SPACES.            
+W39690*    05  PV-HOLD-CLASS                PIC X(03)  VALUE SPACES.            
+           05  PV-HOLD-SUBCLASS             PIC X(03)  VALUE SPACES.            
+           05  PV-HOLD-PRCHG-ID             PIC S9(10)  VALUE ZERO.             
+           05  PV-HOLD-PRCHG-DATE           PIC X(10)  VALUE SPACES.            
+           05  PV-HOLD-VS-NBR               PIC X(20)  VALUE SPACES.            
+W39690     05  PV-HOLD-SKU-NBR              PIC X(08)  VALUE SPACES.            
+           05  PV-HOLD-RETAIL               PIC S9(7)V9(02) VALUE ZERO.         
+W39690     05  PV-HOLD-ASTER-COST           PIC X(01)  VALUE SPACES.            
+W39690     05  PV-HOLD-COST                 PIC S9(7)V9(03) VALUE ZERO.         
+           05  PV-HOLD-FIRST-RCVD-DATE      PIC X(10)  VALUE SPACES.            
+W39690     05  PV-HOLD-CREATE-DATE          PIC X(10)  VALUE SPACES.            
+W39690     05  PV-HOLD-BRAND                PIC X(20)  VALUE SPACES.            
+W39690     05  PV-HOLD-VS-DESC              PIC X(30)  VALUE SPACES.            
+W39690     05  PV-HOLD-WEB-XLUSIVE          PIC X(01)  VALUE SPACES.            
+           05  PV-COUNT                     PIC S9(7)  VALUE ZERO               
+                                                        COMP-3.                 
+W39690     05  PV-WEB-COUNT                 PIC S9(7)  VALUE ZERO               
+W39690                                                  COMP-3.                 
+      *CHG0202950-START                                                         
+           05  PV-PRD-GP-NBR                PIC 9(10)  VALUE ZERO.              
+      *CHG0202950-END                                                           
+                                                                                
+       01  SA-REC-OUT.                                                          
+W39690     05  SA-DIVISN-NBR                PIC X(02)  VALUE SPACES.            
+W39690     05  FILLER                       PIC X(01)  VALUE ','.               
+           05  SA-BUYER-NBR                 PIC X(03)  VALUE SPACES.            
+           05  FILLER                       PIC X(01)  VALUE ','.               
+           05  SA-BUYER-LAST-NAME           PIC X(18)  VALUE SPACES.            
+           05  FILLER                       PIC X(01)  VALUE ','.               
+           05  SA-DEPT-NBR                  PIC X(03)  VALUE SPACES.            
+           05  FILLER                       PIC X(01)  VALUE ','.               
+W39690*    05  SA-MCL-NBR                   PIC X(03)  VALUE SPACES.            
+W39690*    05  FILLER                       PIC X(01)  VALUE ','.               
+           05  SA-SCL-NBR                   PIC X(03)  VALUE SPACES.            
+           05  FILLER                       PIC X(01)  VALUE ','.               
+           05  SA-VS-NBR                    PIC X(20)  VALUE SPACES.            
+           05  FILLER                       PIC X(01)  VALUE ','.               
+W39690     05  SA-SKU-NBR                   PIC X(08)  VALUE SPACES.            
+W39690     05  FILLER                       PIC X(01)  VALUE ','.               
+           05  SA-ASTERISK                  PIC X(01)  VALUE SPACE.             
+W39690*    05  SA-RETAIL                    PIC -Z,ZZZ,ZZ9.99                   
+W39690     05  SA-RETAIL                    PIC -ZZZZZZ9.99                     
+                                                       VALUE SPACES.            
+           05  FILLER                       PIC X(01)  VALUE ','.               
+W39690     05  SA-ASTERISK-COST             PIC X(01)  VALUE SPACE.             
+W39690     05  SA-COST                      PIC -ZZZZZZ9.999                    
+W39690                                                 VALUE SPACES.            
+W39690     05  FILLER                       PIC X(01)  VALUE ','.               
+           05  SA-FIRST-RCVD-DATE           PIC X(10)  VALUE SPACES.            
+           05  FILLER                       PIC X(01)  VALUE ','.               
+W39690     05  SA-CREATE-DATE               PIC X(10)  VALUE SPACES.            
+W39690     05  FILLER                       PIC X(01)  VALUE ','.               
+           05  SA-PERM-DOC-NBR              PIC ZZZZZZZZZZ                      
+                                                       VALUE ZEROES.            
+           05  FILLER                       PIC X(01)  VALUE ','.               
+           05  SA-PERM-EFF-DTE              PIC X(10)  VALUE SPACES.            
+W39690     05  FILLER                       PIC X(01)  VALUE ','.               
+W39690     05  SA-BRAND                     PIC X(20)  VALUE SPACES.            
+W39690     05  FILLER                       PIC X(01)  VALUE ','.               
+W39690     05  SA-VS-DESC                   PIC X(30)  VALUE SPACES.            
+W39690     05  FILLER                       PIC X(01)  VALUE ','.               
+W39690     05  SA-WEB-XCLUSIVE              PIC X(01)  VALUE SPACES.            
+W39690     05  FILLER                       PIC X(01)  VALUE ','.               
+      *CHG0202950-START                                                         
+W39690     05  SA-PRD-GP-NBR                PIC X(10)  VALUE SPACES.            
+W39690     05  FILLER                       PIC X(01)  VALUE ','.               
+      *CHG0202950-END                                                           
+W39690*    05  FILLER                       PIC X(10)  VALUE ','.               
+                                                                                
+      ******************************************************************        
+      *    PS-PROGRAM SWITCHES                                         *        
+      ******************************************************************        
+       01  PS-PROGRAM-SWITCHES.                                                 
+           05  PS-END-OF-FILE-SW            PIC  X(01)   VALUE 'N'.             
+               88  PS-END-OF-FILE                        VALUE 'Y'.             
+           05  PS-DROP-STYLE-SW             PIC  X(01)   VALUE 'N'.             
+               88  PS-DROP-STYLE                         VALUE 'Y'.             
+W39690*    05  PS-WEB-EXCLV-EXISTS-SW       PIC  X(01)   VALUE 'N'.             
+W39690*        88  PS-WEB-EXCLV-EXISTS                   VALUE 'Y'.             
+W39690*        88  PS-WEB-EXCLV-NOT-EXISTS               VALUE 'N'.             
+                                                                                
+      ******************************************************************        
+      *    PA-PROGRAM ACCUMULATORS                                     *        
+      ******************************************************************        
+       01  PA-PROGRAM-ACCUMULATORS.                                             
+           05  PA-REPORT-RECORDS-WRITTEN    PIC S9(9) COMP-3                    
+                                                       VALUE ZEROES.            
+           05  PA-BYR-SELECT-CNT            PIC S9(9) COMP-3                    
+                                                       VALUE ZEROES.            
+           05  PA-RECS-READ-CNT             PIC S9(9) COMP-3                    
+                                                       VALUE ZEROES.            
+           05  PA-MIN-FIRST-RCVD-CNT        PIC S9(9) COMP-3                    
+                                                       VALUE ZEROES.            
+W39690*    05  PA-WEB-SELECT-CNT            PIC S9(9) COMP-3                    
+W39690*                                                VALUE ZEROES.            
+           05  PA-PERM-SELECT-CNT           PIC S9(9) COMP-3                    
+                                                       VALUE ZEROES.            
+W39690     05  PA-SKU-SELECT-CNT            PIC S9(9) COMP-3                    
+W39690                                                 VALUE ZEROES.            
+W39690     05  PA-COST-SELECT-CNT           PIC S9(9) COMP-3                    
+W39690                                                 VALUE ZEROES.            
+W39690     05  PA-STYLE-BRAND-CNT           PIC S9(9) COMP-3                    
+W39690                                                 VALUE ZEROES.            
+                                                                                
+      ******************************************************************        
+      *    PRICE CHANGE INPUT FILE RECORD LAYOUT                       *        
+      ******************************************************************        
+019000     COPY IMRD077.                                                        
+33885  01  REPORT-TITLE-LINE-CSV.                                               
+W39690*    05  FILLER                       PIC X(22)  VALUE ',,,,'.            
+W39690     05  FILLER                       PIC X(42)  VALUE ',,,,'.            
+33885      05  REPORT-TITLE-LINE1-CSV.                                          
+33885          10  REPORT-TITLE-LINEA-CSV   PIC X(42)  VALUE                    
+W39690*       ', WEEKLY WHITE TICKET PRICE CHANGE REPORT '.                     
+W39690        ',  WEEKLY FAIR MARKET VALUE REPORT        '.                     
+W39690*    05  FILLER                       PIC X(10)  VALUE ',,,,'.            
+W39690     05  FILLER                       PIC X(15)  VALUE ',,,,'.            
+           05  FILLER                       PIC X(07)  VALUE                    
+33885                                     'DATE:  '.                            
+           05  TITLE-DATE                   PIC X(10)  VALUE SPACES.            
+W39690*    05  FILLER                       PIC X(21)  VALUE ',,,,'.            
+W39690     05  FILLER                       PIC X(73)  VALUE ',,,,'.            
+                                                                                
+33885  01  REPORT-HEADING-LINE-CSV.                                             
+W39690     05  FILLER                       PIC X(10)  VALUE                    
+W39690         'DIVISION #'.                                                    
+W39690     05  FILLER                       PIC X(02)  VALUE ', '.              
+33885      05  FILLER                       PIC X(07)  VALUE                    
+33885          'BUYER #'.                                                       
+33885      05  FILLER                       PIC X(02)  VALUE ', '.              
+33885      05  FILLER                       PIC X(10)  VALUE                    
+33885          'BUYER NAME'.                                                    
+33885      05  FILLER                       PIC X(02)  VALUE ', '.              
+33885      05  FILLER                       PIC X(04)  VALUE                    
+33885          'DEPT'.                                                          
+33885      05  FILLER                       PIC X(02)  VALUE ', '.              
+W39690*    05  FILLER                       PIC X(11)  VALUE                    
+W39690*        'MAJOR CLASS'.                                                   
+W39690*    05  FILLER                       PIC X(02)  VALUE ', '.              
+33885      05  FILLER                       PIC X(09)  VALUE                    
+33885          'SUB CLASS'.                                                     
+33885      05  FILLER                       PIC X(02)  VALUE ', '.              
+33885      05  FILLER                       PIC X(07)  VALUE                    
+33885          'STYLE #'.                                                       
+33885      05  FILLER                       PIC X(02)  VALUE ', '.              
+W39690     05  FILLER                       PIC X(05)  VALUE                    
+W39690         'SKU #'.                                                         
+W39690     05  FILLER                       PIC X(02)  VALUE ', '.              
+33885      05  FILLER                       PIC X(06)  VALUE                    
+33885          'RETAIL'.                                                        
+33885      05  FILLER                       PIC X(02)  VALUE ', '.              
+W39690     05  FILLER                       PIC X(04)  VALUE                    
+W39690         'COST'.                                                          
+W39690     05  FILLER                       PIC X(02)  VALUE ', '.              
+33885      05  FILLER                       PIC X(13)  VALUE                    
+33885          '1ST RCVD DATE'.                                                 
+33885      05  FILLER                       PIC X(02)  VALUE ', '.              
+W39690     05  FILLER                       PIC X(11)  VALUE                    
+W39690         'CREATE DATE'.                                                   
+W39690     05  FILLER                       PIC X(02)  VALUE ', '.              
+33885      05  FILLER                       PIC X(10)  VALUE                    
+33885          'PERM DOC #'.                                                    
+33885      05  FILLER                       PIC X(02)  VALUE ', '.              
+33885      05  FILLER                       PIC X(09)  VALUE                    
+33885          'PERM DATE'.                                                     
+33885      05  FILLER                       PIC X(02)  VALUE ', '.              
+W39690     05  FILLER                       PIC X(05)  VALUE                    
+W39690         'BRAND'.                                                         
+W39690     05  FILLER                       PIC X(02)  VALUE ', '.              
+W39690     05  FILLER                       PIC X(17)  VALUE                    
+W39690         'STYLE DESCRIPTION'.                                             
+W39690     05  FILLER                       PIC X(02)  VALUE ', '.              
+W39690     05  FILLER                       PIC X(13)  VALUE                    
+W39690         'WEB EXCLUSIVE'.                                                 
+W39690     05  FILLER                       PIC X(02)  VALUE ', '.              
+      *CHG0202950-START                                                         
+W39690     05  FILLER                       PIC X(05)  VALUE                    
+W39690         'CP ID'.                                                         
+W39690     05  FILLER                       PIC X(02)  VALUE ', '.              
+W39690     05  FILLER                       PIC X(10)  VALUE ',,'.              
+      *CHG0202950-END                                                           
+W39690*    05  FILLER                       PIC X(06)  VALUE ',,'.              
+                                                                                
+      ******************************************************************        
+      *    VARIABLES REQUIRED FOR THE FORMAT SQLCA ROUTINE DPPD004     *        
+      ******************************************************************        
+           COPY DPWS004.                                                        
+                                                                                
+      ******************************************************************        
+      *    MB-MERCHANDISE AREA TABLE                                   *        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TMDSEAR                                                  
+           END-EXEC.                                                            
+      ******************************************************************        
+      *    MB-MERCHANDISE AREA TABLE                                   *        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TRSPBAR                                                  
+           END-EXEC.                                                            
+      ******************************************************************        
+      *    SKU STORE                                                   *        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TSKST                                                    
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *    TSKXREF  GET SKU FROM ITEM NMB                              *        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TSKXREF                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *    TUPC                                                        *        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TUPC                                                     
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *    TWEBITM                                                     *        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TWEBITM                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *    XMT_PRCHG                                                   *        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE XMT00009                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *    XMT_STR_GP_PRCHG                                            *        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE XMT00010                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *    XMT_PRCHG_MDSE                                              *        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE XMT00011                                                 
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *    TVNDSTL                                                     *        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TVNDSTL                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *    TMDARVS                                                     *        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE TMDARVS                                                  
+           END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *    IMT_LBL                                                     *        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE IMT00000                                                 
+           END-EXEC.                                                            
+                                                                                
+W39690******************************************************************        
+W39690*    TUPCPLS                                                     *        
+W39690******************************************************************        
+W39690     EXEC SQL                                                             
+W39690         INCLUDE TUPCPLS                                                  
+W39690     END-EXEC.                                                            
+                                                                                
+W39690******************************************************************        
+W39690*    TVSCHVL                                                     *        
+W39690******************************************************************        
+W39690     EXEC SQL                                                             
+W39690         INCLUDE TVSCHVL                                                  
+W39690     END-EXEC.                                                            
+                                                                                
+      ******************************************************************        
+      *    STANDARD LAYOUT FOR THE SQL COMMUNCATIONS AREA              *        
+      ******************************************************************        
+           EXEC SQL                                                             
+               INCLUDE SQLCA                                                    
+           END-EXEC.                                                            
+                                                                                
+           COPY SQLCA2.                                                         
+                                                                                
+                                                                                
+       PROCEDURE DIVISION.                                                      
+                                                                                
+       A100-MAINLINE.                                                           
+                                                                                
+           PERFORM B100-INITIALIZE.                                             
+                                                                                
+           PERFORM B200-PROCESS-REPORT                                          
+               UNTIL PS-END-OF-FILE.                                            
+                                                                                
+           PERFORM B300-EOJ-ROUTINE.                                            
+                                                                                
+           GOBACK.                                                              
+                                                                                
+      ******************************************************************        
+      *     B100-INITIALIZE                                            *        
+      * ==> PROCESSES:                                                 *        
+      *    - READS THE FIRST RECORD FROM PRICE CHANGE UNLOAD INPUT FILE*        
+      * ==> PERFORMED FROM:  A100-MAINLINE                             *        
+      ******************************************************************        
+       B100-INITIALIZE.                                                         
+           OPEN INPUT PRICE-CHG-FILE                                            
+                OUTPUT REPORT-FILE.                                             
+                                                                                
+           PERFORM C200-READ-PRICE-CHG.                                         
+           IF PS-END-OF-FILE                                                    
+               DISPLAY ' '                                                      
+               DISPLAY '***********************************'                    
+               DISPLAY ' NO INPUT RECS TO PROCESS.'                             
+               DISPLAY '***********************************'                    
+               DISPLAY ' '                                                      
+           ELSE                                                                 
+               PERFORM C100-GET-CURRENT-DTE                                     
+               MOVE PV-CURRENT-DATE TO TITLE-DATE                               
+               WRITE REPORT-RECORD FROM REPORT-TITLE-LINE-CSV AFTER 1           
+               WRITE REPORT-RECORD FROM REPORT-HEADING-LINE-CSV                 
+                   AFTER 1                                                      
+           END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *     B200-PROCESS-REPORT                                        *        
+      * ==> PROCESSES:                                                 *        
+      * ==> PERFORMED FROM:  A100-MAINLINE                             *        
+      ******************************************************************        
+       B200-PROCESS-REPORT.                                                     
+                                                                                
+           IF IM077-VS-ID = PV-PREV-VS-ID                                       
+             AND IM077-SUB-CL-MDSEAR-ID = PV-PREV-SUB-CL-MDSEAR-ID              
+             AND IM077-PRCHG-ID = PV-PREV-PRCHG-ID                              
+             IF PS-DROP-STYLE-SW = 'Y'                                          
+               NEXT SENTENCE                                                    
+             ELSE                                                               
+      *** SAME STYLE CHECK RETAILS                                              
+               IF IM077-UNT-RTL-AMT NOT EQUAL PV-RETAIL                         
+                   MOVE '*' TO SA-ASTERISK                                      
+               END-IF                                                           
+             END-IF                                                             
+           ELSE                                                                 
+               MOVE 'N' TO PS-DROP-STYLE-SW                                     
+      *** NEW STYLE - CHECK TO SEE IF IT STILL QUALIFIES                        
+               PERFORM D100-PERM-CK                                             
+               IF PS-DROP-STYLE-SW = 'N'                                        
+      *** NEW STYLE - DROP STYLE IF RETAIL <= 5 CENTS                           
+                   IF IM077-UNT-RTL-AMT <= +.05                                 
+                       SET PS-DROP-STYLE TO TRUE                                
+W39690*            ELSE                                                         
+W39690*** NEW STYLE - DROP STYLE IF ANY SKU IS WEB EXCLUSIVE                    
+W39690*                MOVE 'N' TO PS-WEB-EXCLV-EXISTS-SW                       
+W39690*                PERFORM D500-WEB-EXCLV-CK                                
+W39690*                IF PS-WEB-EXCLV-EXISTS                                   
+W39690*                    SET PS-DROP-STYLE TO TRUE                            
+W39690*                END-IF                                                   
+                   END-IF                                                       
+               END-IF                                                           
+      *** NEW STYLE - PRINT OLD - GET MIN RCVD DATE ON NEW STYLE                
+               IF PA-RECS-READ-CNT > +1 AND PS-DROP-STYLE-SW = 'N'              
+                   PERFORM F100-PRINT-DETAIL                                    
+               END-IF                                                           
+               IF PS-DROP-STYLE-SW = 'N'                                        
+W39690             PERFORM D200-GET-SKU                                         
+W39690* IF MORE THAN ONE SKU, POPULATE SPACES                                   
+W39690             IF PV-DB2-NUM-SKUS = +1                                      
+W39690                MOVE SKXREF-SKU TO PV-SKU-NBR                             
+W39690                MOVE PV-SKU-NBR TO PV-HOLD-SKU-NBR                        
+W39690             ELSE                                                         
+W39690                MOVE SPACES     TO PV-HOLD-SKU-NBR                        
+W39690             END-IF                                                       
+W39690             PERFORM D400-GET-COST                                        
+W39690* CHECK IF MORE THAN ONE COST                                             
+W39690             IF PV-DB2-NUM-COSTS > +1                                     
+W39690                MOVE '*'            TO PV-HOLD-ASTER-COST                 
+W39690             ELSE                                                         
+W39690                MOVE ' '            TO PV-HOLD-ASTER-COST                 
+W39690             END-IF                                                       
+W39690             MOVE UPCPLS-UNT-COST-AMT TO PV-HOLD-COST                     
+W39690             PERFORM D410-WEB-ELGBLE-CNT                                  
+W39690* CHECK IF ALL SKUS ARE WEB ELIGIBLE                                      
+W39690             IF PV-DB2-NUM-WEB-SKUS = PV-DB2-NUM-SKUS                     
+W39690                PERFORM D500-WEB-EXCLV-CK                                 
+W39690             ELSE                                                         
+W39690                MOVE 'N'    TO PV-HOLD-WEB-XLUSIVE                        
+W39690             END-IF                                                       
+W39690             PERFORM D600-STYLE-BRAND                                     
+                   PERFORM D700-GET-MIN-FIRST-RCVD                              
+                   IF SQLCODE = +0                                              
+                       PERFORM E100-MOVE-TO-HOLDS                               
+                   END-IF                                                       
+               END-IF                                                           
+           END-IF.                                                              
+           MOVE IM077-DEPT        TO PV-PREV-DEPT.                              
+           MOVE IM077-VS-ID       TO PV-PREV-VS-ID.                             
+           MOVE IM077-SUB-CL-MDSEAR-ID TO PV-PREV-SUB-CL-MDSEAR-ID.             
+           MOVE IM077-PRCHG-ID    TO PV-PREV-PRCHG-ID.                          
+           PERFORM C200-READ-PRICE-CHG.                                         
+                                                                                
+      ******************************************************************        
+      *     B300-EOJ-ROUTINE                                           *        
+      * ==> PROCESSES:                                                 *        
+      *     - PRINT LAST RECORD FROM HOLD AREA                         *        
+      *     - CLOSES THE FILES                                         *        
+      *     - DISPLAYS THE NUMBER OF RECORDS READ AND WRITTEN          *        
+      * ==> PERFORMED FROM:  A100-MAINLINE                             *        
+      ******************************************************************        
+       B300-EOJ-ROUTINE.                                                        
+                                                                                
+           IF PA-RECS-READ-CNT > +1 AND PS-DROP-STYLE-SW = 'N'                  
+               PERFORM F100-PRINT-DETAIL                                        
+           END-IF.                                                              
+           CLOSE PRICE-CHG-FILE                                                 
+                 REPORT-FILE.                                                   
+                                                                                
+           DISPLAY '*******'.                                                   
+           DISPLAY 'MESSAGES FOR PROGRAM   '  PC-PROGRAM-NAME.                  
+           DISPLAY 'RECS READ      :       '  PA-RECS-READ-CNT.                 
+           DISPLAY 'BUYER SELECTS  :       '  PA-BYR-SELECT-CNT.                
+W39690     DISPLAY 'SKU SELECTS    :       '  PA-SKU-SELECT-CNT.                
+W39690     DISPLAY 'COST SELECTS   :       '  PA-COST-SELECT-CNT.               
+W39690     DISPLAY 'STYLE BRAND SELECTS:   '  PA-STYLE-BRAND-CNT.               
+           DISPLAY '1ST RCVD SELECTS:      '  PA-MIN-FIRST-RCVD-CNT.            
+           DISPLAY 'RECS WRITTEN    :      '  PA-REPORT-RECORDS-WRITTEN.        
+W39690*    DISPLAY 'WEB EXCLV CKS   :      '  PA-WEB-SELECT-CNT.                
+           DISPLAY 'PERM CKS        :      '  PA-PERM-SELECT-CNT.               
+           DISPLAY '*******'.                                                   
+                                                                                
+                                                                                
+075691 C100-GET-CURRENT-DTE.                                                    
+075696                                                                          
+051000     PERFORM  WITH TEST AFTER                                             
+051100             UNTIL SQLCODE = +0                                           
+024800                OR SQLCODE = +100                                         
+051200                OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                
+               EXEC SQL                                                         
+                   SELECT CURRENT DATE                                          
+                   INTO :PV-CURRENT-DATE                                        
+                   FROM SYSIBM.SYSDUMMY1                                        
+                   WITH UR                                                      
+               END-EXEC                                                         
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       CONTINUE                                                 
+045200             WHEN SQLCODE = -911                                          
+045300             WHEN SQLCODE = -913                                          
+045400                  ADD 1          TO PV-RETRY-COUNT                        
+                   WHEN OTHER                                                   
+                       MOVE 'C100-GET-CURRENT-DTE'                              
+                                         TO PV-PARAGRAPH-NAME                   
+                       MOVE 'GET CURRENT DATE'                                  
+                                         TO PV-DB2-OPERATION-ATTEMPTED          
+                       PERFORM Z900-SQL-ABEND                                   
+               END-EVALUATE                                                     
+046200     END-PERFORM.                                                         
+046300*                                                                         
+046400     IF  PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                          
+               MOVE 'C100-GET-CURRENT-DTE'                                      
+046600                                 TO PV-PARAGRAPH-NAME                CL**1
+               MOVE 'GET CURRENT DATE'                                          
+046800                                 TO PV-DB2-OPERATION-ATTEMPTED       CL**1
+               PERFORM Z900-SQL-ABEND                                           
+047000     END-IF.                                                              
+075723                                                                          
+      ******************************************************************        
+      *     C200-READ-PRICE-CHG                                        *        
+      ******************************************************************        
+       C200-READ-PRICE-CHG.                                                     
+           MOVE 'C200-READ-PRICE-CHG' TO PV-PARAGRAPH-NAME.                     
+           INITIALIZE IM077-UNLOAD-REC.                                         
+           READ PRICE-CHG-FILE                                                  
+               INTO IM077-UNLOAD-REC                                            
+                   AT END                                                       
+                       MOVE 'Y'     TO PS-END-OF-FILE-SW                        
+                   NOT AT END                                                   
+                       ADD +1       TO PA-RECS-READ-CNT                         
+           END-READ.                                                            
+                                                                                
+      ******************************************************************        
+      *     D100-PERM-CK.                                              *        
+      *     CHECK IF THE STYLE STILL QUALIFIES                         *        
+      ******************************************************************        
+       D100-PERM-CK.                                                            
+           MOVE IM077-VS-NBR TO VNDSTL-VS-NBR.                                  
+           MOVE IM077-PRCHG-ID TO XMT00009-PRCHG-ID.                            
+           PERFORM  WITH TEST AFTER                                             
+                   UNTIL SQLCODE = +0                                           
+                      OR SQLCODE = +100                                         
+                      OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                
+               EXEC SQL                                                         
+                   SELECT 1                                                     
+                    INTO :PV-COUNT                                              
+                   FROM                                                         
+                           XMT_PRCHG A                                          
+                          ,XMT_STR_GP_PRCHG B                                   
+                          ,XMT_PRCHG_MDSE C                                     
+                          ,TSKXREF D                                            
+                          ,TUPC E                                               
+                          ,TVNDSTL F                                            
+                          ,TMDARVS G                                            
+                          ,IMT_LBL H                                            
+                   WHERE   A.PRCHG_ID           = :XMT00009-PRCHG-ID            
+                     AND   A.PRCHG_ID           = B.PRCHG_ID                    
+                     AND   A.PRCHG_ID           = C.PRCHG_ID                    
+                     AND   B.STR_GP_TYP_CDE     = C.STR_GP_TYP_CDE              
+                     AND   B.STR_GP_ID          = C.STR_GP_ID                   
+                     AND   A.EVNT_CTG_CDE       = 'ACT'                         
+                     AND   A.PRCHG_TYP_CDE      IN ('CTA','MDA','MUA')          
+                     AND   A.PRCHG_ST_CDE       = 'APR'                         
+                     AND   C.MDSE_HIER_CDE      = 'SKU'                         
+                     AND  (B.PRCHG_EFF_DTE >= (CURRENT DATE - 7 DAYS)           
+                        AND B.PRCHG_EFF_DTE <= (CURRENT DATE + 28 DAYS))YS))    
+                     AND   C.SKU_NBR            = D.SKU                         
+                     AND   D.INTR_UPC_ID        = E.UPC_ID                      
+                     AND   E.VS_ID              = F.VS_ID                       
+                     AND   F.VS_NBR             = :VNDSTL-VS-NBR                
+                     AND   E.VS_ID              = G.VS_ID                       
+                     AND   E.SUB_CL_MDSEAR_ID   = G.SUB_CL_MDSEAR_ID            
+                     AND   G.LBL_SEQ_NBR        = H.LBL_SEQ_NBR                 
+                     AND   H.LBL_TYP_CDE        = 'R'                           
+                   FETCH FIRST 1 ROWS ONLY                                      
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       ADD +1       TO PA-PERM-SELECT-CNT                       
+                   WHEN SQLCODE = +100                                          
+                       SET PS-DROP-STYLE TO TRUE                                
+045200             WHEN SQLCODE = -911                                          
+045300             WHEN SQLCODE = -913                                          
+045400                  ADD 1          TO PV-RETRY-COUNT                        
+                   WHEN OTHER                                                   
+                       MOVE 'D100-PERM-CK'                                      
+                                         TO PV-PARAGRAPH-NAME                   
+                       MOVE 'SELECT PERM/ITEM'                                  
+                                         TO PV-DB2-OPERATION-ATTEMPTED          
+                       PERFORM Z900-SQL-ABEND                                   
+               END-EVALUATE                                                     
+046200     END-PERFORM.                                                         
+046300*                                                                         
+046400     IF  PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                          
+               MOVE 'D100-PERM-CK'                                              
+046600                                 TO PV-PARAGRAPH-NAME                CL**1
+               MOVE 'SELECT PERM/ITEM'                                          
+046800                                 TO PV-DB2-OPERATION-ATTEMPTED       CL**1
+               PERFORM Z900-SQL-ABEND                                           
+047000     END-IF.                                                              
+                                                                                
+W39690******************************************************************        
+W39690*    D200-GET-SKU                                                *        
+W39690******************************************************************        
+W39690 D200-GET-SKU.                                                            
+W39690     PERFORM  WITH TEST AFTER                                             
+W39690             UNTIL SQLCODE = +0                                           
+W39690                OR SQLCODE = +100                                         
+W39690                OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                
+W39690         EXEC SQL                                                         
+W39690             SELECT  COUNT (DISTINCT B.SKU)                               
+W39690                    ,MAX(B.SKU)                                           
+W39690             INTO    :PV-DB2-NUM-SKUS                                     
+W39690                    ,:SKXREF-SKU                                          
+W39690             FROM   TUPC    A                                             
+W39690                   ,TSKXREF B                                             
+W39690             WHERE A.VS_ID            = :IM077-VS-ID                      
+W39690               AND A.SUB_CL_MDSEAR_ID = :IM077-SUB-CL-MDSEAR-ID           
+W39690               AND A.UPC_TYP_CDE      = 'I'                               
+W39690               AND A.EFF_END_DTE IS NULL                                  
+W39690               AND B.INTR_UPC_ID      = A.UPC_ID                          
+W39690         END-EXEC                                                         
+W39690                                                                          
+W39690         EVALUATE TRUE                                                    
+W39690             WHEN SQLCODE = ZERO                                          
+W39690                 ADD +1       TO PA-SKU-SELECT-CNT                        
+W39690             WHEN SQLCODE = -911                                          
+W39690             WHEN SQLCODE = -913                                          
+W39690                  ADD 1          TO PV-RETRY-COUNT                        
+W39690             WHEN OTHER                                                   
+W39690                 MOVE 'D200-GET-SKU'                                      
+W39690                                   TO PV-PARAGRAPH-NAME                   
+W39690                 MOVE 'SELECT SKU' TO PV-DB2-OPERATION-ATTEMPTED          
+W39690                 PERFORM Z900-SQL-ABEND                                   
+W39690         END-EVALUATE                                                     
+W39690     END-PERFORM.                                                         
+W39690                                                                          
+W39690     IF  PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                          
+W39690         MOVE 'D200-GET-SKU'     TO PV-PARAGRAPH-NAME                     
+W39690         MOVE 'SELECT SKU'       TO PV-DB2-OPERATION-ATTEMPTED            
+W39690         PERFORM Z900-SQL-ABEND                                           
+W39690     END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *     D300-SELECT-BUYER-NAME                                     *        
+      ******************************************************************        
+       D300-SELECT-BUYER-NAME.                                                  
+           MOVE PV-HOLD-DEPT TO MDSEAR-DEPT-NBR.                                
+           PERFORM  WITH TEST AFTER                                             
+                   UNTIL SQLCODE = +0                                           
+                      OR SQLCODE = +100                                         
+                      OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                
+               EXEC SQL                                                         
+                   SELECT C.WORKER_LAST_NAME                                    
+                        , A.BYR_NBR                                             
+W39690                  , A.DMA_NBR                                             
+                     INTO :RSPBAR-WORKER-LAST-NAME                              
+                        , :MDSEAR-BYR-NBR                                       
+W39690                  , :MDSEAR-DMA-NBR                                       
+                     FROM TMDSEAR A                                             
+                        , TRSPBAR C                                             
+                    WHERE A.OPERCO_NBR  = '03'                                  
+                      AND A.DEPT_NBR    = :MDSEAR-DEPT-NBR                      
+                      AND A.MDSELV_CDE  = 'DPT'                                 
+                      AND A.MDSEAR_DKEY = C.MDSEAR_DKEY                         
+                      AND C.RSPLVL_CDE  = 'BYR'                                 
+                      AND (CURRENT DATE BETWEEN A.STRT_DTE                      
+                                            AND A.END_DTE)                      
+                      AND (CURRENT DATE BETWEEN C.WORKER_STRT_DTE               
+                                            AND C.WORKER_END_DTE)               
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+                   WHEN SQLCODE = ZERO                                          
+                       MOVE MDSEAR-BYR-NBR TO PV-HOLD-BUYER-NUM                 
+                       MOVE RSPBAR-WORKER-LAST-NAME TO                          
+                                   PV-HOLD-BUYER-NAME                           
+W39690                 MOVE MDSEAR-DMA-NBR TO PV-HOLD-DIVISN-NUM                
+                       ADD +1       TO PA-BYR-SELECT-CNT                        
+                   WHEN SQLCODE = +100                                          
+33885                  MOVE SPACES           TO PV-HOLD-BUYER-NUM               
+                       MOVE PC-BUYER-NOT-FOUND                                  
+                                             TO PV-HOLD-BUYER-NAME              
+W39690                 MOVE SPACES           TO PV-HOLD-DIVISN-NUM              
+045200             WHEN SQLCODE = -911                                          
+045300             WHEN SQLCODE = -913                                          
+045400                  ADD 1          TO PV-RETRY-COUNT                        
+                   WHEN OTHER                                                   
+                       MOVE 'D300-SELECT-BUYER-NAME'                            
+                                         TO PV-PARAGRAPH-NAME                   
+                       MOVE 'SELECT BUYER NAME'                                 
+                                         TO PV-DB2-OPERATION-ATTEMPTED          
+                       PERFORM Z900-SQL-ABEND                                   
+               END-EVALUATE                                                     
+046200     END-PERFORM.                                                         
+046300*                                                                         
+046400     IF  PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                          
+               MOVE 'D300-SELECT-BUYER-NAME'                                    
+046600                                 TO PV-PARAGRAPH-NAME                CL**1
+               MOVE 'SELECT BUYER NAME'                                         
+046800                                 TO PV-DB2-OPERATION-ATTEMPTED       CL**1
+               PERFORM Z900-SQL-ABEND                                           
+047000     END-IF.                                                              
+                                                                                
+W39690******************************************************************        
+W39690*    D400-GET-COST                                               *        
+W39690*    FINDOUT IF MULTIPLE COST EXIST FOR A STYLE GET MIN COST     *        
+W39690******************************************************************        
+W39690 D400-GET-COST.                                                           
+W39690     PERFORM  WITH TEST AFTER                                             
+W39690             UNTIL SQLCODE = +0                                           
+W39690                OR SQLCODE = +100                                         
+W39690                OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                
+W39690         EXEC SQL                                                         
+W39690             SELECT COUNT (DISTINCT B.UNT_COST_AMT)                       
+W39690                   ,MIN(B.UNT_COST_AMT)                                   
+W39690             INTO   :PV-DB2-NUM-COSTS                                     
+W39690                   ,:UPCPLS-UNT-COST-AMT                                  
+W39690             FROM   TUPC    A                                             
+W39690                   ,TUPCPLS B                                             
+W39690             WHERE A.VS_ID            = :IM077-VS-ID                      
+W39690               AND A.SUB_CL_MDSEAR_ID = :IM077-SUB-CL-MDSEAR-ID           
+W39690               AND A.UPC_TYP_CDE      = 'I'                               
+W39690               AND A.EFF_END_DTE IS NULL                                  
+W39690               AND A.UPC_ID           = B.UPC_ID                          
+W39690               AND B.STR_NBR          = SMALLINT(0)                       
+W39690               AND B.EFF_BEG_TMST    <= CURRENT TIMESTAMP                 
+W39690               AND (B.EFF_END_TMST IS NULL                                
+W39690                    OR B.EFF_END_TMST >= CURRENT TIMESTAMP)               
+W39690         END-EXEC                                                         
+W39690                                                                          
+W39690         EVALUATE TRUE                                                    
+W39690             WHEN SQLCODE = ZERO                                          
+W39690                 ADD +1       TO PA-COST-SELECT-CNT                       
+W39690             WHEN SQLCODE = -911                                          
+W39690             WHEN SQLCODE = -913                                          
+W39690                  ADD 1          TO PV-RETRY-COUNT                        
+W39690             WHEN OTHER                                                   
+W39690                 MOVE 'D400-GET-COST'                                     
+W39690                                   TO PV-PARAGRAPH-NAME                   
+W39690                 MOVE 'SELECT COST'                                       
+W39690                                   TO PV-DB2-OPERATION-ATTEMPTED          
+W39690                 PERFORM Z900-SQL-ABEND                                   
+W39690         END-EVALUATE                                                     
+W39690     END-PERFORM.                                                         
+W39690                                                                          
+W39690     IF  PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                          
+W39690         MOVE 'D400-GET-COST'    TO PV-PARAGRAPH-NAME                     
+W39690         MOVE 'SELECT COST'      TO PV-DB2-OPERATION-ATTEMPTED            
+W39690         PERFORM Z900-SQL-ABEND                                           
+W39690     END-IF.                                                              
+                                                                                
+W39690******************************************************************        
+W39690*    D410-WEB-ELGBLE-CNT                                         *        
+W39690*    RETRIEVE THE COUNT OF WEB ELIGIBLE SKUS UNDER A STYLE       *        
+W39690******************************************************************        
+W39690 D410-WEB-ELGBLE-CNT.                                                     
+W39690     PERFORM  WITH TEST AFTER                                             
+W39690             UNTIL SQLCODE = +0                                           
+W39690                OR SQLCODE = +100                                         
+W39690                OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                
+W39690         EXEC SQL                                                         
+W39690             SELECT  COUNT (DISTINCT B.INTR_UPC_ID)                       
+W39690             INTO    :PV-DB2-NUM-WEB-SKUS                                 
+W39690             FROM   TUPC    A                                             
+W39690                   ,TWEBITM B                                             
+W39690             WHERE A.VS_ID            = :IM077-VS-ID                      
+W39690               AND A.SUB_CL_MDSEAR_ID = :IM077-SUB-CL-MDSEAR-ID           
+W39690               AND A.UPC_TYP_CDE      = 'I'                               
+W39690               AND A.EFF_END_DTE IS NULL                                  
+W39690               AND B.INTR_UPC_ID      = A.UPC_ID                          
+W39690               AND B.EFF_BEG_TMST <= CURRENT TIMESTAMP                    
+W39690               AND B.EFF_END_TMST IS NULL                                 
+W39690         END-EXEC                                                         
+W39690                                                                          
+W39690         EVALUATE TRUE                                                    
+W39690             WHEN SQLCODE = ZERO                                          
+W39690                 CONTINUE                                                 
+W39690             WHEN SQLCODE = -911                                          
+W39690             WHEN SQLCODE = -913                                          
+W39690                  ADD 1          TO PV-RETRY-COUNT                        
+W39690             WHEN OTHER                                                   
+W39690                 MOVE 'D410-WEB-ELGBLE-CNT'                               
+W39690                                   TO PV-PARAGRAPH-NAME                   
+W39690                 MOVE 'SELECT WEB CNT'                                    
+W39690                                   TO PV-DB2-OPERATION-ATTEMPTED          
+W39690                 PERFORM Z900-SQL-ABEND                                   
+W39690         END-EVALUATE                                                     
+W39690     END-PERFORM.                                                         
+W39690                                                                          
+W39690     IF  PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                          
+W39690         MOVE 'D410-WEB-ELGBLE-CNT'                                       
+W39690                                 TO PV-PARAGRAPH-NAME                     
+W39690         MOVE 'SELECT WEB CNT'   TO PV-DB2-OPERATION-ATTEMPTED            
+W39690         PERFORM Z900-SQL-ABEND                                           
+W39690     END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *     D500-WEB-EXCLV-CK                                          *        
+W39690*     CHECK IF ANY SKU IN STYLE IS NOT WEB EXCLUSIVE, THEN       *        
+W39690*     POPULATE INDICATOR AS 'N'.                                 *        
+W39690*     POPULATE 'Y' ONLY IF ALL THE SKUS WITHIN A STYLE ARE WEB   *        
+W39690*     EXCLUSIVE.                                                 *        
+      ******************************************************************        
+       D500-WEB-EXCLV-CK.                                                       
+                                                                                
+W39690     MOVE ZERO     TO PV-WEB-COUNT                                        
+           PERFORM  WITH TEST AFTER                                             
+                   UNTIL SQLCODE = +0                                           
+                      OR SQLCODE = +100                                         
+                      OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                
+               EXEC SQL                                                         
+W39690*            SELECT 'Y'                                                   
+W39690*             INTO :PS-WEB-EXCLV-EXISTS-SW                                
+W39690             SELECT 1                                                     
+W39690              INTO :PV-WEB-COUNT                                          
+                   FROM TUPC A                                                  
+                       ,TWEBITM B                                               
+                   WHERE A.SUB_CL_MDSEAR_ID = :IM077-SUB-CL-MDSEAR-ID           
+                     AND A.VS_ID            = :IM077-VS-ID                      
+                     AND A.UPC_TYP_CDE      = 'I'                               
+                     AND A.EFF_END_DTE IS NULL                                  
+                     AND A.UPC_ID           = B.INTR_UPC_ID                     
+W39690*              AND B.WEB_EXCLV_IND    = 'Y'                               
+W39690               AND B.WEB_EXCLV_IND    = 'N'                               
+                     AND B.EFF_BEG_TMST <= CURRENT TIMESTAMP                    
+                     AND B.EFF_END_TMST IS NULL                                 
+W39690             FETCH FIRST 1 ROWS ONLY                                      
+               END-EXEC                                                         
+                                                                                
+               EVALUATE TRUE                                                    
+W39690             WHEN SQLCODE = 0 AND PV-WEB-COUNT = 1                        
+W39690                 MOVE 'N' TO PV-HOLD-WEB-XLUSIVE                          
+W39690             WHEN SQLCODE = 0 AND PV-WEB-COUNT = 0                        
+W39690             WHEN SQLCODE = +100                                          
+W39690                 MOVE 'Y' TO PV-HOLD-WEB-XLUSIVE                          
+W39690*            WHEN SQLCODE = ZERO                                          
+W39690*                ADD +1       TO PA-WEB-SELECT-CNT                        
+W39690*            WHEN SQLCODE = +100                                          
+W39690*                MOVE 'N' TO PS-WEB-EXCLV-EXISTS-SW                       
+045200             WHEN SQLCODE = -911                                          
+045300             WHEN SQLCODE = -913                                          
+045400                  ADD 1          TO PV-RETRY-COUNT                        
+                   WHEN OTHER                                                   
+                       MOVE 'D500-WEB-EXCLV-CK'                                 
+                                         TO PV-PARAGRAPH-NAME                   
+                       MOVE 'SELECT TWEBITM/TUPC'                               
+                                         TO PV-DB2-OPERATION-ATTEMPTED          
+                       PERFORM Z900-SQL-ABEND                                   
+               END-EVALUATE                                                     
+046200     END-PERFORM.                                                         
+046300*                                                                         
+046400     IF  PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                          
+               MOVE 'D500-WEB-EXCLV-CK'                                         
+046600                                 TO PV-PARAGRAPH-NAME                CL**1
+               MOVE 'SELECT TWEBITM/TUPC'                                       
+046800                                 TO PV-DB2-OPERATION-ATTEMPTED       CL**1
+               PERFORM Z900-SQL-ABEND                                           
+047000     END-IF.                                                              
+                                                                                
+W39690******************************************************************        
+W39690*     D600-STYLE-BRAND                                           *        
+W39690*     RETRIEVE STYLE DESCRIPTION, BRAND AND STYLE CREATION DATE  *        
+W39690******************************************************************        
+W39690 D600-STYLE-BRAND.                                                        
+W39690     PERFORM  WITH TEST AFTER                                             
+W39690             UNTIL SQLCODE = +0                                           
+W39690                OR SQLCODE = +100                                         
+W39690                OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                
+W39690         EXEC SQL                                                         
+W39690             SELECT A.VS_DESC                                             
+W39690                  , B.CHARTC_VAL_DESC                                     
+W39690                  , C.EFF_BEG_DTE                                         
+W39690               INTO :MDARVS-VS-DESC                                       
+W39690                  , :VSCHVL-CHARTC-VAL-DESC                               
+W39690                  , :VNDSTL-EFF-BEG-DTE                                   
+W39690               FROM TMDARVS A                                             
+W39690                  , TVSCHVL B                                             
+W39690                  , TVNDSTL C                                             
+W39690              WHERE A.VS_ID = :IM077-VS-ID                                
+W39690                AND A.SUB_CL_MDSEAR_ID = :IM077-SUB-CL-MDSEAR-ID          
+W39690                AND A.ACTV_IND = 'Y'                                      
+W39690                AND B.CHARTC_CDE     = 3                                  
+W39690                AND B.CHARTC_SEQ_NBR = A.LBL_SEQ_NBR                      
+W39690                AND C.VS_ID          = A.VS_ID                            
+W39690                AND C.EFF_END_DTE IS NULL                                 
+W39690         END-EXEC                                                         
+W39690                                                                          
+W39690         EVALUATE TRUE                                                    
+W39690             WHEN SQLCODE = ZERO                                          
+W39690                 MOVE MDARVS-VS-DESC TO PV-HOLD-VS-DESC                   
+W39690                 MOVE VSCHVL-CHARTC-VAL-DESC                              
+W39690                                     TO PV-HOLD-BRAND                     
+W39690                 MOVE VNDSTL-EFF-BEG-DTE                                  
+W39690                                     TO PV-HOLD-CREATE-DATE               
+W39690                 ADD +1       TO PA-STYLE-BRAND-CNT                       
+W39690             WHEN SQLCODE = +100                                          
+W39690                 MOVE SPACES         TO PV-HOLD-VS-DESC                   
+W39690                                        PV-HOLD-BRAND                     
+W39690                                        PV-HOLD-CREATE-DATE               
+W39690             WHEN SQLCODE = -911                                          
+W39690             WHEN SQLCODE = -913                                          
+W39690                  ADD 1          TO PV-RETRY-COUNT                        
+W39690             WHEN OTHER                                                   
+W39690                 MOVE 'D600-STYLE-BRAND'                                  
+W39690                                   TO PV-PARAGRAPH-NAME                   
+W39690                 MOVE 'SELECT STYLE BRAND'                                
+W39690                                   TO PV-DB2-OPERATION-ATTEMPTED          
+W39690                 PERFORM Z900-SQL-ABEND                                   
+W39690         END-EVALUATE                                                     
+W39690     END-PERFORM.                                                         
+W39690                                                                          
+W39690     IF  PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                          
+W39690         MOVE 'D600-STYLE-BRAND' TO PV-PARAGRAPH-NAME                     
+W39690         MOVE 'SELECT STYLE BRAND'                                        
+W39690                                 TO PV-DB2-OPERATION-ATTEMPTED       CL**1
+W39690         PERFORM Z900-SQL-ABEND                                           
+W39690     END-IF.                                                              
+                                                                                
+      ******************************************************************        
+      *     D700-GET-MIN-FIRST-RCVD.                                   *        
+      * ==> PROCESSES:                                                 *        
+      *     -FIND THE MIN FIRST RECEIVED DATE FOR ALL SKUS IN STYLE    *        
+      ******************************************************************        
+       D700-GET-MIN-FIRST-RCVD.                                                 
+051000     PERFORM  WITH TEST AFTER                                             
+051100             UNTIL SQLCODE = +0                                           
+                      OR SQLCODE = +100                                         
+                      OR SQLCODE = -305                                         
+051200                OR PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                
+00558          EXEC SQL                                                         
+                SELECT MIN(VT1.FIRST_RCVD_DATE)                                 
+                INTO :PV-MIN-FIRST-RCVD                                         
+                FROM                                                            
+                (SELECT                                                         
+                   CASE                                                         
+216771             WHEN (INTEGER(SUBSTR(DIGITS(D.FIRST_RCVD_DATE),2,2))         
+                                              < 30                              
+216771              AND INTEGER(SUBSTR(DIGITS(D.FIRST_RCVD_DATE),6,2))          
+                                              > 0) THEN                         
+216771                 DATE('20'||SUBSTR(DIGITS(D.FIRST_RCVD_DATE),2,2)         
+                           ||'-'||                                              
+216771                 SUBSTR(DIGITS(D.FIRST_RCVD_DATE),4,2)                    
+                           ||'-'||                                              
+216771                 SUBSTR(DIGITS(D.FIRST_RCVD_DATE),6,2))                   
+                   WHEN D.FIRST_RCVD_DATE = 0 THEN                              
+                        '9999-09-09'                                            
+                   ELSE                                                         
+216771                 DATE('19'||SUBSTR(DIGITS(D.FIRST_RCVD_DATE),2,2)         
+                           ||'-'||                                              
+216771                 SUBSTR(DIGITS(D.FIRST_RCVD_DATE),4,2)                    
+                           ||'-'||                                              
+216771                 SUBSTR(DIGITS(D.FIRST_RCVD_DATE),6,2))                   
+                   END AS FIRST_RCVD_DATE                                       
+                   FROM TUPC B                                                  
+                       ,TSKXREF C                                               
+                       ,TSKST D                                                 
+                   WHERE B.VS_ID = :IM077-VS-ID                                 
+                     AND B.SUB_CL_MDSEAR_ID = :IM077-SUB-CL-MDSEAR-ID           
+                     AND B.UPC_TYP_CDE = 'I'                                    
+                     AND B.EFF_END_DTE IS NULL                                  
+                     AND B.UPC_ID    = C.INTR_UPC_ID                            
+                     AND C.ITM_NBR   = D.ITEM_NMBR                              
+                     AND D.LOC_NBR   = SMALLINT(0)) AS VT1                      
+00564          END-EXEC                                                         
+044800                                                                          
+044900         EVALUATE TRUE                                                    
+045000             WHEN SQLCODE = +0                                            
+                        ADD +1         TO PA-MIN-FIRST-RCVD-CNT                 
+045000             WHEN SQLCODE = +100                                          
+045000             WHEN SQLCODE = -305                                          
+                        CONTINUE                                                
+045200             WHEN SQLCODE = -911                                          
+045300             WHEN SQLCODE = -913                                          
+045400                  ADD 1          TO PV-RETRY-COUNT                        
+045500             WHEN OTHER                                                   
+045600                  MOVE 'D700-GET-MIN-FIRST-RCVD'                         C
+045700                                 TO PV-PARAGRAPH-NAME                CL**1
+045800                  MOVE 'GET MIN FIRST RCVD'                          CL*11
+045900                                 TO PV-DB2-OPERATION-ATTEMPTED       CL**1
+                        PERFORM Z900-SQL-ABEND                                  
+046100         END-EVALUATE                                                     
+046200     END-PERFORM.                                                         
+046300*                                                                         
+046400     IF  PV-RETRY-COUNT > PC-MAXIMUM-RETRY-COUNT                          
+045600         MOVE 'D700-GET-MIN-FIRST-RCVD'                                  C
+046600                                 TO PV-PARAGRAPH-NAME                CL**1
+045800         MOVE 'GET MIN FIRST RCVD'                                   CL*11
+046800                                 TO PV-DB2-OPERATION-ATTEMPTED       CL**1
+               PERFORM Z900-SQL-ABEND                                           
+047000     END-IF.                                                              
+      *CHG0202950-START                                                         
+      ******************************************************************        
+      *     D900-GET-CP-ID.                                                     
+      * ==> PROCESSES:                                                 *        
+      *     -FIND THE MIN FIRST RECEIVED DATE FOR ALL SKUS IN STYLE    *        
+      ******************************************************************        
+       D900-GET-CP-ID.                                                          
+00558          EXEC SQL                                                         
+                    SELECT A.PRD_GP_NBR                                         
+                      INTO :WEBITM-PRD-GP-NBR                                   
+                    FROM TWEBITM A                                              
+                        ,TSKXREF B                                              
+                    WHERE A.INTR_UPC_ID = B.INTR_UPC_ID                         
+                      AND B.SKU = :SA-SKU-NBR                                   
+00564               ORDER BY A.INTR_UPC_ID,A.EFF_BEG_TMST DESC                  
+044800              FETCH FIRST ROW ONLY                                        
+                   WITH UR                                                      
+               END-EXEC                                                         
+                                                                                
+044900         EVALUATE TRUE                                                    
+045000             WHEN SQLCODE = +0                                            
+                        MOVE WEBITM-PRD-GP-NBR TO PV-PRD-GP-NBR                 
+                        MOVE PV-PRD-GP-NBR     TO SA-PRD-GP-NBR                 
+045000             WHEN SQLCODE = +100                                          
+                        MOVE SPACES TO SA-PRD-GP-NBR                            
+045500             WHEN OTHER                                                   
+045600                  MOVE 'D900-GET-CP-ID'                                  C
+045700                                 TO PV-PARAGRAPH-NAME                CL**1
+045800                  MOVE 'GET PRDGRP NBR'                              CL*11
+045900                                 TO PV-DB2-OPERATION-ATTEMPTED       CL**1
+                        PERFORM Z900-SQL-ABEND                                  
+046100         END-EVALUATE.                                                    
+046300*CHG0202950-END                                                           
+       E100-MOVE-TO-HOLDS.                                                      
+           MOVE IM077-DEPT                TO PV-DEPT-NBR.                       
+           MOVE PV-DEPT-NBR               TO PV-HOLD-DEPT.                      
+W39690*    MOVE IM077-CLASS               TO PV-MCL-NBR.                        
+W39690*    MOVE PV-MCL-NBR                TO PV-HOLD-CLASS.                     
+           MOVE IM077-SUBCLASS            TO PV-SCL-NBR.                        
+           MOVE PV-SCL-NBR                TO PV-HOLD-SUBCLASS.                  
+           MOVE IM077-VS-NBR              TO PV-HOLD-VS-NBR.                    
+                                                                                
+           MOVE IM077-UNT-RTL-AMT         TO PV-RETAIL.                         
+           MOVE PV-RETAIL                 TO PV-HOLD-RETAIL.                    
+                                                                                
+           IF PV-MIN-FIRST-RCVD = '9999-09-09'                                  
+W39690*        MOVE 'NONE' TO PV-MIN-FIRST-RCVD                                 
+W39690         MOVE SPACES                TO PV-MIN-FIRST-RCVD                  
+           END-IF.                                                              
+           MOVE PV-MIN-FIRST-RCVD         TO PV-HOLD-FIRST-RCVD-DATE.           
+           MOVE IM077-PRCHG-ID            TO PV-DOC-NBR-10-COMP.                
+           MOVE PV-DOC-NBR-10-COMP        TO PV-DOC-NBR.                        
+           MOVE PV-DOC-NBR                TO PV-HOLD-PRCHG-ID.                  
+           MOVE IM077-PRCHG-EFF-DTE       TO PV-HOLD-PRCHG-DATE.                
+           PERFORM D300-SELECT-BUYER-NAME.                                      
+                                                                                
+      ******************************************************************        
+      *     F100-PRINT-DETAIL                                          *        
+      * ==> PROCESSES:                                                 *        
+      *     - WRITES THE DETAIL LINES FOR THE REPORT                   *        
+      * ==> PERFORMED FROM:  B200-WRITE-REPORT                         *        
+      ******************************************************************        
+       F100-PRINT-DETAIL.                                                       
+           IF PV-HOLD-RETAIL > +0                                               
+W39690         MOVE PV-HOLD-DIVISN-NUM     TO SA-DIVISN-NBR                     
+               MOVE PV-HOLD-BUYER-NUM      TO SA-BUYER-NBR                      
+               MOVE PV-HOLD-BUYER-NAME     TO SA-BUYER-LAST-NAME                
+               MOVE PV-HOLD-DEPT           TO SA-DEPT-NBR                       
+W39690*        MOVE PV-HOLD-CLASS          TO SA-MCL-NBR                        
+               MOVE PV-HOLD-SUBCLASS       TO SA-SCL-NBR                        
+               MOVE PV-HOLD-VS-NBR         TO SA-VS-NBR                         
+W39690         MOVE PV-HOLD-SKU-NBR        TO SA-SKU-NBR                        
+               MOVE PV-HOLD-RETAIL         TO SA-RETAIL                         
+W39690         MOVE PV-HOLD-ASTER-COST     TO SA-ASTERISK-COST                  
+W39690         MOVE PV-HOLD-COST           TO SA-COST                           
+               MOVE PV-HOLD-FIRST-RCVD-DATE TO SA-FIRST-RCVD-DATE               
+W39690         MOVE PV-HOLD-CREATE-DATE    TO SA-CREATE-DATE                    
+               MOVE PV-HOLD-PRCHG-ID       TO SA-PERM-DOC-NBR                   
+               MOVE PV-HOLD-PRCHG-DATE     TO SA-PERM-EFF-DTE                   
+W39690         MOVE PV-HOLD-BRAND          TO SA-BRAND                          
+W39690         MOVE PV-HOLD-VS-DESC        TO SA-VS-DESC                        
+W39690         MOVE PV-HOLD-WEB-XLUSIVE    TO SA-WEB-XCLUSIVE                   
+      **CHG0202950-START                                                        
+             IF SA-SKU-NBR = SPACES                                             
+               MOVE SPACES                 TO SA-PRD-GP-NBR                     
+             ELSE                                                               
+               PERFORM D900-GET-CP-ID                                           
+             END-IF                                                             
+      **CHG0202950-END                                                          
+               WRITE REPORT-RECORD FROM SA-REC-OUT AFTER 1                      
+               ADD 1                  TO PA-REPORT-RECORDS-WRITTEN              
+               MOVE SPACE                  TO SA-ASTERISK                       
+           END-IF.                                                              
+      ******************************************************************        
+      *     Z900-SQL-ABEND                                             *        
+      * ==> PROCESSES:                                                 *        
+      *     -PERFORMS ABEND PROCESSING FOR SQL ERRORS.                 *        
+      * ==> PERFORMED FROM:                                            *        
+      ******************************************************************        
+       Z900-SQL-ABEND.                                                          
+                                                                                
+           DISPLAY 'Z900-SQL-ABEND'.                                            
+           DISPLAY '**  ABEND     **'.                                          
+           DISPLAY '**  PROGRAM   ** = ' PC-PROGRAM-NAME.                       
+           DISPLAY '**  PARAGRAPH ** = ' PV-PARAGRAPH-NAME.                     
+           DISPLAY '**  OPERATION ** = ' PV-DB2-OPERATION-ATTEMPTED.            
+           DISPLAY 'RECS READ      :       '  PA-RECS-READ-CNT.                 
+           DISPLAY 'BUYER SELECTS  :       '  PA-BYR-SELECT-CNT.                
+W39690     DISPLAY 'SKU SELECTS    :       '  PA-SKU-SELECT-CNT.                
+W39690     DISPLAY 'COST SELECTS   :       '  PA-COST-SELECT-CNT.               
+W39690     DISPLAY 'STYLE BRAND SELECTS:   '  PA-STYLE-BRAND-CNT.               
+           DISPLAY '1ST RCVD SELECTS:      '  PA-MIN-FIRST-RCVD-CNT.            
+           DISPLAY 'RECS WRITTEN    :      '  PA-REPORT-RECORDS-WRITTEN.        
+W39690*    DISPLAY 'WEB EXCLV CKS   :      '  PA-WEB-SELECT-CNT.                
+           DISPLAY 'PERM CKS        :      '  PA-PERM-SELECT-CNT.               
+                                                                                
+      ******************************************************************        
+      * THIS COPY BOOK MEMBER CONTAINS THE PROCEDURE DIVISION STATE-   *        
+      * MENTS THAT ARE REQUIRED TO UTILIZE THE DB2 ABEND MODULE        *        
+      * 'DSNTIAR' AND CONVERT THE SQLCA INFORMATION INTO A READABLE    *        
+      * FORMAT.                                                        *        
+      ******************************************************************        
+           COPY DPPD004.                                                        
+                                                                                
+           MOVE +4013                    TO ABEND-CODE.                         
+           CALL 'ILBOABN0' USING ABEND-CODE.                                    
+                                                                                
+       9999-ABEND.                                                      07730094
+      ******************************************************************07740094
+      * ABEND ROUTINE MISC ERRORS                                      *07750094
+      ******************************************************************07760094
+           DISPLAY '** PROGRAM **        = ' PC-PROGRAM-NAME.           07770094
+           DISPLAY '** PARAGRAPH **      = ' PV-PARAGRAPH-NAME.         07780094
+           CALL 'ILBOABN0' USING ABEND-CODE.                            07800094
