@@ -47,6 +47,7 @@ import io.proleap.cobol.preprocessor.impl.CobolPreprocessorImpl;
 public class CobolParserRunnerImpl implements CobolParserRunner {
 
 	private final static Logger LOG = LoggerFactory.getLogger(CobolParserRunnerImpl.class);
+	public String preprocessedInput;
 
 	protected void analyze(final Program program) {
 		analyzeProgramUnits(program);
@@ -195,6 +196,7 @@ public class CobolParserRunnerImpl implements CobolParserRunner {
 
 			// preprocess input stream
 			final String preProcessedInput = new CobolPreprocessorImpl().process(cobolFile, params);
+			this.preprocessedInput = preProcessedInput;
 
 			parsePreprocessInput(preProcessedInput, compilationUnitName, program, params);
 		}
